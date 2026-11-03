@@ -6,7 +6,7 @@
     <ScrollView android:layout_width="match_parent" android:layout_height="match_parent" android:scrollbars="none">
         <LinearLayout android:id="@+id/list_rows"
             android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:orientation="vertical" android:paddingTop="84dp" android:paddingBottom="48dp"/>
+            android:orientation="vertical" android:paddingTop="76dp" android:paddingBottom="88dp"/>
     </ScrollView>
 
     <TextView android:id="@+id/list_empty"

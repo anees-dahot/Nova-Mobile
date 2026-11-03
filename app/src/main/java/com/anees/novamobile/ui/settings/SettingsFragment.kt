@@ -188,9 +188,9 @@ class SettingsFragment : Fragment(), TabPage {
     private fun header(text: String) {
         val dp = resources.displayMetrics.density
         list.addView(TextView(requireContext()).apply {
-            this.text = text.uppercase()
+            this.text = text
             textSize = 11f
-            letterSpacing = 0.08f
+            textSize = 15f; setTextColor(0xB3FFFFFF.toInt())
             setTextColor(0x80FFFFFF.toInt())
             setPadding((16 * dp).toInt(), (22 * dp).toInt(), 0, (6 * dp).toInt())
         })

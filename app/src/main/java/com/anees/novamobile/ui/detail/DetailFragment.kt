@@ -144,8 +144,16 @@ class DetailFragment : Fragment() {
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun download(items: List<com.anees.novamobile.download.DownloadStarter.Item>) {
-        (activity as? com.anees.novamobile.MainActivity)?.ensureNotificationPermission()
-        com.anees.novamobile.download.DownloadStarter.enqueue(requireContext(), items)
+        val main = activity as? com.anees.novamobile.MainActivity ?: return
+        main.ensureNotificationPermission()
+        val added = com.anees.novamobile.download.DownloadStarter.enqueue(requireContext(), items)
+        val what = items.firstOrNull()?.let { if (it.card.type == MediaType.MOVIE) it.card.title else "${it.card.title} · S${it.season} E${it.episode}" } ?: ""
+        when {
+            added == 0 -> main.showBanner("Already in your downloads", "View") { main.openDownloads() }
+            added == 1 -> main.showBanner("Downloading $what", "View") { main.openDownloads() }
+            else -> main.showBanner("Downloading $added episodes of ${card.title}", "View") { main.openDownloads() }
+        }
+        view?.let { setupDownloads(it) }
     }
 
     private fun setupDownloads(view: View) {

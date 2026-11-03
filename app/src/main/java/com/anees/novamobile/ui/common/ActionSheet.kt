@@ -65,9 +65,9 @@ object ActionSheet {
         items.forEach { item ->
             if (item.header) {
                 column.addView(TextView(ctx).apply {
-                    text = item.label.uppercase()
+                    text = item.label
                     textSize = 11f
-                    letterSpacing = 0.08f
+                    textSize = 13f
                     setTextColor(0x80FFFFFF.toInt())
                     setPadding(px(6), px(14), 0, px(6))
                 }, LinearLayout.LayoutParams(sheetW, ViewGroup.LayoutParams.WRAP_CONTENT))

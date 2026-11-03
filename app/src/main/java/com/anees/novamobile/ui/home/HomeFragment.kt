@@ -180,9 +180,10 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
     private fun updateHero(card: MediaCard) {
         val v = heroView ?: return
         v.findViewById<ImageView>(R.id.hero_image).load(card.posterUrl?.replace("/w342", "/w780") ?: card.backdropUrl) { crossfade(350) }
-        v.findViewById<TextView>(R.id.hero_kind).text = when (card.type) { MediaType.MOVIE -> "MOVIE"; MediaType.SERIES -> "SERIES"; MediaType.ANIME -> "ANIME" }
+        v.findViewById<TextView>(R.id.hero_kind).visibility = View.GONE
         v.findViewById<TextView>(R.id.hero_title).text = card.title
         v.findViewById<TextView>(R.id.hero_meta).text = listOfNotNull(
+            when (card.type) { MediaType.MOVIE -> "Movie"; MediaType.SERIES -> "Series"; MediaType.ANIME -> "Anime" },
             card.year.ifEmpty { null },
             card.rating.takeIf { it > 0 }?.let { "★ ${"%.1f".format(it)}" },
             card.genres.ifEmpty { null },

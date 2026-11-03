@@ -77,7 +77,7 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.btn_search).setOnClickListener { switchTab(SEARCH) }
         findViewById<View>(R.id.btn_settings).setOnClickListener { openOverlay(SettingsFragment()) }
         findViewById<View>(R.id.btn_downloads).setOnClickListener { openDownloads() }
-        findViewById<View>(R.id.btn_calendar).setOnClickListener { openOverlay(com.anees.novamobile.ui.calendar.CalendarFragment()) }
+        findViewById<View>(R.id.btn_calendar).visibility = View.GONE   // calendar paused for now
         // Rebuild new-episode reminders in the background
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { kotlinx.coroutines.delay(10_000); runCatching { com.anees.novamobile.calendar.AiringCalendar.reschedule(this@MainActivity) } }
         handlePlayIntent(intent)
@@ -127,6 +127,46 @@ class MainActivity : AppCompatActivity() {
         if (intent.getStringExtra("open") == "downloads") openDownloads()
         handlePlayIntent(intent)
         intent.data?.let { if (com.anees.novamobile.sync.Sync.handleRedirect(this, it)) android.widget.Toast.makeText(this, "Account connected", android.widget.Toast.LENGTH_SHORT).show() }
+    }
+
+    // ── Banner: "Downloading Frieren · S1 E1   View" (Apple-style toast that slides up) ──
+
+    private var banner: View? = null
+    private val hideBanner = Runnable { banner?.let { b -> b.animate().translationY(b.height * 1.5f).alpha(0f).setDuration(220).withEndAction { b.visibility = View.GONE }.start() } }
+
+    fun showBanner(message: String, action: String? = null, onAction: (() -> Unit)? = null) {
+        val dp = resources.displayMetrics.density
+        val b = banner ?: LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.pill_glass)
+            elevation = 12 * dp
+            setPadding((18 * dp).toInt(), (12 * dp).toInt(), (8 * dp).toInt(), (12 * dp).toInt())
+            addView(ImageView(context).apply { id = 1; setImageResource(R.drawable.ic_download) }, LinearLayout.LayoutParams((20 * dp).toInt(), (20 * dp).toInt()))
+            addView(TextView(context).apply { id = 2; textSize = 14f; setTextColor(0xFFFFFFFF.toInt()); setPadding((10 * dp).toInt(), 0, (8 * dp).toInt(), 0); maxLines = 2 },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(TextView(context).apply {
+                id = 3; textSize = 14f; setTextColor(0xFF0A84FF.toInt()); typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
+            })
+            (findViewById<View>(R.id.main_content).parent as android.widget.FrameLayout).addView(this,
+                android.widget.FrameLayout.LayoutParams(android.widget.FrameLayout.LayoutParams.MATCH_PARENT, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
+                    setMargins((12 * dp).toInt(), 0, (12 * dp).toInt(), (72 * dp).toInt())
+                })
+            banner = this
+        }
+        b.findViewById<TextView>(2).text = message
+        b.findViewById<TextView>(3).apply {
+            text = action ?: ""; visibility = if (action == null) View.GONE else View.VISIBLE
+            setOnClickListener { handler.removeCallbacks(hideBanner); hideBanner.run(); onAction?.invoke() }
+        }
+        handler.removeCallbacks(hideBanner)
+        b.visibility = View.VISIBLE
+        b.post {
+            // Slides up from below, critically damped (no bounce), like an iOS banner
+            b.translationY = b.height * 1.5f; b.alpha = 0f
+            b.animate().translationY(0f).alpha(1f).setDuration(280).setInterpolator(android.view.animation.DecelerateInterpolator(2f)).start()
+        }
+        handler.postDelayed(hideBanner, 4500)
     }
 
     /** "S2 E5 is out — tap to play" notification. */

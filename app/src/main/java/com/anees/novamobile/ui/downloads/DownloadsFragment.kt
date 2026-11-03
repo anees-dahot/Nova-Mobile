@@ -47,7 +47,6 @@ class DownloadsFragment : Fragment() {
     private lateinit var empty: View
     private val tick = Handler(Looper.getMainLooper())
     private val refresher = object : Runnable { override fun run() { load(); tick.postDelayed(this, 1000) } }
-    private var lastBytes = HashMap<String, Pair<Long, Long>>()   // id → (bytes, time) for speed
 
     override fun onCreateView(inflater: LayoutInflater, c: ViewGroup?, s: Bundle?): View {
         val ctx = requireContext()
@@ -101,7 +100,7 @@ class DownloadsFragment : Fragment() {
         val unresolved = LocalStore.unresolved()
         val pending = LocalStore.pendingDownloads()
         if (active.isNotEmpty() || unresolved.isNotEmpty() || pending.isNotEmpty()) {
-            rows += Row.Header("In Progress")
+            rows += Row.Header("Downloading")
             active.forEach { rows += Row.Dl(it, DownloadMeta.of(it)) }
             pending.forEach { rows += Row.Unresolved(it.copy(skipProvider = "__pending__")) }
             unresolved.forEach { rows += Row.Unresolved(it) }
@@ -136,15 +135,9 @@ class DownloadsFragment : Fragment() {
         val size = Formatter.formatShortFileSize(ctx, d.bytesDownloaded)
         return ep + when (d.state) {
             Download.STATE_COMPLETED -> size
-            Download.STATE_DOWNLOADING -> {
-                val now = System.currentTimeMillis()
-                val prev = lastBytes[d.request.id]
-                lastBytes[d.request.id] = d.bytesDownloaded to now
-                val speed = prev?.let { (b, t) -> if (now > t) (d.bytesDownloaded - b) * 1000 / (now - t) else 0 } ?: 0
-                "${d.percentDownloaded.toInt().coerceAtLeast(0)}%  ·  " + (if (speed > 0) "${Formatter.formatShortFileSize(ctx, speed)}/s" else size)
-            }
-            Download.STATE_QUEUED -> if (d.stopReason != Download.STOP_REASON_NONE) "Paused" else "Waiting…"
-            Download.STATE_STOPPED -> "Paused  ·  $size"
+            Download.STATE_DOWNLOADING -> com.anees.novamobile.download.DlStats.line(ctx, d)
+            Download.STATE_QUEUED -> if (d.stopReason != Download.STOP_REASON_NONE) "Paused" else "Waiting to start…"
+            Download.STATE_STOPPED -> "Paused  ·  ${com.anees.novamobile.download.DlStats.progress(ctx, d)}"
             Download.STATE_FAILED -> "Failed — tap to retry"
             Download.STATE_RESTARTING -> "Restarting…"
             else -> ""
@@ -158,7 +151,7 @@ class DownloadsFragment : Fragment() {
         override fun onCreateViewHolder(parent: ViewGroup, type: Int): RecyclerView.ViewHolder {
             val dp = parent.resources.displayMetrics.density
             if (type == 0) return object : RecyclerView.ViewHolder(TextView(parent.context).apply {
-                textSize = 13f; setTextColor(0x99FFFFFF.toInt()); isAllCaps = true; letterSpacing = 0.06f
+                textSize = 17f; setTextColor(0xFFFFFFFF.toInt()); typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL); letterSpacing = -0.01f
                 setPadding((16 * dp).toInt(), (18 * dp).toInt(), (16 * dp).toInt(), (6 * dp).toInt())
             }) {}
             val v = LayoutInflater.from(parent.context).inflate(R.layout.item_download, parent, false)
@@ -216,7 +209,7 @@ class DownloadsFragment : Fragment() {
                     val retry = View.OnClickListener {
                         if (!pending) {
                             LocalStore.saveUnresolved(LocalStore.unresolved() - i)
-                            DownloadStarter.enqueue(ctx, listOf(i))
+                            DownloadStarter.enqueue(ctx, listOf(i)); load()
                         }
                     }
                     ring.setOnClickListener(retry); v.setOnClickListener(retry)

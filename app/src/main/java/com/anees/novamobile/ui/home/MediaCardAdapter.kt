@@ -77,14 +77,15 @@ class MediaCardAdapter(
             if (card.year.isNotEmpty()) append(card.year)
             if (card.rating > 0) append("  ★ ${"%.1f".format(card.rating)}")
         }
-        holder.badge.visibility = if (wide) View.GONE else View.VISIBLE
         val fresh = isNew(card.released)
-        holder.badge.text = if (fresh) "NEW" else when (card.type) { MediaType.MOVIE -> "MOVIE"; MediaType.SERIES -> "SERIES"; MediaType.ANIME -> "ANIME" }
+        // No type chips on posters (Apple style); only a quiet "New" when it's recent
+        holder.badge.text = "New"
+        holder.badge.visibility = if (!wide && fresh) View.VISIBLE else View.GONE
         holder.badge.setBackgroundResource(if (fresh) R.drawable.badge_new else R.drawable.badge_pill)
         holder.rank.visibility = if (ranked) View.VISIBLE else View.GONE
         holder.rank.text = (position + 1).toString()
         val tag = LangTags.label(card, LocalStore.audioLangs("${card.type}:${card.id}"))
-        holder.lang.text = tag?.uppercase()
+        holder.lang.text = tag
         holder.lang.visibility = if (tag != null && progress == null && !ranked) View.VISIBLE else View.GONE
         val p = progress?.getOrNull(position)
         holder.bar.visibility = if (p != null && p > 0f) View.VISIBLE else View.GONE

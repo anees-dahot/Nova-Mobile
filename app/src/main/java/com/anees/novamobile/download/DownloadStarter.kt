@@ -48,16 +48,17 @@ object DownloadStarter {
     data class Item(val card: MediaCard, val season: Int, val episode: Int, val refreshOf: String? = null, val skipProvider: String? = null)
 
     /** Single or bulk. Already downloaded / queued episodes are skipped. */
-    fun enqueue(ctx: Context, items: List<Item>) {
+    /** Returns how many were added (0 = everything was already downloaded or queued). */
+    fun enqueue(ctx: Context, items: List<Item>): Int {
         val app = ctx.applicationContext
         val fresh = items.filter { i ->
             val d = NovaDownloads.get(app, DownloadMeta.id(i.card, i.season, i.episode))
             i.refreshOf != null || d == null || d.state == Download.STATE_FAILED
         }
-        if (fresh.isEmpty()) { Toast.makeText(app, "Already downloaded", Toast.LENGTH_SHORT).show(); return }
+        if (fresh.isEmpty()) return 0
         LocalStore.savePendingDownloads(LocalStore.pendingDownloads() + fresh)
-        Toast.makeText(app, if (fresh.size == 1) "Download added" else "${fresh.size} episodes added to downloads", Toast.LENGTH_SHORT).show()
         resume(app)
+        return fresh.size
     }
 
     /** Called at app start and after enqueue: resolve whatever is still pending. */

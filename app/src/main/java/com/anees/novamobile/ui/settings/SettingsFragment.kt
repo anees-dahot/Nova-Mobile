@@ -67,6 +67,13 @@ class SettingsFragment : Fragment(), TabPage {
         header("Video")
         row("Low-CPU Playback", if (s.lowCpuMode) "On" else "Off") { save(s.copy(lowCpuMode = !s.lowCpuMode)) }
         note("Low-CPU Playback uses the phone's video chip directly (smoother, less battery) but some streams may not start — turn it off if that happens.")
+        header("New Episodes")
+        row("Calendar", "") { (activity as? com.anees.novamobile.MainActivity)?.let { it.supportFragmentManager.beginTransaction()
+            .add(R.id.detail_container, com.anees.novamobile.ui.calendar.CalendarFragment()).addToBackStack(null).commit() } }
+        row("New Episode Alerts", if (s.newEpisodeAlerts) "On" else "Off") {
+            save(s.copy(newEpisodeAlerts = !s.newEpisodeAlerts))
+            viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { runCatching { com.anees.novamobile.calendar.AiringCalendar.reschedule(requireContext().applicationContext) } }
+        }
         header("Accounts")
         com.anees.novamobile.sync.Sync.services.forEach { svc ->
             val state = when { !svc.configured -> "Not set up"; svc.loggedIn() -> "Connected"; else -> "Connect" }

@@ -20,7 +20,8 @@ data class Settings(
     val dlQuality: Int = 1,                // 0 480p, 1 720p, 2 1080p
     val dlWifiOnly: Boolean = false,
     val dlParallel: Int = 2,
-    val dlAutoDeleteWatched: Boolean = false
+    val dlAutoDeleteWatched: Boolean = false,
+    val newEpisodeAlerts: Boolean = true
 )
 
 object LocalStore {
@@ -122,6 +123,14 @@ object LocalStore {
         if (progress >= (m[k] ?: 0f) || progress >= 0.9f || (m[k] ?: 0f) < 0.9f) m[k] = progress   // once watched, stays watched
         prefs.edit().putString("epp_$showKey", gson.toJson(m)).apply()
     }
+
+    // ── Airing calendar ───────────────────────────────────────────────────────
+
+    fun airingCache(): List<com.anees.novamobile.calendar.AiringEp> =
+        read("airing_cache", object : TypeToken<List<com.anees.novamobile.calendar.AiringEp>>() {})
+    fun saveAiringCache(eps: List<com.anees.novamobile.calendar.AiringEp>) = write("airing_cache", eps)
+    fun scheduledReminders(): List<Int> = read("airing_ids", object : TypeToken<List<Int>>() {})
+    fun saveScheduledReminders(ids: List<Int>) = write("airing_ids", ids)
 
     // ── Account sync ──────────────────────────────────────────────────────────
 

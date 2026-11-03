@@ -53,6 +53,14 @@
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- New-episode alerts + daily rebuild + reboot -->
+        <receiver android:name=".calendar.AiringReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Downloads keep running with the app closed -->
         <service
             android:name=".download.NovaDownloadService"

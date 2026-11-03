@@ -19,3 +19,4 @@
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
 -keep class com.anees.novamobile.sync.Sync$Pending { *; }
+-keep class com.anees.novamobile.calendar.AiringEp { *; }

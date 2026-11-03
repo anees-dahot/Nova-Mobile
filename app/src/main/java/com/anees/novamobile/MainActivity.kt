@@ -11,6 +11,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import com.anees.novamobile.data.model.MediaCard
 import com.anees.novamobile.ui.common.TabPage
 import com.anees.novamobile.ui.detail.DetailFragment
@@ -76,6 +77,10 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.btn_search).setOnClickListener { switchTab(SEARCH) }
         findViewById<View>(R.id.btn_settings).setOnClickListener { openOverlay(SettingsFragment()) }
         findViewById<View>(R.id.btn_downloads).setOnClickListener { openDownloads() }
+        findViewById<View>(R.id.btn_calendar).setOnClickListener { openOverlay(com.anees.novamobile.ui.calendar.CalendarFragment()) }
+        // Rebuild new-episode reminders in the background
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { kotlinx.coroutines.delay(10_000); runCatching { com.anees.novamobile.calendar.AiringCalendar.reschedule(this@MainActivity) } }
+        handlePlayIntent(intent)
         // Downloads: start the manager (restores the queue) and finish resolving any pending items
         com.anees.novamobile.download.NovaDownloads.manager(this)
         handler.postDelayed({ com.anees.novamobile.download.DownloadStarter.resume(this) }, 3000)
@@ -120,7 +125,16 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         if (intent.getStringExtra("open") == "downloads") openDownloads()
+        handlePlayIntent(intent)
         intent.data?.let { if (com.anees.novamobile.sync.Sync.handleRedirect(this, it)) android.widget.Toast.makeText(this, "Account connected", android.widget.Toast.LENGTH_SHORT).show() }
+    }
+
+    /** "S2 E5 is out — tap to play" notification. */
+    private fun handlePlayIntent(i: android.content.Intent?) {
+        val json = i?.getStringExtra("play_card") ?: return
+        i.removeExtra("play_card")
+        val card = runCatching { com.google.gson.Gson().fromJson(json, MediaCard::class.java) }.getOrNull() ?: return
+        com.anees.novamobile.ui.player.PlayerActivity.launch(this, card, i.getIntExtra("play_s", 1), i.getIntExtra("play_e", 1))
     }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)

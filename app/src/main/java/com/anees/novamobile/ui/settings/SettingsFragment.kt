@@ -67,6 +67,13 @@ class SettingsFragment : Fragment(), TabPage {
         header("Video")
         row("Low-CPU Playback", if (s.lowCpuMode) "On" else "Off") { save(s.copy(lowCpuMode = !s.lowCpuMode)) }
         note("Low-CPU Playback uses the phone's video chip directly (smoother, less battery) but some streams may not start — turn it off if that happens.")
+        header("Downloads")
+        row("Downloads", "") { (activity as? com.anees.novamobile.MainActivity)?.openDownloads() }
+        val qualities = listOf("480p (smaller)", "720p", "1080p (best)")
+        row("Download Quality", qualities[s.dlQuality].substringBefore(" ")) { pick("Download Quality", qualities, s.dlQuality) { saveDl(s.copy(dlQuality = it)) } }
+        row("Wi-Fi Only", if (s.dlWifiOnly) "On" else "Off") { saveDl(s.copy(dlWifiOnly = !s.dlWifiOnly)) }
+        row("Downloads at Once", s.dlParallel.toString()) { pick("Downloads at Once", listOf("1", "2", "3"), s.dlParallel - 1) { saveDl(s.copy(dlParallel = it + 1)) } }
+        row("Delete After Watching", if (s.dlAutoDeleteWatched) "On" else "Off") { save(s.copy(dlAutoDeleteWatched = !s.dlAutoDeleteWatched)) }
         header("Streaming")
         row("Sources", "${com.anees.novamobile.ui.player.StreamExtractor.PROVIDERS.size} active") { showSources() }
         header("Library")
@@ -112,6 +119,12 @@ class SettingsFragment : Fragment(), TabPage {
             }
             if (isAdded) ActionSheet.show(requireContext(), "Test results", results.map { ActionSheet.Item(it) })
         }
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun saveDl(s: Settings) {
+        save(s)
+        com.anees.novamobile.download.NovaDownloads.applySettings(requireContext())
     }
 
     private fun save(s: Settings) {

@@ -44,6 +44,10 @@ object SubtitleCleaner {
             else spec.withUri(Uri.fromFile(clean(ctx, spec.uri.getQueryParameter("u") ?: "", client, headers)))
         }
 
+    /** For downloads: clean a subtitle file and copy it next to the video. */
+    fun saveTo(ctx: Context, url: String, client: OkHttpClient, headers: Map<String, String>, out: File): Boolean =
+        runCatching { clean(ctx, url, client, headers).copyTo(out, overwrite = true); out.length() > 20 }.getOrDefault(false)
+
     private fun clean(ctx: Context, url: String, client: OkHttpClient, headers: Map<String, String>): File {
         val dir = File(ctx.cacheDir, "subs").apply { mkdirs() }
         val out = File(dir, "${url.hashCode()}.${if (url.lowercase().contains(".srt")) "srt" else "vtt"}")

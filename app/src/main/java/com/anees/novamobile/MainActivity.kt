@@ -75,6 +75,11 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<View>(R.id.btn_search).setOnClickListener { switchTab(SEARCH) }
         findViewById<View>(R.id.btn_settings).setOnClickListener { openOverlay(SettingsFragment()) }
+        findViewById<View>(R.id.btn_downloads).setOnClickListener { openDownloads() }
+        // Downloads: start the manager (restores the queue) and finish resolving any pending items
+        com.anees.novamobile.download.NovaDownloads.manager(this)
+        handler.postDelayed({ com.anees.novamobile.download.DownloadStarter.resume(this) }, 3000)
+        if (intent?.getStringExtra("open") == "downloads") handler.post { openDownloads() }
 
         (0..tabs.size).forEach { i -> fragments[i] = supportFragmentManager.findFragmentByTag("tab_$i") }
         val visible = fragments.indexOfFirst { it != null && !it.isHidden }
@@ -108,6 +113,21 @@ class MainActivity : AppCompatActivity() {
         switchTab(SEARCH)
         supportFragmentManager.executePendingTransactions()
         (fragments[SEARCH] as? SearchFragment)?.startVoice()
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        if (intent.getStringExtra("open") == "downloads") openDownloads()
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    fun openDownloads() = openOverlay(com.anees.novamobile.ui.downloads.DownloadsFragment())
+
+    /** Android 13+: ask once, at the moment it matters (first download), for progress notifications. */
+    fun ensureNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 7)
     }
 
     fun openDetail(card: MediaCard) {

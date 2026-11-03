@@ -46,6 +46,11 @@
                         android:layout_marginStart="10dp" android:text="▶  Trailer"
                         android:textAllCaps="false" android:textColor="@color/nova_white"
                         android:background="@drawable/btn_secondary" android:textSize="14sp"/>
+                    <Button android:id="@+id/detail_download"
+                        android:layout_width="0dp" android:layout_weight="1" android:layout_height="42dp"
+                        android:layout_marginStart="10dp" android:text="⬇  Download"
+                        android:textAllCaps="false" android:textColor="@color/nova_white"
+                        android:background="@drawable/btn_secondary" android:textSize="14sp"/>
                 </LinearLayout>
 
                 <TextView android:id="@+id/detail_overview"
@@ -62,6 +67,12 @@
                     <LinearLayout android:id="@+id/season_chips"
                         android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal"/>
                 </HorizontalScrollView>
+                <TextView android:id="@+id/download_season"
+                    android:layout_width="wrap_content" android:layout_height="34dp"
+                    android:layout_marginStart="16dp" android:layout_marginTop="10dp"
+                    android:gravity="center" android:paddingStart="14dp" android:paddingEnd="14dp"
+                    android:background="@drawable/btn_secondary" android:text="⬇  Download Season"
+                    android:textColor="@color/nova_white" android:textSize="13sp"/>
                 <androidx.recyclerview.widget.RecyclerView android:id="@+id/episode_list"
                     android:layout_width="match_parent" android:layout_height="wrap_content"
                     android:layout_marginTop="8dp" android:nestedScrollingEnabled="false"/>

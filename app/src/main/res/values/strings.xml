@@ -18,4 +18,5 @@
     <string name="audio_track">Audio Track</string>
     <string name="subtitles">Subtitles</string>
     <string name="off">Off</string>
+    <string name="downloads_channel">Downloads</string>
 </resources>

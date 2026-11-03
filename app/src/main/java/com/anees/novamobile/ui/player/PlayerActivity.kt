@@ -97,6 +97,7 @@ class PlayerActivity : AppCompatActivity() {
     private var current: WebStreamSniffer.Sniffed? = null
     private var bypassedProxy = false
     private var proxyLastResort: WebStreamSniffer.Sniffed? = null
+    private var offlineItem: MediaItem? = null
     private var sleepJob: Job? = null
     private var sleepAt = 0L              // elapsedRealtime when the timer fires, 0 = off
     private var sleepAtEnd = false        // stop when this episode ends
@@ -207,7 +208,11 @@ class PlayerActivity : AppCompatActivity() {
             ), onDismiss = { if (awaitingResumeChoice) onResumeChoice(resumeMs) })
         }
 
+        offlineItem = null
         streamJob?.cancel()
+        // Downloaded? Play the saved copy: no search, works offline
+        val dl = com.anees.novamobile.download.NovaDownloads.get(this, com.anees.novamobile.download.DownloadMeta.id(card, s, e))
+        if (dl?.state == androidx.media3.exoplayer.offline.Download.STATE_COMPLETED) { playOffline(dl); return }
         streamJob = lifecycleScope.launch {
             showStatus("Finding ${title()}…")
             // Family-safe check runs alongside the stream search instead of before it
@@ -283,6 +288,22 @@ class PlayerActivity : AppCompatActivity() {
         return true
     }
 
+    /** Saved download: same player and track rules, data from the download store, subtitles from disk. */
+    private fun playOffline(d: androidx.media3.exoplayer.offline.Download) {
+        val meta = com.anees.novamobile.download.DownloadMeta.of(d)
+        val subs = meta?.subtitle?.let { java.io.File(it) }?.takeIf { it.exists() }?.let {
+            listOf(MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(it)).setMimeType(MimeTypes.TEXT_VTT)
+                .setLanguage("en").setLabel("English").build())
+        } ?: emptyList()
+        offlineItem = d.request.toMediaItem().buildUpon()
+            .setSubtitleConfigurations(subs)
+            .setMediaMetadata(MediaMetadata.Builder().setTitle(title()).build())
+            .build()
+        Log.i(TAG, "offline: playing saved download")
+        lifecycleScope.launch { runCatching { target = StreamExtractor.resolveTarget(card, season, episode, repo); loadExtras() } }
+        play(WebStreamSniffer.Sniffed(d.request.uri.toString(), emptyMap(), "", emptyList()), bypassProxy = false)
+    }
+
     /** "…/api/robot-proxy?url=https://origin/…" → "origin". */
     private fun originHost(url: String): String? =
         runCatching { Uri.parse(Uri.parse(url).getQueryParameter("url")).host }.getOrNull()
@@ -321,6 +342,7 @@ class PlayerActivity : AppCompatActivity() {
      * try the next multi-audio source once, from the same position. If none has it, remember that.
      */
     private fun huntDub(want: String) {
+        if (offlineItem != null) return   // a saved download stays offline: pick from its own audio only
         val current = providers.getOrNull(providerIndex) ?: return
         dubTried += current.name
         if (LocalStore.noDub(key(), want)) return
@@ -410,7 +432,8 @@ class PlayerActivity : AppCompatActivity() {
             .dns(object : Dns { override fun lookup(hostname: String) = Dns.SYSTEM.lookup(hostname).sortedBy { if ((it is Inet6Address) == preferV6) 0 else 1 } })
             .build()
         val http = OkHttpDataSource.Factory(client).setUserAgent(s.userAgent).setDefaultRequestProperties(s.headers)
-        val dataSource = SubtitleCleaner.factory(this, http, client, s.headers + ("User-Agent" to s.userAgent), bypassedProxy)
+        val dataSource = if (offlineItem != null) com.anees.novamobile.download.NovaDownloads.playbackFactory(this)
+            else SubtitleCleaner.factory(this, http, client, s.headers + ("User-Agent" to s.userAgent), bypassedProxy)
 
         val subs = s.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(8).mapIndexed { i, url ->
             MediaItem.SubtitleConfiguration.Builder(SubtitleCleaner.wrap(url))
@@ -425,6 +448,7 @@ class PlayerActivity : AppCompatActivity() {
             .setSubtitleConfigurations(subs)
             .setMediaMetadata(MediaMetadata.Builder().setTitle(title()).build())
             .build()
+            .let { offlineItem ?: it }
 
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(15_000, 30_000, 1_000, 3_000)   // start after 1s of video
@@ -513,7 +537,7 @@ class PlayerActivity : AppCompatActivity() {
         readyTimeout?.cancel()
         readyTimeout = lifecycleScope.launch { delay(25_000); if (exo.playbackState != Player.STATE_READY) fallback("not ready in 25s") }
         startTicker()
-        Log.i(TAG, "playing via ${providers.getOrNull(providerIndex)?.name}, subs=${subs.size}")
+        Log.i(TAG, if (offlineItem != null) "playing saved download" else "playing via ${providers.getOrNull(providerIndex)?.name}, subs=${subs.size}")
     }
 
     /** Audio language from Settings (or what was picked for this title), subtitles, 1080p cap, low-CPU mode. */
@@ -701,6 +725,11 @@ class PlayerActivity : AppCompatActivity() {
     private fun saveProgress() {
         val p = player ?: return
         if (p.duration <= 0) return
+        if (offlineItem != null && settings.dlAutoDeleteWatched && p.currentPosition > p.duration * 0.95) {
+            androidx.media3.exoplayer.offline.DownloadService.sendRemoveDownload(this,
+                com.anees.novamobile.download.NovaDownloadService::class.java,
+                com.anees.novamobile.download.DownloadMeta.id(card, season, episode), false)
+        }
         LocalStore.saveProgress(HistoryEntry(card, season, episode, p.currentPosition, p.duration))
     }
 

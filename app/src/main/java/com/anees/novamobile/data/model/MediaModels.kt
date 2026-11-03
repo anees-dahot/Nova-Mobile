@@ -42,6 +42,7 @@ data class TmdbSeries(
     @SerializedName("number_of_seasons") val numberOfSeasons: Int? = null,
     @SerializedName("number_of_episodes") val numberOfEpisodes: Int? = null,
     val seasons: List<Season>? = null,
+    val genres: List<Genre>? = null,
     val adult: Boolean = false,
     val networks: List<Network>? = null,
     @SerializedName("external_ids") val externalIds: ExternalIds? = null
@@ -141,7 +142,7 @@ fun TmdbSeries.toCard() = MediaCard(
     backdropUrl = backdropPath?.let { "https://image.tmdb.org/t/p/w780$it" },
     year = firstAirDate.take(4), rating = voteAverage,
     type = MediaType.SERIES, totalSeasons = numberOfSeasons,
-    genres = GenreNames.of(genreIds), lang = originalLanguage, released = firstAirDate.ifEmpty { null }
+    genres = genres?.take(3)?.joinToString(" · ") { it.name } ?: GenreNames.of(genreIds), lang = originalLanguage, released = firstAirDate.ifEmpty { null }
 )
 
 fun AniMedia.toCard() = MediaCard(
@@ -193,7 +194,8 @@ object GenreNames {
         10759 to "Action & Adventure", 10762 to "Kids", 10763 to "News", 10764 to "Reality", 10765 to "Sci-Fi & Fantasy",
         10766 to "Soap", 10767 to "Talk", 10768 to "War & Politics"
     )
-    fun of(ids: List<Int>) = ids.mapNotNull { MAP[it] }.take(3).joinToString(" · ")
+    // Detail responses have "genres" objects instead of "genre_ids", so ids can be null (Gson)
+    fun of(ids: List<Int>?) = ids.orEmpty().mapNotNull { MAP[it] }.take(3).joinToString(" · ")
 }
 
 /** Language tag shown on cards and info: what the stream really carries if we've seen it, else the original language. */

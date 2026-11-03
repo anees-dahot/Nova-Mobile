@@ -16,7 +16,11 @@ data class Settings(
     val autoplayNext: Boolean = true,
     val lowCpuMode: Boolean = false,       // tunneled playback
     val matchFrameRate: Boolean = false,
-    val volumeBoost: Int = 0               // 0 off, 1 +6dB, 2 +10dB, 3 +15dB
+    val volumeBoost: Int = 0,              // 0 off, 1 +6dB, 2 +10dB, 3 +15dB
+    val dlQuality: Int = 1,                // 0 480p, 1 720p, 2 1080p
+    val dlWifiOnly: Boolean = false,
+    val dlParallel: Int = 2,
+    val dlAutoDeleteWatched: Boolean = false
 )
 
 object LocalStore {
@@ -102,6 +106,23 @@ object LocalStore {
         gson.fromJson<Map<String, List<String>>>(prefs.getString("streams", null) ?: return emptyMap(), type)
             .mapValues { it.value[0].toLong() to it.value[1] }
     }.getOrDefault(emptyMap())
+
+    // ── Downloads ─────────────────────────────────────────────────────────────
+
+    fun pendingDownloads(): List<com.anees.novamobile.download.DownloadStarter.Item> =
+        read("dl_pending", object : TypeToken<List<com.anees.novamobile.download.DownloadStarter.Item>>() {})
+    fun savePendingDownloads(items: List<com.anees.novamobile.download.DownloadStarter.Item>) = write("dl_pending", items)
+
+    fun unresolved(): List<com.anees.novamobile.download.DownloadStarter.Item> =
+        read("dl_unresolved", object : TypeToken<List<com.anees.novamobile.download.DownloadStarter.Item>>() {})
+    fun saveUnresolved(items: List<com.anees.novamobile.download.DownloadStarter.Item>) = write("dl_unresolved", items)
+
+    fun hostHeaders(host: String): Map<String, String>? = prefs.getString("hh_$host", null)
+        ?.let { runCatching { gson.fromJson<Map<String, String>>(it, object : TypeToken<Map<String, String>>() {}.type) }.getOrNull() }
+    fun setHostHeaders(host: String, h: Map<String, String>) = prefs.edit().putString("hh_$host", gson.toJson(h)).apply()
+
+    fun downloadUserAgent(): String = prefs.getString("dl_ua", null) ?: "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+    fun setDownloadUserAgent(ua: String) = prefs.edit().putString("dl_ua", ua).apply()
 
     // ── Recent searches ───────────────────────────────────────────────────────
 

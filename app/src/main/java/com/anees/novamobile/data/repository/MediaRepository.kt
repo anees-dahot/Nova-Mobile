@@ -107,7 +107,7 @@ class MediaRepository {
     suspend fun getSeriesDetail(id: Int): Pair<MediaCard, TmdbSeries>? = runCatching {
         val detail = tmdb.seriesDetail(id, KEY)
         detail.toCard() to detail
-    }.getOrNull()
+    }.onFailure { android.util.Log.w("NovaTV", "series $id detail failed: $it") }.getOrNull()
 
     suspend fun getSeasonEpisodes(seriesId: Int, season: Int): List<Episode> = runCatching {
         tmdb.seasonDetail(seriesId, season, KEY).episodes

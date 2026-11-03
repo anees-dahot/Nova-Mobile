@@ -1,6 +1,8 @@
 # Gson models are read by reflection
 -keepattributes Signature, InnerClasses, EnclosingMethod, *Annotation*
 -keep class com.anees.novamobile.data.** { *; }
+-keep class com.anees.novamobile.download.DownloadMeta { *; }
+-keep class com.anees.novamobile.download.DownloadStarter$Item { *; }
 -keep class com.anees.novamobile.data.api.TmdbSearchResult { *; }
 -keep class com.anees.novamobile.ui.player.WebStreamSniffer$Sniffed { *; }
 -keep class com.anees.novamobile.data.local.Settings { *; }

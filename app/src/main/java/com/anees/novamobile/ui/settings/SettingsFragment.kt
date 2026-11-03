@@ -67,6 +67,18 @@ class SettingsFragment : Fragment(), TabPage {
         header("Video")
         row("Low-CPU Playback", if (s.lowCpuMode) "On" else "Off") { save(s.copy(lowCpuMode = !s.lowCpuMode)) }
         note("Low-CPU Playback uses the phone's video chip directly (smoother, less battery) but some streams may not start — turn it off if that happens.")
+        header("Accounts")
+        com.anees.novamobile.sync.Sync.services.forEach { svc ->
+            val state = when { !svc.configured -> "Not set up"; svc.loggedIn() -> "Connected"; else -> "Connect" }
+            row(svc.name, state) { account(svc) }
+        }
+        if (com.anees.novamobile.sync.Sync.services.any { it.loggedIn() }) {
+            val last = LocalStore.lastSync().takeIf { it > 0 }?.let { android.text.format.DateUtils.getRelativeTimeSpanString(it).toString() } ?: "never"
+            row("Sync Now", "Last: $last") {
+                android.widget.Toast.makeText(requireContext(), "Syncing…", android.widget.Toast.LENGTH_SHORT).show()
+                com.anees.novamobile.sync.Sync.syncNow(requireContext()) { if (isAdded) render() }
+            }
+        }
         header("Downloads")
         row("Downloads", "") { (activity as? com.anees.novamobile.MainActivity)?.openDownloads() }
         val qualities = listOf("480p (smaller)", "720p", "1080p (best)")
@@ -87,6 +99,31 @@ class SettingsFragment : Fragment(), TabPage {
         row("Version", BuildConfig.VERSION_NAME) {}
         row("Check for Updates", "") { com.anees.novamobile.update.Updater.check(requireActivity(), viewLifecycleOwner.lifecycleScope, manual = true) }
         row("Content", "Family-safe (18+ removed)") {}
+    }
+
+    private fun account(svc: com.anees.novamobile.sync.SyncService) {
+        val ctx = requireContext()
+        when {
+            !svc.configured -> ActionSheet.show(ctx, svc.name, listOf(ActionSheet.Item("OK")),
+                subtitle = "Add this service's client ID to local.properties and rebuild (see README)")
+            svc.loggedIn() -> ActionSheet.show(ctx, svc.name, listOf(
+                ActionSheet.Item("Disconnect") { svc.logout(); render() }, ActionSheet.Item("Cancel")))
+            svc === com.anees.novamobile.sync.TraktSync -> {
+                var sheet: android.app.Dialog? = null
+                com.anees.novamobile.sync.TraktSync.startDeviceLogin(
+                    show = { code, url ->
+                        sheet = ActionSheet.show(ctx, "Connect Trakt", listOf(ActionSheet.Item("Open $url") {
+                            startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+                        }), subtitle = "Go to $url and enter:   $code")
+                    },
+                    done = { ok ->
+                        sheet?.dismiss()
+                        android.widget.Toast.makeText(ctx, if (ok) "Trakt connected" else "Trakt login didn't finish", android.widget.Toast.LENGTH_SHORT).show()
+                        if (ok) com.anees.novamobile.sync.Sync.syncNow(ctx) { if (isAdded) render() } else if (isAdded) render()
+                    })
+            }
+            else -> svc.login(requireActivity())
+        }
     }
 
     /** Each source: health score and last search time; plus a live test on a known film. */

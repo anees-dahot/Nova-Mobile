@@ -54,8 +54,12 @@ object LocalStore {
 
     fun inWatchlist(card: MediaCard) = watchlist().any { it.id == card.id && it.type == card.type }
 
-    /** Toggles and returns the new state. */
-    fun toggleWatchlist(card: MediaCard): Boolean {
+    /** Toggles and returns the new state. [notify]: also update connected accounts (Trakt/AniList/MAL). */
+    fun toggleWatchlist(card: MediaCard, notify: Boolean = true): Boolean = toggleWatchlistLocal(card).also {
+        if (notify) com.anees.novamobile.sync.Sync.listed(card, it)
+    }
+
+    private fun toggleWatchlistLocal(card: MediaCard): Boolean {
         val list = watchlist().toMutableList()
         val existing = list.indexOfFirst { it.id == card.id && it.type == card.type }
         return if (existing >= 0) { list.removeAt(existing); write("watchlist", list); false }
@@ -118,6 +122,16 @@ object LocalStore {
         if (progress >= (m[k] ?: 0f) || progress >= 0.9f || (m[k] ?: 0f) < 0.9f) m[k] = progress   // once watched, stays watched
         prefs.edit().putString("epp_$showKey", gson.toJson(m)).apply()
     }
+
+    // ── Account sync ──────────────────────────────────────────────────────────
+
+    fun syncToken(service: String): String? = prefs.getString("sync_$service", null)
+    fun setSyncToken(service: String, token: String?) = prefs.edit().putString("sync_$service", token).apply()
+    fun syncQueue(): List<com.anees.novamobile.sync.Sync.Pending> =
+        read("sync_queue", object : TypeToken<List<com.anees.novamobile.sync.Sync.Pending>>() {})
+    fun saveSyncQueue(q: List<com.anees.novamobile.sync.Sync.Pending>) = write("sync_queue", q)
+    fun lastSync(): Long = prefs.getLong("sync_last", 0)
+    fun setLastSync(t: Long) = prefs.edit().putLong("sync_last", t).apply()
 
     // ── Downloads ─────────────────────────────────────────────────────────────
 

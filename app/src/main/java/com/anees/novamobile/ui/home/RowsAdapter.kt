@@ -55,9 +55,9 @@ class RowsAdapter(private val cb: RowCallbacks) : ListAdapter<HomeItem, Recycler
         val inf = LayoutInflater.from(parent.context)
         return when (viewType) {
             0 -> object : RecyclerView.ViewHolder(inf.inflate(R.layout.item_hero, parent, false).also {
-                // Phone hero: 4:5 poster-style shelf, like the Apple TV app on iPhone
-                val w = parent.resources.displayMetrics.widthPixels
-                it.layoutParams = RecyclerView.LayoutParams(RecyclerView.LayoutParams.MATCH_PARENT, minOf((w * 1.15f).toInt(), (parent.resources.displayMetrics.heightPixels * 0.62f).toInt()))
+                // Big, full-bleed hero like the Apple TV app on iPhone: ~3/4 of the screen
+                val dm = parent.resources.displayMetrics
+                it.layoutParams = RecyclerView.LayoutParams(RecyclerView.LayoutParams.MATCH_PARENT, minOf((dm.widthPixels * 1.5f).toInt(), (dm.heightPixels * 0.76f).toInt()))
             }) {}
             1 -> RowVH(inf.inflate(R.layout.item_row, parent, false))
             else -> SkeletonVH(inf.inflate(R.layout.item_row, parent, false))

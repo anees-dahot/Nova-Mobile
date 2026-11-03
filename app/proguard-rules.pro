@@ -18,3 +18,4 @@
 -dontwarn org.conscrypt.**
 -dontwarn org.bouncycastle.**
 -dontwarn org.openjsse.**
+-keep class com.anees.novamobile.sync.Sync$Pending { *; }

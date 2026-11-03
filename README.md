@@ -22,3 +22,14 @@ A lightweight Android TV app (Android 8+, built for low-RAM boxes) with an Apple
 
 ## Note
 This app does not host any content. It only shows metadata from TMDB/AniList and plays streams from third-party embed providers; availability and legality of those streams depends on your region.
+
+## Account sync (Trakt, AniList, MyAnimeList)
+Each service needs a free app registration; put the IDs in `local.properties` and rebuild.
+
+| Service | Register at | Redirect / notes | local.properties |
+|---|---|---|---|
+| Trakt | https://trakt.tv/oauth/applications/new | Redirect URI: `urn:ietf:wg:oauth:2.0:oob` (device login) | `trakt.clientId=…` and `trakt.clientSecret=…` |
+| AniList | https://anilist.co/settings/developer | Redirect URL: `novamobile://anilist` | `anilist.clientId=…` |
+| MyAnimeList | https://myanimelist.net/apiconfig | App type "other", Redirect URL: `novamobile://mal` | `mal.clientId=…` |
+
+Then Settings → Accounts → Connect. Movies/series sync with Trakt; anime with AniList / MAL.

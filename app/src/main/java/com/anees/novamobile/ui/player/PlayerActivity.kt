@@ -93,6 +93,7 @@ class PlayerActivity : AppCompatActivity() {
     private var boost = 0
     private var audioPicked = false
     private var nextPrefetched = false
+    private var syncedWatched = false
     private var playPressedAt = 0L
     private var current: WebStreamSniffer.Sniffed? = null
     private var bypassedProxy = false
@@ -188,6 +189,7 @@ class PlayerActivity : AppCompatActivity() {
         nextEpisode = null
         nextDismissed = false
         nextPrefetched = false
+        syncedWatched = false
         proxyLastResort = null
         listOf(skipBtn, nextBtn, retryBtn, overlay).forEach { it.visibility = View.GONE }
         releasePlayer()
@@ -737,6 +739,7 @@ class PlayerActivity : AppCompatActivity() {
         }
         LocalStore.saveProgress(HistoryEntry(card, season, episode, p.currentPosition, p.duration))
         LocalStore.setEpisodeProgress(key(), season, episode, p.currentPosition.toFloat() / p.duration)
+        if (!syncedWatched && p.currentPosition > p.duration * 0.9) { syncedWatched = true; com.anees.novamobile.sync.Sync.watched(card, season, episode) }
     }
 
     // ── Audio · Subtitles · Quality · Speed · Source ──────────────────────────

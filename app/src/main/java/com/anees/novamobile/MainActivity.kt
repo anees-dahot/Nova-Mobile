@@ -80,6 +80,8 @@ class MainActivity : AppCompatActivity() {
         com.anees.novamobile.download.NovaDownloads.manager(this)
         handler.postDelayed({ com.anees.novamobile.download.DownloadStarter.resume(this) }, 3000)
         if (intent?.getStringExtra("open") == "downloads") handler.post { openDownloads() }
+        intent?.data?.let { com.anees.novamobile.sync.Sync.handleRedirect(this, it) }
+        handler.postDelayed({ com.anees.novamobile.sync.Sync.syncNow(this) }, 6000)
 
         (0..tabs.size).forEach { i -> fragments[i] = supportFragmentManager.findFragmentByTag("tab_$i") }
         val visible = fragments.indexOfFirst { it != null && !it.isHidden }
@@ -118,6 +120,7 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         if (intent.getStringExtra("open") == "downloads") openDownloads()
+        intent.data?.let { if (com.anees.novamobile.sync.Sync.handleRedirect(this, it)) android.widget.Toast.makeText(this, "Account connected", android.widget.Toast.LENGTH_SHORT).show() }
     }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)

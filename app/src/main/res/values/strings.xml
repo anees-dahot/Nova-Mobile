@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Nova</string>
+    <string name="home">Home</string>
+    <string name="movies">Movies</string>
+    <string name="series">Series</string>
+    <string name="anime">Anime</string>
+    <string name="search">Search</string>
+    <string name="watchlist">Watchlist</string>
+    <string name="trending">Trending Now</string>
+    <string name="top_rated">Top Rated</string>
+    <string name="new_releases">New Releases</string>
+    <string name="continue_watching">Continue Watching</string>
+    <string name="play">▶  Play</string>
+    <string name="add_watchlist">+ Watchlist</string>
+    <string name="loading">Loading…</string>
+    <string name="no_sources">No streams found</string>
+    <string name="audio_track">Audio Track</string>
+    <string name="subtitles">Subtitles</string>
+    <string name="off">Off</string>
+</resources>

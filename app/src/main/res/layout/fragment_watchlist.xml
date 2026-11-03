@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="#0B0B0D">
+
+    <ScrollView android:layout_width="match_parent" android:layout_height="match_parent" android:scrollbars="none">
+        <LinearLayout android:id="@+id/list_rows"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical" android:paddingTop="84dp" android:paddingBottom="48dp"/>
+    </ScrollView>
+
+    <TextView android:id="@+id/list_empty"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="center" android:gravity="center"
+        android:text="Your list is empty\nPress “+ My List” on any title"
+        android:textColor="@color/nova_white40" android:textSize="16sp" android:visibility="gone"/>
+</FrameLayout>

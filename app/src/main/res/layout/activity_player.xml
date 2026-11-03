@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/player_root"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <!-- Opaque: hides the sniffer WebView behind it. Own lightweight controls, not Media3's. -->
+    <androidx.media3.ui.PlayerView android:id="@+id/player_view"
+        android:layout_width="match_parent" android:layout_height="match_parent"
+        android:background="@android:color/black"
+        app:use_controller="true"
+        app:show_shuffle_button="false"
+        app:show_subtitle_button="true"
+        app:shutter_background_color="@android:color/black"
+        app:show_buffering="never"/>
+
+    <ProgressBar android:id="@+id/buffering"
+        android:layout_width="44dp" android:layout_height="44dp" android:layout_gravity="center"
+        android:indeterminateTint="#CCFFFFFF" android:visibility="gone"/>
+
+    <TextView android:id="@+id/center_icon"
+        android:layout_width="96dp" android:layout_height="96dp" android:layout_gravity="center"
+        android:background="@drawable/circle_glass" android:gravity="center"
+        android:textColor="@color/nova_white" android:textSize="34sp" android:visibility="gone"/>
+
+    <!-- Top bar with the built-in controls: back, title, options (audio/subtitles/source/sleep/boost) -->
+    <LinearLayout android:id="@+id/player_top"
+        android:layout_width="match_parent" android:layout_height="64dp"
+        android:orientation="horizontal" android:gravity="center_vertical"
+        android:paddingStart="8dp" android:paddingEnd="8dp"
+        android:background="@drawable/topbar_bg" android:visibility="gone">
+        <ImageButton android:id="@+id/btn_back" android:layout_width="48dp" android:layout_height="48dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless" android:src="@drawable/ic_back" android:contentDescription="Back"/>
+        <TextView android:id="@+id/top_title" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+            android:textColor="@color/nova_white" android:textSize="16sp" android:fontFamily="sans-serif-medium"
+            android:maxLines="1" android:ellipsize="end" android:layout_marginStart="4dp"/>
+        <ImageButton android:id="@+id/btn_options" android:layout_width="48dp" android:layout_height="48dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless" android:src="@drawable/ic_tune" android:contentDescription="Options"/>
+    </LinearLayout>
+
+    <!-- Bottom overlay (unused on phones, built-in controls instead) -->
+    <LinearLayout android:id="@+id/overlay"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_gravity="bottom" android:orientation="vertical"
+        android:background="@drawable/overlay_gradient"
+        android:paddingStart="16dp" android:paddingEnd="16dp" android:paddingTop="40dp" android:paddingBottom="16dp"
+        android:visibility="gone">
+
+        <TextView android:id="@+id/overlay_title"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:textColor="@color/nova_white" android:textSize="24sp" android:fontFamily="sans-serif-medium"/>
+        <TextView android:id="@+id/overlay_sub"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:textColor="@color/nova_white70" android:textSize="14sp" android:layout_marginTop="2dp"/>
+        <TextView android:id="@+id/overlay_desc"
+            android:layout_width="640dp" android:layout_height="wrap_content"
+            android:textColor="@color/nova_white70" android:textSize="13sp" android:lineSpacingMultiplier="1.2"
+            android:layout_marginTop="8dp" android:maxLines="4" android:ellipsize="end" android:visibility="gone"/>
+
+        <ProgressBar android:id="@+id/seek_bar"
+            style="@android:style/Widget.ProgressBar.Horizontal"
+            android:layout_width="match_parent" android:layout_height="6dp"
+            android:layout_marginTop="18dp" android:max="1000"
+            android:progressDrawable="@drawable/seek_track"/>
+
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:layout_marginTop="8dp">
+            <TextView android:id="@+id/time_left"
+                android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+                android:textColor="@color/nova_white70" android:textSize="13sp" android:fontFamily="sans-serif-medium"/>
+            <TextView android:id="@+id/time_right"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:textColor="@color/nova_white70" android:textSize="13sp"/>
+        </LinearLayout>
+
+        <TextView android:id="@+id/overlay_hint"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="▲  Audio · Subtitles · Source      ◀ ▶  Skip 10s      ▼  Info"
+            android:textColor="#80FFFFFF" android:textSize="12sp"/>
+    </LinearLayout>
+
+    <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end" android:layout_marginEnd="24dp" android:layout_marginBottom="96dp"
+        android:orientation="vertical" android:gravity="end">
+        <Button android:id="@+id/btn_skip"
+            android:layout_width="wrap_content" android:layout_height="44dp"
+            android:background="@drawable/btn_overlay" android:paddingStart="24dp" android:paddingEnd="24dp"
+            android:textAllCaps="false" android:textColor="@color/btn_overlay_text"
+            android:textSize="15sp" android:fontFamily="sans-serif-medium" android:visibility="gone"/>
+        <Button android:id="@+id/btn_next"
+            android:layout_width="wrap_content" android:layout_height="44dp" android:layout_marginTop="12dp"
+            android:background="@drawable/btn_overlay" android:paddingStart="24dp" android:paddingEnd="24dp"
+            android:textAllCaps="false" android:textColor="@color/btn_overlay_text"
+            android:textSize="15sp" android:fontFamily="sans-serif-medium" android:visibility="gone"/>
+    </LinearLayout>
+
+    <!-- Loading: the title's own backdrop instead of a black screen -->
+    <FrameLayout android:id="@+id/loading_layer"
+        android:layout_width="match_parent" android:layout_height="match_parent"
+        android:background="@android:color/black">
+        <ImageView android:id="@+id/loading_backdrop"
+            android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
+        <View android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/scrim"/>
+        <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_gravity="bottom|start" android:orientation="vertical"
+            android:layout_marginStart="24dp" android:layout_marginBottom="32dp">
+            <TextView android:id="@+id/loading_title"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:textColor="@color/nova_white" android:textSize="26sp"
+                android:fontFamily="sans-serif-medium" android:maxLines="2" android:ellipsize="end"/>
+            <TextView android:id="@+id/status_text"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginTop="10dp" android:lineSpacingMultiplier="1.2"
+                android:textColor="@color/nova_white70" android:textSize="14sp"/>
+            <ProgressBar android:id="@+id/loading"
+                style="@android:style/Widget.ProgressBar.Horizontal"
+                android:layout_width="240dp" android:layout_height="4dp" android:layout_marginTop="16dp"
+                android:indeterminate="true" android:indeterminateTint="#FFFFFFFF"/>
+            <Button android:id="@+id/btn_retry"
+                android:layout_width="wrap_content" android:layout_height="44dp" android:layout_marginTop="18dp"
+                android:background="@drawable/btn_overlay" android:text="↻  Retry"
+                android:paddingStart="30dp" android:paddingEnd="30dp"
+                android:textAllCaps="false" android:textColor="@color/btn_overlay_text"
+                android:textSize="15sp" android:fontFamily="sans-serif-medium" android:visibility="gone"/>
+        </LinearLayout>
+    </FrameLayout>
+</FrameLayout>

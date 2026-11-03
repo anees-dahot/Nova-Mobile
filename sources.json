@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "note": "Nova TV stream sources. Edit and push: the app picks this up on next start. {id} = TMDB id, {s}/{e} = season/episode.",
+  "sources": [
+    { "name": "VidLux",    "movie": "https://vidlux.xyz/embed/movie/{id}",          "tv": "https://vidlux.xyz/embed/tv/{id}/{s}/{e}",          "timeoutMs": 20000, "multiAudio": true,  "enabled": true },
+    { "name": "Vidly",     "movie": "https://vidly.pro/movie/{id}",                 "tv": "https://vidly.pro/tv/{id}/{s}/{e}",                 "timeoutMs": 20000, "multiAudio": true,  "enabled": true },
+    { "name": "OllyEmbed", "movie": "https://ollyembed.pages.dev/movie/{id}?server=2", "tv": "https://ollyembed.pages.dev/tv/{id}/{s}/{e}?server=2", "timeoutMs": 20000, "multiAudio": true,  "enabled": false },
+    { "name": "VidSrc",    "movie": "https://vidsrc.to/embed/movie/{id}",           "tv": "https://vidsrc.to/embed/tv/{id}/{s}/{e}",           "timeoutMs": 35000, "multiAudio": false, "enabled": true },
+    { "name": "VidLink",   "movie": "https://vidlink.pro/movie/{id}?autoplay=true", "tv": "https://vidlink.pro/tv/{id}/{s}/{e}?autoplay=true", "timeoutMs": 15000, "multiAudio": false, "enabled": true },
+    { "name": "VidSrc CC", "movie": "https://vidsrc.cc/v2/embed/movie/{id}?autoPlay=true", "tv": "https://vidsrc.cc/v2/embed/tv/{id}/{s}/{e}?autoPlay=true", "timeoutMs": 15000, "multiAudio": false, "enabled": true },
+    { "name": "Videasy",   "movie": "https://player.videasy.net/movie/{id}",        "tv": "https://player.videasy.net/tv/{id}/{s}/{e}",        "timeoutMs": 15000, "multiAudio": false, "enabled": true },
+    { "name": "VidFast",   "movie": "https://vidfast.pro/movie/{id}?autoPlay=true", "tv": "https://vidfast.pro/tv/{id}/{s}/{e}?autoPlay=true", "timeoutMs": 15000, "multiAudio": false, "enabled": true }
+  ]
+}

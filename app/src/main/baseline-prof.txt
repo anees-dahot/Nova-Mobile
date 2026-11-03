@@ -1,0 +1,14 @@
+# Hot paths compiled ahead of time on install (androidx.profileinstaller), so browsing and the
+# player don't run interpreted on the box's slow 32-bit CPU.
+HSPLcom/anees/novamobile/**->**(**)**
+Lcom/anees/novamobile/**;
+HSPLandroidx/recyclerview/widget/**->**(**)**
+Landroidx/recyclerview/widget/**;
+HSPLandroidx/media3/exoplayer/**->**(**)**
+Landroidx/media3/exoplayer/**;
+HSPLandroidx/media3/common/**->**(**)**
+HSPLcoil/**->**(**)**
+Lcoil/**;
+HSPLokhttp3/**->**(**)**
+Lokhttp3/**;
+HSPLkotlinx/coroutines/**->**(**)**

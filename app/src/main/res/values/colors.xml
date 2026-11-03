@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Apple TV dark palette -->
+    <color name="nova_black">#000000</color>
+    <color name="nova_surface">#1C1C1E</color>
+    <color name="nova_surface2">#2C2C2E</color>
+    <color name="nova_surface3">#3A3A3C</color>
+    <color name="nova_accent">#0A84FF</color>
+    <color name="nova_accent_dim">#1A3A5C</color>
+    <color name="nova_white">#FFFFFF</color>
+    <color name="nova_white70">#B3FFFFFF</color>
+    <color name="nova_white40">#66FFFFFF</color>
+    <color name="nova_white20">#33FFFFFF</color>
+    <color name="nova_red">#FF453A</color>
+    <color name="nova_green">#30D158</color>
+    <color name="nova_yellow">#FFD60A</color>
+    <color name="nova_gradient_start">#CC000000</color>
+    <color name="nova_gradient_end">#00000000</color>
+    <color name="focus_ring">#FFFFFF</color>
+</resources>

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.NovaTV" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/nova_black</item>
+        <item name="android:colorBackground">@color/nova_black</item>
+        <item name="android:textColorPrimary">@color/nova_white</item>
+        <item name="android:textColorSecondary">@color/nova_white70</item>
+        <item name="colorPrimary">@color/nova_accent</item>
+        <item name="colorPrimaryDark">@color/nova_black</item>
+        <item name="colorAccent">@color/nova_accent</item>
+        <item name="windowNoTitle">true</item>
+        <item name="windowActionBar">false</item>
+        <item name="android:defaultFocusHighlightEnabled">false</item>
+        <item name="android:windowFullscreen">false</item>
+        <item name="android:statusBarColor">@color/nova_black</item>
+        <item name="android:navigationBarColor">@color/nova_black</item>
+    </style>
+
+    <style name="Theme.NovaTV.Player" parent="Theme.NovaTV">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:keepScreenOn">true</item>
+    </style>
+
+    <!-- Card focus animation style -->
+    <style name="NovaCard">
+        <item name="android:focusable">true</item>
+        <item name="android:focusableInTouchMode">true</item>
+        <item name="android:stateListAnimator">@animator/card_focus</item>
+    </style>
+</resources>

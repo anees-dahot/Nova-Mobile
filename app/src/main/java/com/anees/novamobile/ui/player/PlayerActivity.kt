@@ -291,10 +291,11 @@ class PlayerActivity : AppCompatActivity() {
     /** Saved download: same player and track rules, data from the download store, subtitles from disk. */
     private fun playOffline(d: androidx.media3.exoplayer.offline.Download) {
         val meta = com.anees.novamobile.download.DownloadMeta.of(d)
-        val subs = meta?.subtitle?.let { java.io.File(it) }?.takeIf { it.exists() }?.let {
-            listOf(MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(it)).setMimeType(MimeTypes.TEXT_VTT)
-                .setLanguage("en").setLabel("English").build())
-        } ?: emptyList()
+        val files = (meta?.subtitles ?: listOfNotNull(meta?.subtitle)).map { java.io.File(it) }.filter { it.exists() }
+        val subs = files.mapIndexed { i, f ->
+            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(f)).setMimeType(MimeTypes.TEXT_VTT)
+                .setLanguage(if (i == 0) "en" else null).setLabel(if (i == 0) "English" else "Subtitles ${i + 1}").build()
+        }
         offlineItem = d.request.toMediaItem().buildUpon()
             .setSubtitleConfigurations(subs)
             .setMediaMetadata(MediaMetadata.Builder().setTitle(title()).build())
@@ -342,7 +343,11 @@ class PlayerActivity : AppCompatActivity() {
      * try the next multi-audio source once, from the same position. If none has it, remember that.
      */
     private fun huntDub(want: String) {
-        if (offlineItem != null) return   // a saved download stays offline: pick from its own audio only
+        // No automatic source switching for a missing dub: it made playback slow (and could fail) for
+        // titles that have no dub anywhere. The stream plays with every track it has; other sources
+        // stay one tap away in ▲ Options → Source.
+        Log.i(TAG, "${com.anees.novamobile.data.model.LangTags.name(want) ?: want} not in this stream; playing available audio")
+        return
         val current = providers.getOrNull(providerIndex) ?: return
         dubTried += current.name
         if (LocalStore.noDub(key(), want)) return
@@ -731,6 +736,7 @@ class PlayerActivity : AppCompatActivity() {
                 com.anees.novamobile.download.DownloadMeta.id(card, season, episode), false)
         }
         LocalStore.saveProgress(HistoryEntry(card, season, episode, p.currentPosition, p.duration))
+        LocalStore.setEpisodeProgress(key(), season, episode, p.currentPosition.toFloat() / p.duration)
     }
 
     // ── Audio · Subtitles · Quality · Speed · Source ──────────────────────────

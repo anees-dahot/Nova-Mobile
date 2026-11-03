@@ -91,13 +91,15 @@ object DownloadStarter {
             val sniffed = StreamExtractor.cached(p, target) ?: WebStreamSniffer(ctx, host).sniff(StreamExtractor.embedUrl(p, target), p.timeoutMs) ?: continue
             StreamExtractor.remember(p, target, sniffed)
             rememberHeaders(sniffed)
-            val sub = sniffed.subtitles.firstOrNull { !SubtitleCleaner.isThumbnailTrack(it) }?.let { url ->
-                withContext(Dispatchers.IO) {
-                    val out = File(File(NovaDownloads.manager(ctx).let { NovaDownloads.dir }, "subs").apply { mkdirs() }, "${id.hashCode()}.vtt")
+            // Every subtitle the source offers, cleaned of ads
+            val subs = withContext(Dispatchers.IO) {
+                val dir = File(NovaDownloads.manager(ctx).let { NovaDownloads.dir }, "subs").apply { mkdirs() }
+                sniffed.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(10).mapIndexedNotNull { i, url ->
+                    val out = File(dir, "${id.hashCode()}_$i.vtt")
                     if (SubtitleCleaner.saveTo(ctx, url, RetrofitClient.base, sniffed.headers, out)) out.absolutePath else null
                 }
             }
-            val meta = DownloadMeta(item.card, item.season, item.episode, p.name, sub)
+            val meta = DownloadMeta(item.card, item.season, item.episode, p.name, subs.firstOrNull(), subtitles = subs)
             val request = runCatching { buildRequest(ctx, id, sniffed, meta) }.getOrNull() ?: continue
             DownloadService.sendAddDownload(ctx, NovaDownloadService::class.java, request, false)
             Log.i(TAG, "queued $id via ${p.name}")
@@ -128,21 +130,17 @@ object DownloadStarter {
         val helper = DownloadHelper.forMediaItem(ctx, item, DefaultRenderersFactory(ctx), factory)
         try {
             withContext(Dispatchers.Main) { prepare(helper) }
-            val want = (listOf(LocalStore.audioFor("${meta.card.type}:${meta.card.id}") ?: settings.audioLang, "en")).filter { it != "orig" }.distinct()
             for (period in 0 until helper.periodCount) {
                 helper.clearTrackSelections(period)
-                helper.addTrackSelection(period, params)
-                // Extra audio tracks by language code or by name ("Hindi") when the source gives no code
+                helper.addTrackSelection(period, params)   // video at the chosen quality
+                // Every audio language and every built-in subtitle track the stream has
                 val info = helper.getMappedTrackInfo(period)
                 for (r in 0 until info.rendererCount) {
-                    if (info.getRendererType(r) != androidx.media3.common.C.TRACK_TYPE_AUDIO) continue
+                    val type = info.getRendererType(r)
+                    if (type != androidx.media3.common.C.TRACK_TYPE_AUDIO && type != androidx.media3.common.C.TRACK_TYPE_TEXT) continue
                     val groups = info.getTrackGroups(r)
                     val overrides = mutableListOf<DefaultTrackSelector.SelectionOverride>()
-                    for (g in 0 until groups.length) for (t in 0 until groups[g].length) {
-                        val f = groups[g].getFormat(t)
-                        val lang = f.language?.take(2)?.takeIf { it != "un" } ?: LangTags.code(f.label)
-                        if (lang != null && lang in want) overrides += DefaultTrackSelector.SelectionOverride(g, t)
-                    }
+                    for (g in 0 until groups.length) for (t in 0 until groups[g].length) overrides += DefaultTrackSelector.SelectionOverride(g, t)
                     if (overrides.isNotEmpty()) helper.addTrackSelectionForSingleRenderer(period, r, params, overrides)
                 }
             }

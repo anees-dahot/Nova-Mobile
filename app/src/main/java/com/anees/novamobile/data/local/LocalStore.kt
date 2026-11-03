@@ -107,6 +107,18 @@ object LocalStore {
             .mapValues { it.value[0].toLong() to it.value[1] }
     }.getOrDefault(emptyMap())
 
+    // ── Per-episode progress (watched / partly watched) ───────────────────────
+
+    fun episodeProgress(showKey: String): Map<String, Float> = prefs.getString("epp_$showKey", null)
+        ?.let { runCatching { gson.fromJson<Map<String, Float>>(it, object : TypeToken<Map<String, Float>>() {}.type) }.getOrNull() } ?: emptyMap()
+
+    fun setEpisodeProgress(showKey: String, season: Int, episode: Int, progress: Float) {
+        val m = episodeProgress(showKey).toMutableMap()
+        val k = "$season:$episode"
+        if (progress >= (m[k] ?: 0f) || progress >= 0.9f || (m[k] ?: 0f) < 0.9f) m[k] = progress   // once watched, stays watched
+        prefs.edit().putString("epp_$showKey", gson.toJson(m)).apply()
+    }
+
     // ── Downloads ─────────────────────────────────────────────────────────────
 
     fun pendingDownloads(): List<com.anees.novamobile.download.DownloadStarter.Item> =

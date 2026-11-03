@@ -42,7 +42,9 @@ data class DownloadMeta(
     val episode: Int,
     val provider: String,
     val subtitle: String? = null,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val subtitles: List<String>? = null     // every subtitle file saved with the download
+
 ) {
     fun toBytes(): ByteArray = Gson().toJson(this).toByteArray()
     companion object {

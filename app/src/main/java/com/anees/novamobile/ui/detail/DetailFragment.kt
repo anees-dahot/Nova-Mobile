@@ -283,6 +283,7 @@ class DetailFragment : Fragment() {
 
     private inner class EpisodeAdapter(val eps: List<Episode>, val onClick: (Episode) -> Unit) :
         RecyclerView.Adapter<EpisodeAdapter.VH>() {
+        private val progress get() = LocalStore.episodeProgress("${card.type}:${card.id}")
 
         inner class VH(v: View) : RecyclerView.ViewHolder(v) {
             val frame: FrameLayout = v.findViewById(R.id.ep_frame)
@@ -290,6 +291,9 @@ class DetailFragment : Fragment() {
             val number: TextView = v.findViewById(R.id.ep_number)
             val title: TextView = v.findViewById(R.id.ep_title)
             val desc: TextView = v.findViewById(R.id.ep_desc)
+            val status: TextView = v.findViewById(R.id.ep_status)
+            val badge: TextView = v.findViewById(R.id.ep_badge)
+            val dim: View = v.findViewById(R.id.ep_dim)
             val bar: ProgressBar = v.findViewById(R.id.ep_progress)
 
             init {
@@ -309,8 +313,23 @@ class DetailFragment : Fragment() {
             val ep = eps[i]
             h.title.text = if (card.type == MediaType.ANIME) "Episode ${ep.episodeNumber}" else "${ep.episodeNumber}. ${ep.name}"
             h.number.text = ep.episodeNumber.toString()
-            val dl = dlState(if (card.type == MediaType.ANIME) 1 else ep.seasonNumber, ep.episodeNumber)
-            h.desc.text = listOfNotNull(dl?.let { if (it == "✓") "✓ Downloaded" else "⬇ $it" }, ep.runtime?.let { "${it}m" }, ep.overview.ifBlank { null }).joinToString("  ·  ")
+            val sNum = if (card.type == MediaType.ANIME) 1 else ep.seasonNumber
+            val dl = dlState(sNum, ep.episodeNumber)
+            val prog = progress["$sNum:${ep.episodeNumber}"] ?: 0f
+            val watched = prog >= 0.9f
+            // Status line: Watched / time left, and download state (Apple TV app style)
+            val parts = mutableListOf<String>()
+            if (watched) parts += "✓ Watched"
+            else if (prog > 0.02f) parts += ep.runtime?.let { "${(it * (1 - prog)).toInt().coerceAtLeast(1)} min left" } ?: "${(prog * 100).toInt()}% watched"
+            when (dl) { null -> {}; "✓" -> parts += "⬇ Downloaded"; else -> parts += "⬇ Downloading $dl" }
+            h.status.visibility = if (parts.isEmpty()) View.GONE else View.VISIBLE
+            h.status.text = parts.joinToString("   ")
+            h.status.setTextColor(if (watched) 0xFF30D158.toInt() else 0xCCFFFFFF.toInt())
+            h.badge.visibility = if (watched || dl == "✓") View.VISIBLE else View.GONE
+            h.badge.text = if (watched) "✓" else "⬇"
+            h.dim.visibility = if (watched) View.VISIBLE else View.GONE
+            h.title.alpha = if (watched) 0.6f else 1f
+            h.desc.text = listOfNotNull(ep.runtime?.let { "${it}m" }, ep.overview.ifBlank { null }).joinToString("  ·  ")
             h.desc.visibility = if (h.desc.text.isNullOrEmpty()) View.GONE else View.VISIBLE
             if (ep.stillPath != null) {
                 h.number.visibility = View.GONE
@@ -319,11 +338,8 @@ class DetailFragment : Fragment() {
                 h.number.visibility = View.VISIBLE
                 h.still.setImageDrawable(null)
             }
-            val hist = LocalStore.historyFor(card)
-            val current = hist != null && hist.episode == ep.episodeNumber &&
-                (card.type == MediaType.ANIME || hist.season == ep.seasonNumber)
-            h.bar.visibility = if (current) View.VISIBLE else View.GONE
-            if (current) h.bar.progress = (hist!!.progress * 1000).toInt()
+            h.bar.visibility = if (prog > 0.02f && !watched) View.VISIBLE else View.GONE
+            h.bar.progress = (prog * 1000).toInt()
         }
     }
 }

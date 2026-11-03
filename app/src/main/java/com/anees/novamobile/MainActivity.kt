@@ -138,7 +138,7 @@ class MainActivity : AppCompatActivity() {
         val dp = resources.displayMetrics.density
         val b = banner ?: LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setBackgroundResource(R.drawable.pill_glass)
+            background = android.graphics.drawable.GradientDrawable().apply { setColor(0xF22C2C2E.toInt()); cornerRadius = 16 * dp; setStroke(dp.toInt(), 0x22FFFFFF) }
             elevation = 12 * dp
             setPadding((18 * dp).toInt(), (12 * dp).toInt(), (8 * dp).toInt(), (12 * dp).toInt())
             addView(ImageView(context).apply { id = 1; setImageResource(R.drawable.ic_download) }, LinearLayout.LayoutParams((20 * dp).toInt(), (20 * dp).toInt()))
@@ -148,7 +148,7 @@ class MainActivity : AppCompatActivity() {
                 id = 3; textSize = 14f; setTextColor(0xFF0A84FF.toInt()); typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
             })
-            (findViewById<View>(R.id.main_content).parent as android.widget.FrameLayout).addView(this,
+            this@MainActivity.findViewById<android.widget.FrameLayout>(android.R.id.content).addView(this,
                 android.widget.FrameLayout.LayoutParams(android.widget.FrameLayout.LayoutParams.MATCH_PARENT, android.widget.FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
                     setMargins((12 * dp).toInt(), 0, (12 * dp).toInt(), (72 * dp).toInt())
                 })

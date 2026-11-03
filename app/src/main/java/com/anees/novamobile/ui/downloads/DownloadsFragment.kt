@@ -42,6 +42,7 @@ class DownloadsFragment : Fragment() {
 
     private val rows = mutableListOf<Row>()
     private lateinit var list: RecyclerView
+    private lateinit var storageBar: android.widget.ProgressBar
     private lateinit var storage: TextView
     private lateinit var toggleAll: TextView
     private lateinit var empty: View
@@ -76,6 +77,11 @@ class DownloadsFragment : Fragment() {
         })
         storage = TextView(ctx).apply { textSize = 13f; setTextColor(0x99FFFFFF.toInt()); setPadding((16 * dp).toInt(), (2 * dp).toInt(), 0, (8 * dp).toInt()) }
         root.addView(storage)
+        storageBar = android.widget.ProgressBar(ctx, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000; progressTintList = android.content.res.ColorStateList.valueOf(0xFF0A84FF.toInt())
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(0x33FFFFFF)
+        }
+        root.addView(storageBar, android.widget.LinearLayout.LayoutParams(-1, (4 * dp).toInt()).apply { setMargins((16 * dp).toInt(), 0, (16 * dp).toInt(), (8 * dp).toInt()) })
         val frame = FrameLayout(ctx)
         list = RecyclerView(ctx).apply { layoutManager = LinearLayoutManager(ctx); adapter = Adapter(); itemAnimator = null }
         frame.addView(list)
@@ -100,10 +106,18 @@ class DownloadsFragment : Fragment() {
         val unresolved = LocalStore.unresolved()
         val pending = LocalStore.pendingDownloads()
         if (active.isNotEmpty() || unresolved.isNotEmpty() || pending.isNotEmpty()) {
-            rows += Row.Header("Downloading")
-            active.forEach { rows += Row.Dl(it, DownloadMeta.of(it)) }
-            pending.forEach { rows += Row.Unresolved(it.copy(skipProvider = "__pending__")) }
-            unresolved.forEach { rows += Row.Unresolved(it) }
+            val failed = active.filter { it.state == Download.STATE_FAILED }
+            val going = active - failed.toSet()
+            if (going.isNotEmpty() || pending.isNotEmpty()) {
+                rows += Row.Header("Downloading")
+                going.forEach { rows += Row.Dl(it, DownloadMeta.of(it)) }
+                pending.forEach { rows += Row.Unresolved(it.copy(skipProvider = "__pending__")) }
+            }
+            if (failed.isNotEmpty() || unresolved.isNotEmpty()) {
+                rows += Row.Header("Needs attention")
+                failed.forEach { rows += Row.Dl(it, DownloadMeta.of(it)) }
+                unresolved.forEach { rows += Row.Unresolved(it) }
+            }
         }
         // Finished downloads, grouped by show
         all.filter { it.state == Download.STATE_COMPLETED }.mapNotNull { d -> DownloadMeta.of(d)?.let { d to it } }
@@ -113,11 +127,13 @@ class DownloadsFragment : Fragment() {
             }
         empty.visibility = if (rows.isEmpty()) View.VISIBLE else View.GONE
         val stat = StatFs(NovaDownloads.dir.absolutePath)
+        val used = NovaDownloads.usedBytes(ctx)
+        storageBar.progress = if (used + stat.availableBytes > 0) (used * 1000 / (used + stat.availableBytes)).toInt() else 0
         storage.text = "${Formatter.formatShortFileSize(ctx, NovaDownloads.usedBytes(ctx))} used · ${Formatter.formatShortFileSize(ctx, stat.availableBytes)} free" +
             if (NovaDownloads.storageFull) "  ·  Storage full" else ""
         val anyRunning = active.any { it.state == Download.STATE_DOWNLOADING || it.state == Download.STATE_QUEUED }
         toggleAll.visibility = if (active.isEmpty()) View.GONE else View.VISIBLE
-        toggleAll.text = if (anyRunning) "Pause All" else "Resume All"
+        toggleAll.text = if (anyRunning) "Pause all" else "Resume all"
         list.adapter?.notifyDataSetChanged()
     }
 
@@ -203,7 +219,7 @@ class DownloadsFragment : Fragment() {
                     v.findViewById<TextView>(R.id.dl_title).text = i.card.title
                     val pending = i.skipProvider == "__pending__"
                     v.findViewById<TextView>(R.id.dl_sub).text = (if (i.card.type != MediaType.MOVIE) "S${i.season} · E${i.episode}  ·  " else "") +
-                        if (pending) "Finding a source…" else "Couldn't find a source — tap to retry"
+                        if (pending) "Finding a source…" else "No source found yet  ·  tap ↻ to try again, hold to remove"
                     val ring = v.findViewById<ProgressRing>(R.id.dl_ring)
                     ring.visibility = View.VISIBLE; ring.progress = 0f; ring.glyph = if (pending) "…" else "↻"
                     val retry = View.OnClickListener {

@@ -24,18 +24,38 @@ class MainActivity : AppCompatActivity() {
 
     private data class Tab(val label: String, val icon: Int, val create: () -> Fragment)
 
-    private val tabs = listOf(
-        Tab("Home", R.drawable.ic_home) { HomeFragment.newInstance(0) },
-        Tab("Movies", R.drawable.ic_movie) { HomeFragment.newInstance(1) },
-        Tab("Series", R.drawable.ic_tv) { HomeFragment.newInstance(2) },
-        Tab("Anime", R.drawable.ic_anime) { HomeFragment.newInstance(3) },
-        Tab("My List", R.drawable.ic_bookmark) { WatchlistFragment() },
+    /**
+     * Pages, in fragment-slot order. Home's categories (For You / Movies / Series / Anime) are chips
+     * at the top of Home; the bottom bar is Home · Search · Calendar · Downloads · My List.
+     */
+    private val pages = listOf<() -> Fragment>(
+        { HomeFragment.newInstance(0) }, { HomeFragment.newInstance(1) }, { HomeFragment.newInstance(2) }, { HomeFragment.newInstance(3) },
+        { SearchFragment() },
+        { com.anees.novamobile.ui.calendar.CalendarFragment().apply { arguments = Bundle().apply { putBoolean("tab", true) } } },
+        { com.anees.novamobile.ui.downloads.DownloadsFragment().apply { arguments = Bundle().apply { putBoolean("tab", true) } } },
+        { WatchlistFragment() },
     )
-    private val SEARCH = tabs.size          // search lives behind the top-bar 🔍, not the bottom bar
     private val HOME = 0
+    private val SEARCH = 4
+    private val CALENDAR = 5
+    private val DOWNLOADS = 6
+    private val MY_LIST = 7
+    private val CATEGORIES = listOf("For You", "Movies", "Series", "Anime")
+    /** Bottom bar: label, icon, page it opens (Home opens the last category used). */
+    private val tabs = listOf(
+        Tab("Home", R.drawable.ic_home) { Fragment() },
+        Tab("Search", R.drawable.ic_search) { Fragment() },
+        Tab("Calendar", R.drawable.ic_calendar) { Fragment() },
+        Tab("Downloads", R.drawable.ic_download) { Fragment() },
+        Tab("My List", R.drawable.ic_bookmark) { Fragment() },
+    )
+    private fun pageOfTab(i: Int) = when (i) { 0 -> homePage; 1 -> SEARCH; 2 -> CALENDAR; 3 -> DOWNLOADS; else -> MY_LIST }
+    private fun tabOfPage(p: Int) = when (p) { in 0..3 -> 0; SEARCH -> 1; CALENDAR -> 2; DOWNLOADS -> 3; else -> 4 }
+    private var homePage = 0
 
-    private val fragments = arrayOfNulls<Fragment>(tabs.size + 1)
+    private val fragments = arrayOfNulls<Fragment>(pages.size)
     private val navItems = mutableListOf<View>()
+    private val chipViews = mutableListOf<TextView>()
     private var current = -1
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var topBar: View
@@ -50,34 +70,50 @@ class MainActivity : AppCompatActivity() {
 
         val nav = findViewById<LinearLayout>(R.id.bottom_nav)
         val dp = resources.displayMetrics.density
+        // Smooth width change when the active capsule moves
+        nav.layoutTransition = android.animation.LayoutTransition().apply {
+            enableTransitionType(android.animation.LayoutTransition.CHANGING)
+            setDuration(220)
+        }
         tabs.forEachIndexed { i, t ->
             val item = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
+                orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
                 isClickable = true
+                contentDescription = t.label
+                layoutTransition = android.animation.LayoutTransition().apply { setDuration(180) }
                 addView(ImageView(context).apply {
                     setImageResource(t.icon)
-                    imageTintList = getColorStateList(R.color.nav_item)
-                    isDuplicateParentStateEnabled = true
-                }, LinearLayout.LayoutParams((24 * dp).toInt(), (24 * dp).toInt()))
+                }, LinearLayout.LayoutParams((22 * dp).toInt(), (22 * dp).toInt()))
                 addView(TextView(context).apply {
                     text = t.label
-                    gravity = Gravity.CENTER
-                    textSize = 11f
-                    setTextColor(getColorStateList(R.color.nav_item))
-                    isDuplicateParentStateEnabled = true
-                    setPadding(0, (3 * dp).toInt(), 0, 0)
-                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-                setOnClickListener { switchTab(i) }
+                    textSize = 13f
+                    maxLines = 1
+                    typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+                    setPadding((7 * dp).toInt(), 0, 0, 0)
+                    visibility = View.GONE
+                }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+                setOnClickListener { com.anees.novamobile.ui.common.Ui.tick(it); switchTab(pageOfTab(i)) }
             }
+            com.anees.novamobile.ui.common.Ui.pressable(item, 0.94f)
             nav.addView(item, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
             navItems += item
         }
+        // Category chips (Home only): pill per category, the active one filled
+        val chips = findViewById<LinearLayout>(R.id.chips)
+        CATEGORIES.forEachIndexed { i, label ->
+            val chip = TextView(this).apply {
+                text = label; textSize = 14f; gravity = Gravity.CENTER
+                typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL)
+                setPadding((16 * dp).toInt(), 0, (16 * dp).toInt(), 0)
+                isClickable = true
+                setOnClickListener { com.anees.novamobile.ui.common.Ui.tick(it); switchTab(i) }
+            }
+            chips.addView(chip, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (32 * dp).toInt()).apply { marginEnd = (8 * dp).toInt() })
+            chipViews += chip
+        }
 
-        findViewById<View>(R.id.btn_search).setOnClickListener { switchTab(SEARCH) }
         findViewById<View>(R.id.btn_settings).setOnClickListener { openOverlay(SettingsFragment()) }
-        findViewById<View>(R.id.btn_downloads).setOnClickListener { openDownloads() }
-        findViewById<View>(R.id.btn_calendar).visibility = View.GONE   // calendar paused for now
         // Rebuild new-episode reminders in the background
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { kotlinx.coroutines.delay(10_000); runCatching { com.anees.novamobile.calendar.AiringCalendar.reschedule(this@MainActivity) } }
         handlePlayIntent(intent)
@@ -89,7 +125,7 @@ class MainActivity : AppCompatActivity() {
         intent?.data?.let { com.anees.novamobile.sync.Sync.handleRedirect(this, it) }
         handler.postDelayed({ com.anees.novamobile.sync.Sync.syncNow(this) }, 6000)
 
-        (0..tabs.size).forEach { i -> fragments[i] = supportFragmentManager.findFragmentByTag("tab_$i") }
+        pages.indices.forEach { i -> fragments[i] = supportFragmentManager.findFragmentByTag("tab_$i") }
         val visible = fragments.indexOfFirst { it != null && !it.isHidden }
         switchTab(if (visible >= 0) visible else HOME)
     }
@@ -101,15 +137,46 @@ class MainActivity : AppCompatActivity() {
         }
         val tx = supportFragmentManager.beginTransaction().setCustomAnimations(android.R.anim.fade_in, android.R.anim.fade_out)
         fragments.getOrNull(current)?.let { tx.hide(it) }
-        val target = fragments[index] ?: (if (index == SEARCH) SearchFragment() else tabs[index].create()).also {
+        val target = fragments[index] ?: pages[index]().also {
             fragments[index] = it
             tx.add(R.id.fragment_container, it, "tab_$index")
         }
         tx.show(target).commit()
-        navItems.forEachIndexed { i, v -> v.isSelected = i == index }
+        if (index in 0..3) homePage = index
+        paintNav(tabOfPage(index))
+        paintChips()
         current = index
-        // Search has its own header; the brand bar shows everywhere else
-        topBar.visibility = if (index == SEARCH) View.GONE else View.VISIBLE
+        // Search, Calendar and Downloads have their own large headers; the brand bar shows on Home and My List
+        topBar.visibility = if (index == SEARCH || index == CALENDAR || index == DOWNLOADS) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.chips_scroll).visibility = if (index in 0..3) View.VISIBLE else View.GONE
+        if (index !in 0..3) setTopBarSolid(true)
+    }
+
+    /** Active tab: white capsule, black icon + label, twice as wide; others: icon only, dimmed. */
+    private fun paintNav(active: Int) {
+        val dp = resources.displayMetrics.density
+        navItems.forEachIndexed { i, v ->
+            val on = i == active
+            v.isSelected = on
+            (v.layoutParams as LinearLayout.LayoutParams).weight = if (on) 2.2f else 1f
+            v.background = if (on) android.graphics.drawable.GradientDrawable().apply { cornerRadius = 26 * dp; setColor(0xFFFFFFFF.toInt()) } else null
+            val tint = if (on) 0xFF000000.toInt() else 0x99FFFFFF.toInt()
+            ((v as LinearLayout).getChildAt(0) as ImageView).imageTintList = android.content.res.ColorStateList.valueOf(tint)
+            (v.getChildAt(1) as TextView).apply { setTextColor(tint); visibility = if (on) View.VISIBLE else View.GONE }
+            v.requestLayout()
+        }
+    }
+
+    private fun paintChips() {
+        val dp = resources.displayMetrics.density
+        chipViews.forEachIndexed { i, c ->
+            val on = i == homePage
+            c.background = android.graphics.drawable.GradientDrawable().apply {
+                cornerRadius = 16 * dp
+                if (on) setColor(0xFFFFFFFF.toInt()) else { setColor(0x1FFFFFFF); setStroke((1 * dp).toInt(), 0x33FFFFFF) }
+            }
+            c.setTextColor(if (on) 0xFF000000.toInt() else 0xE6FFFFFF.toInt())
+        }
     }
 
     /** Brand bar fades over content as it scrolls (set by Home). */
@@ -199,7 +266,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-    fun openDownloads() = openOverlay(com.anees.novamobile.ui.downloads.DownloadsFragment())
+    /** Downloads is a bottom-bar tab: close any screen on top and show it. */
+    fun openDownloads() = showTab(DOWNLOADS)
+
+    fun openCalendar() = showTab(CALENDAR)
+
+    private fun showTab(page: Int) {
+        if (supportFragmentManager.backStackEntryCount > 0)
+            supportFragmentManager.popBackStackImmediate(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)
+        switchTab(page)
+    }
 
     /** "Downloaded" notification for a series: open that show's folder. */
     private fun openShowFromIntent(i: android.content.Intent?) {
@@ -239,7 +315,7 @@ class MainActivity : AppCompatActivity() {
     override fun onBackPressed() {
         when {
             supportFragmentManager.backStackEntryCount > 0 -> supportFragmentManager.popBackStack()
-            current != HOME -> switchTab(HOME)
+            current != HOME -> switchTab(if (current in 1..3) HOME else homePage)
             else -> @Suppress("DEPRECATION") super.onBackPressed()
         }
     }

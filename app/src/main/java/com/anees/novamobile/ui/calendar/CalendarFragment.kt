@@ -40,6 +40,8 @@ class CalendarFragment : Fragment() {
         root.addView(ImageButton(ctx).apply {
             setImageResource(R.drawable.ic_back); background = null
             setOnClickListener { parentFragmentManager.popBackStack() }
+            // As a bottom-bar tab there's nothing to go back to
+            if (arguments?.getBoolean("tab") == true) visibility = View.INVISIBLE
         }, LinearLayout.LayoutParams((52 * dp).toInt(), (52 * dp).toInt()).apply { topMargin = (8 * dp).toInt() })
         root.addView(TextView(ctx).apply {
             text = "Calendar"; textSize = 32f; setTextColor(Color.WHITE); letterSpacing = -0.02f
@@ -68,7 +70,7 @@ class CalendarFragment : Fragment() {
             followed == 0 -> "Add series or anime to My List to see their new episodes here."
             loading && eps.isEmpty() -> "Loading schedule…"
             eps.isEmpty() -> "No new episodes in the next two weeks for your $followed shows."
-            else -> "${eps.size} episodes · from your $followed shows"
+            else -> "${eps.size} episode${if (eps.size == 1) "" else "s"} · from your $followed shows"
         }
         rows.clear()
         eps.groupBy { dayLabel(it.airAt) }.forEach { (label, items) -> rows += Row.Day(label); items.forEach { rows += Row.Ep(it) } }

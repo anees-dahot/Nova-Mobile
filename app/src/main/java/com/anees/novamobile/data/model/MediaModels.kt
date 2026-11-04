@@ -62,7 +62,9 @@ data class Episode(
     @SerializedName("season_number") val seasonNumber: Int,
     val overview: String = "",
     @SerializedName("still_path") val stillPath: String? = null,
-    val runtime: Int? = null
+    val runtime: Int? = null,
+    /** "2026-11-10" (TMDB), null when not announced. */
+    @SerializedName("air_date") val airDate: String? = null
 )
 
 data class SeasonDetail(

@@ -88,7 +88,9 @@ class DownloadsFragment : Fragment() {
         root.addView(LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(4.dp, 8.dp, 4.dp, 0)
-            addView(iconButton(ctx, R.drawable.ic_back, "Back") { parentFragmentManager.popBackStack() })
+            addView(iconButton(ctx, R.drawable.ic_back, "Back") { parentFragmentManager.popBackStack() }.apply {
+                if (arguments?.getBoolean("tab") == true) visibility = View.INVISIBLE   // bottom-bar tab: nothing to go back to
+            })
             addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
             addView(iconButton(ctx, R.drawable.ic_more, "More") { moreMenu() })
         })

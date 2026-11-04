@@ -383,7 +383,16 @@ class DetailFragment : Fragment() {
             h.badge.visibility = View.GONE
             h.dim.visibility = if (watched) View.VISIBLE else View.GONE
             h.title.alpha = if (watched) 0.6f else 1f
-            h.desc.text = listOfNotNull(ep.runtime?.let { "${it}m" }, ep.overview.ifBlank { null }).joinToString("  ·  ")
+            // Release date: "Nov 10, 2026" once out, "Coming Nov 10" before (shown in the status line)
+            val air = ep.airDate?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() }
+            val upcoming = air != null && air.isAfter(java.time.LocalDate.now())
+            if (upcoming) {
+                h.status.visibility = View.VISIBLE
+                h.status.text = "Coming " + air!!.format(java.time.format.DateTimeFormatter.ofPattern(if (air.year == java.time.LocalDate.now().year) "EEE, MMM d" else "MMM d, yyyy"))
+                h.status.setTextColor(0xFF0A84FF.toInt())
+            }
+            val date = air?.takeIf { !upcoming }?.format(java.time.format.DateTimeFormatter.ofPattern("MMM d, yyyy"))
+            h.desc.text = listOfNotNull(date, ep.runtime?.let { "${it}m" }, ep.overview.ifBlank { null }).joinToString("  ·  ")
             h.desc.visibility = if (h.desc.text.isNullOrEmpty()) View.GONE else View.VISIBLE
             if (ep.stillPath != null) {
                 h.number.visibility = View.GONE

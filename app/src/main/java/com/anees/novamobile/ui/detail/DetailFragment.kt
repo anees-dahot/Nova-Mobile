@@ -120,8 +120,14 @@ class DetailFragment : Fragment() {
         super.onDestroyView()
     }
 
+    override fun onPause() {
+        super.onPause()
+        dlTick.removeCallbacks(dlRunnable)
+    }
+
     override fun onResume() {
         super.onResume()
+        dlTick.postDelayed(dlRunnable, 1000)
         if (!::playBtn.isInitialized) return
         LocalStore.historyFor(card)?.let { h -> season = h.season.coerceAtLeast(1); episode = h.episode.coerceAtLeast(1) }
         updatePlayLabel()
@@ -142,31 +148,55 @@ class DetailFragment : Fragment() {
         }
     }
 
+    /** Every download starts in the download sheet: quality, then live progress with actions. */
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun download(items: List<com.anees.novamobile.download.DownloadStarter.Item>) {
-        val main = activity as? com.anees.novamobile.MainActivity ?: return
-        main.ensureNotificationPermission()
-        val added = com.anees.novamobile.download.DownloadStarter.enqueue(requireContext(), items)
-        val what = items.firstOrNull()?.let { if (it.card.type == MediaType.MOVIE) it.card.title else "${it.card.title} · S${it.season} E${it.episode}" } ?: ""
+        val act = activity as? androidx.appcompat.app.AppCompatActivity ?: return
+        com.anees.novamobile.ui.downloads.DownloadSheet.show(act, items) { refreshDownloads() }
+    }
+
+    /** Download button + episode rings follow the downloads live while this page is open. */
+    private val dlTick = android.os.Handler(android.os.Looper.getMainLooper())
+    private val dlRunnable = object : Runnable {
+        override fun run() { refreshDownloads(); dlTick.postDelayed(this, 1000) }
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun refreshDownloads() {
+        val v = view ?: return
+        if (!isAdded) return
+        setupDownloads(v)
+        v.findViewById<RecyclerView>(R.id.episode_list)?.adapter?.let { it.notifyItemRangeChanged(0, it.itemCount, "dl") }
+    }
+
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun episodeDownload(ep: Episode) {
+        val ctx = requireContext()
+        val s = if (card.type == MediaType.ANIME) 1 else ep.seasonNumber
+        val item = com.anees.novamobile.download.DownloadStarter.Item(card, s, ep.episodeNumber)
+        val d = com.anees.novamobile.download.NovaDownloads.get(ctx, com.anees.novamobile.download.DownloadMeta.id(card, s, ep.episodeNumber))
         when {
-            added == 0 -> main.showBanner("Already in your downloads", "View") { main.openDownloads() }
-            added == 1 -> main.showBanner("Downloading $what", "View") { main.openDownloads() }
-            else -> main.showBanner("Downloading $added episodes of ${card.title}", "View") { main.openDownloads() }
+            d == null -> download(listOf(item))
+            d.state == androidx.media3.exoplayer.offline.Download.STATE_COMPLETED -> ActionSheet.show(ctx, "Episode ${ep.episodeNumber}", listOf(
+                ActionSheet.Item("Play downloaded") { PlayerActivity.launch(ctx, card, s, ep.episodeNumber) },
+                ActionSheet.Item("Go to Downloads") { (activity as? com.anees.novamobile.MainActivity)?.openDownloadsShow(card) },
+                ActionSheet.Item("Delete download") { com.anees.novamobile.ui.downloads.DownloadUi.remove(ctx, d); dlTick.postDelayed({ refreshDownloads() }, 300) },
+            ), subtitle = com.anees.novamobile.download.DownloadMeta.of(d)?.let { com.anees.novamobile.ui.downloads.DownloadUi.details(it) }?.ifBlank { null })
+            else -> { com.anees.novamobile.ui.downloads.DownloadUi.toggle(ctx, d); refreshDownloads() }
         }
-        view?.let { setupDownloads(it) }
     }
 
     private fun setupDownloads(view: View) {
         val btn = view.findViewById<Button>(R.id.detail_download)
         val seasonBtn = view.findViewById<TextView>(R.id.download_season)
         if (card.type == MediaType.MOVIE) {
-            btn.text = when (val st = dlState(0, 0)) { null -> "⬇  Download"; "✓" -> "✓  Downloaded"; else -> "⬇  $st" }
+            btn.text = when (val st = dlState(0, 0)) { null -> "Download"; "✓" -> "Downloaded"; else -> "Downloading  $st" }
             btn.setOnClickListener {
-                if (dlState(0, 0) == null) { download(listOf(com.anees.novamobile.download.DownloadStarter.Item(card, 0, 0))); btn.text = "⬇  Queued" }
+                if (dlState(0, 0) == null) { download(listOf(com.anees.novamobile.download.DownloadStarter.Item(card, 0, 0))); btn.text = "Queued" }
                 else (activity as? com.anees.novamobile.MainActivity)?.openDownloads()
             }
         } else {
-            btn.text = "⬇  Episode"
+            btn.text = when (val st = dlState(season.coerceAtLeast(1), episode.coerceAtLeast(1))) { null -> "Download"; "✓" -> "Downloaded"; else -> st }
             btn.setOnClickListener { download(listOf(com.anees.novamobile.download.DownloadStarter.Item(card, season, episode))) }
         }
         seasonBtn.setOnClickListener {
@@ -184,9 +214,9 @@ class DetailFragment : Fragment() {
         val s = if (card.type == MediaType.ANIME) 1 else ep.seasonNumber
         val rest = currentEpisodes.filter { it.episodeNumber >= ep.episodeNumber }
         ActionSheet.show(requireContext(), "Episode ${ep.episodeNumber}", listOf(
-            ActionSheet.Item("▶  Play") { PlayerActivity.launch(requireContext(), card, s, ep.episodeNumber) },
-            ActionSheet.Item("⬇  Download Episode") { download(listOf(com.anees.novamobile.download.DownloadStarter.Item(card, s, ep.episodeNumber))) },
-            ActionSheet.Item("⬇  Download From Here (${rest.size})") { download(rest.map { com.anees.novamobile.download.DownloadStarter.Item(card, s, it.episodeNumber) }) }
+            ActionSheet.Item("Play") { PlayerActivity.launch(requireContext(), card, s, ep.episodeNumber) },
+            ActionSheet.Item("Download Episode") { download(listOf(com.anees.novamobile.download.DownloadStarter.Item(card, s, ep.episodeNumber))) },
+            ActionSheet.Item("Download From Here (${rest.size})") { download(rest.map { com.anees.novamobile.download.DownloadStarter.Item(card, s, it.episodeNumber) }) }
         ))
     }
 
@@ -210,7 +240,8 @@ class DetailFragment : Fragment() {
             MediaType.ANIME -> "  Ep $episode"
             MediaType.SERIES -> "  S$season · E$episode"
         }
-        playBtn.text = (if (resume && h!!.season.coerceAtLeast(1) == season && h.episode.coerceAtLeast(1) == episode) "▶  Resume" else "▶  Play") + where
+        playBtn.text = (if (resume && h!!.season.coerceAtLeast(1) == season && h.episode.coerceAtLeast(1) == episode) "Resume" else "Play") + where
+        playBtn.text = com.anees.novamobile.ui.common.Ui.iconText(requireContext(), R.drawable.ic_play, playBtn.text.toString(), playBtn.currentTextColor)
     }
 
     private fun updateListLabel() {
@@ -262,8 +293,10 @@ class DetailFragment : Fragment() {
 
     private fun showEpisodes(view: View, eps: List<Episode>) {
         currentEpisodes = eps
+        val est = android.text.format.Formatter.formatShortFileSize(requireContext(),
+            com.anees.novamobile.download.DownloadStarter.estimateBytes(card, LocalStore.settings().dlQuality) * eps.size)
         view.findViewById<TextView>(R.id.download_season).text =
-            if (card.type == MediaType.ANIME) "⬇  Download Episodes…" else "⬇  Download Season ${eps.firstOrNull()?.seasonNumber ?: season}"
+            if (card.type == MediaType.ANIME) "Download Episodes…" else "Download Season ${eps.firstOrNull()?.seasonNumber ?: season}  ·  ~$est"
         val list = view.findViewById<RecyclerView>(R.id.episode_list)
         list.layoutManager = LinearLayoutManager(requireContext())   // phone: vertical episode list
         list.itemAnimator = null
@@ -303,6 +336,7 @@ class DetailFragment : Fragment() {
             val badge: TextView = v.findViewById(R.id.ep_badge)
             val dim: View = v.findViewById(R.id.ep_dim)
             val bar: ProgressBar = v.findViewById(R.id.ep_progress)
+            val dl: com.anees.novamobile.ui.downloads.ProgressRing = v.findViewById(R.id.ep_dl)
 
             init {
                 val r = 10f * v.resources.displayMetrics.density
@@ -312,29 +346,41 @@ class DetailFragment : Fragment() {
                 frame.clipToOutline = true
                 v.setOnClickListener { bindingAdapterPosition.takeIf { it != RecyclerView.NO_POSITION }?.let { onClick(eps[it]) } }
                 v.setOnLongClickListener { bindingAdapterPosition.takeIf { it != RecyclerView.NO_POSITION }?.let { episodeMenu(eps[it]) }; true }
+                dl.setOnClickListener { com.anees.novamobile.ui.common.Ui.tick(it); bindingAdapterPosition.takeIf { p -> p != RecyclerView.NO_POSITION }?.let { p -> episodeDownload(eps[p]) } }
             }
         }
 
         override fun onCreateViewHolder(p: ViewGroup, t: Int) = VH(LayoutInflater.from(p.context).inflate(R.layout.item_episode, p, false))
         override fun getItemCount() = eps.size
+
+        @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+        private fun bindRing(h: VH, ep: Episode) {
+            val s = if (card.type == MediaType.ANIME) 1 else ep.seasonNumber
+            val d = com.anees.novamobile.download.NovaDownloads.get(requireContext(), com.anees.novamobile.download.DownloadMeta.id(card, s, ep.episodeNumber))
+            h.dl.state = com.anees.novamobile.ui.downloads.DownloadUi.ring(d)
+            h.dl.progress = ((d?.percentDownloaded ?: 0f) / 100f).coerceAtLeast(0f)
+        }
+
+        override fun onBindViewHolder(h: VH, i: Int, payloads: MutableList<Any>) {
+            if (payloads.contains("dl")) bindRing(h, eps[i]) else onBindViewHolder(h, i)
+        }
+
         override fun onBindViewHolder(h: VH, i: Int) {
+            bindRing(h, eps[i])
             val ep = eps[i]
             h.title.text = if (card.type == MediaType.ANIME) "Episode ${ep.episodeNumber}" else "${ep.episodeNumber}. ${ep.name}"
             h.number.text = ep.episodeNumber.toString()
             val sNum = if (card.type == MediaType.ANIME) 1 else ep.seasonNumber
-            val dl = dlState(sNum, ep.episodeNumber)
             val prog = progress["$sNum:${ep.episodeNumber}"] ?: 0f
             val watched = prog >= 0.9f
-            // Status line: Watched / time left, and download state (Apple TV app style)
+            // Status line: Watched / time left (download state lives in the ring on the right)
             val parts = mutableListOf<String>()
-            if (watched) parts += "✓ Watched"
+            if (watched) parts += "Watched"
             else if (prog > 0.02f) parts += ep.runtime?.let { "${(it * (1 - prog)).toInt().coerceAtLeast(1)} min left" } ?: "${(prog * 100).toInt()}% watched"
-            when (dl) { null -> {}; "✓" -> parts += "⬇ Downloaded"; else -> parts += "⬇ Downloading $dl" }
             h.status.visibility = if (parts.isEmpty()) View.GONE else View.VISIBLE
             h.status.text = parts.joinToString("   ")
             h.status.setTextColor(if (watched) 0xFF30D158.toInt() else 0xCCFFFFFF.toInt())
-            h.badge.visibility = if (watched || dl == "✓") View.VISIBLE else View.GONE
-            h.badge.text = if (watched) "✓" else "⬇"
+            h.badge.visibility = View.GONE
             h.dim.visibility = if (watched) View.VISIBLE else View.GONE
             h.title.alpha = if (watched) 0.6f else 1f
             h.desc.text = listOfNotNull(ep.runtime?.let { "${it}m" }, ep.overview.ifBlank { null }).joinToString("  ·  ")

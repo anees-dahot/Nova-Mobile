@@ -85,6 +85,7 @@ class MainActivity : AppCompatActivity() {
         com.anees.novamobile.download.NovaDownloads.manager(this)
         handler.postDelayed({ com.anees.novamobile.download.DownloadStarter.resume(this) }, 3000)
         if (intent?.getStringExtra("open") == "downloads") handler.post { openDownloads() }
+        openShowFromIntent(intent)
         intent?.data?.let { com.anees.novamobile.sync.Sync.handleRedirect(this, it) }
         handler.postDelayed({ com.anees.novamobile.sync.Sync.syncNow(this) }, 6000)
 
@@ -112,6 +113,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Brand bar fades over content as it scrolls (set by Home). */
+    fun topBarHeight(): Int = topBar.height
+
     fun setTopBarSolid(solid: Boolean) {
         topBar.setBackgroundResource(if (solid) R.color.nova_black else R.drawable.topbar_bg)
     }
@@ -122,9 +125,27 @@ class MainActivity : AppCompatActivity() {
         (fragments[SEARCH] as? SearchFragment)?.startVoice()
     }
 
+    // Leaving with downloads still being matched to a stream: keep going in the background
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        com.anees.novamobile.download.ResolveService.startIfNeeded(this)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (isFinishing) com.anees.novamobile.download.ResolveService.startIfNeeded(this)
+    }
+
+    override fun onDestroy() {
+        // The hidden-WebView host belongs to this window; downloads fall back to plain-HTTP sources without it
+        if (com.anees.novamobile.ui.player.Prefetcher.host === findViewById<android.widget.FrameLayout>(R.id.sniff_host)) com.anees.novamobile.ui.player.Prefetcher.host = null
+        super.onDestroy()
+    }
+
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         if (intent.getStringExtra("open") == "downloads") openDownloads()
+        openShowFromIntent(intent)
         handlePlayIntent(intent)
         intent.data?.let { if (com.anees.novamobile.sync.Sync.handleRedirect(this, it)) android.widget.Toast.makeText(this, "Account connected", android.widget.Toast.LENGTH_SHORT).show() }
     }
@@ -179,6 +200,16 @@ class MainActivity : AppCompatActivity() {
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     fun openDownloads() = openOverlay(com.anees.novamobile.ui.downloads.DownloadsFragment())
+
+    /** "Downloaded" notification for a series: open that show's folder. */
+    private fun openShowFromIntent(i: android.content.Intent?) {
+        if (i?.getStringExtra("open") != "downloads_show") return
+        val card = runCatching { com.google.gson.Gson().fromJson(i.getStringExtra("card"), MediaCard::class.java) }.getOrNull() ?: return
+        handler.post { openDownloadsShow(card) }
+    }
+
+    /** One show's downloaded episodes (a "folder" on the Downloads page). */
+    fun openDownloadsShow(card: MediaCard) = openOverlay(com.anees.novamobile.ui.downloads.DownloadsShowFragment.of(card))
 
     /** Android 13+: ask once, at the moment it matters (first download), for progress notifications. */
     fun ensureNotificationPermission() {

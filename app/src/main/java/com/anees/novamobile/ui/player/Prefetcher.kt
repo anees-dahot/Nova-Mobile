@@ -35,7 +35,8 @@ object Prefetcher {
         job = scope.launch {
             delay(delayMs)
             val target = StreamExtractor.resolveTarget(card, season, episode, repo) ?: return@launch
-            val p = StreamExtractor.ordered().firstOrNull() ?: return@launch
+            // Embed pages only: a resolver source (HTTP search) isn't something a WebView can prefetch
+            val p = StreamExtractor.ordered().firstOrNull { it.isEmbed } ?: return@launch
             if (StreamExtractor.cached(p, target) != null) return@launch
             val h = hostOverride ?: host ?: return@launch
             val key = StreamExtractor.embedUrl(p, target)

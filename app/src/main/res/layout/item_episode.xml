@@ -32,4 +32,10 @@
             android:textColor="@color/nova_white40" android:textSize="12sp" android:maxLines="2" android:ellipsize="end"
             android:layout_marginTop="2dp"/>
     </LinearLayout>
+
+    <!-- Download: ↓ → ring with progress → ✓ -->
+    <com.anees.novamobile.ui.downloads.ProgressRing android:id="@+id/ep_dl"
+        android:layout_width="44dp" android:layout_height="44dp" android:layout_gravity="center_vertical"
+        android:layout_marginStart="4dp" android:padding="9dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"/>
 </LinearLayout>

@@ -43,15 +43,17 @@ class NovaDownloadService : DownloadService(
             .setSmallIcon(R.drawable.ic_download)
             .setContentIntent(open)
             .setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
-            .setColor(0xFF0A84FF.toInt())
+            .setColor(com.anees.novamobile.ui.common.Ui.ACCENT)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setPriority(NotificationCompat.PRIORITY_LOW)
 
-        // Pause stops the whole queue (resume from Downloads); Cancel removes the one in front
-        b.addAction(0, "Pause", service(1, buildPauseDownloadsIntent(this, NovaDownloadService::class.java, false)))
+        // Pause / Resume the whole queue; Cancel removes the one in front
+        if (NovaDownloads.storageFull) b.addAction(R.drawable.ic_play, "Resume", service(1, buildResumeDownloadsIntent(this, NovaDownloadService::class.java, true)))
+        else b.addAction(R.drawable.ic_pause, "Pause all", service(1, buildPauseDownloadsIntent(this, NovaDownloadService::class.java, false)))
         val first = running.firstOrNull()
+        (first ?: downloads.firstOrNull())?.let { DownloadMeta.of(it) }?.let { DownloadNotifier.poster(this, it.card) }?.let { b.setLargeIcon(it) }
         if (first != null && running.size == 1)
-            b.addAction(0, "Cancel", service(2, buildRemoveDownloadIntent(this, NovaDownloadService::class.java, first.request.id, false)))
+            b.addAction(R.drawable.ic_delete, "Cancel", service(2, buildRemoveDownloadIntent(this, NovaDownloadService::class.java, first.request.id, false)))
 
         when {
             blocked != null -> {

@@ -15,7 +15,7 @@ object QuickActions {
         val items = mutableListOf<ActionSheet.Item>()
         if (hist != null) {
             val where = if (card.type == MediaType.MOVIE) "" else "  S${hist.season} · E${hist.episode}"
-            items += ActionSheet.Item("▶  Resume$where") { PlayerActivity.launch(ctx, card, hist.season, hist.episode) }
+            items += ActionSheet.Item("Resume$where") { PlayerActivity.launch(ctx, card, hist.season, hist.episode) }
         }
         items += ActionSheet.Item("Details") { (ctx as? MainActivity)?.openDetail(card) }
         items += ActionSheet.Item(if (inList) "Remove from My List" else "Add to My List") { LocalStore.toggleWatchlist(card); onChanged() }

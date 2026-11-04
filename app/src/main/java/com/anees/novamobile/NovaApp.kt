@@ -13,6 +13,7 @@ class NovaApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         LocalStore.init(this)
+        com.anees.novamobile.notify.NotifyChannels.create(this)
         // Latest source list from GitHub: dead sources get replaced without reinstalling the app
         Thread { com.anees.novamobile.ui.player.StreamExtractor.refreshRemote() }.start()
     }

@@ -6,8 +6,20 @@
     android:background="@color/nova_black" android:clickable="true"
     android:foreground="?android:attr/selectableItemBackground">
 
+    <!-- Edit mode -->
+    <CheckBox android:id="@+id/dl_check" android:layout_width="32dp" android:layout_height="32dp"
+        android:layout_marginEnd="8dp" android:buttonTint="@color/nova_accent" android:clickable="false"
+        android:focusable="false" android:visibility="gone"/>
+
     <FrameLayout android:id="@+id/dl_frame" android:layout_width="120dp" android:layout_height="68dp" android:background="@drawable/skeleton">
         <ImageView android:id="@+id/dl_thumb" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
+        <!-- How much of a finished download was watched -->
+        <ProgressBar android:id="@+id/dl_watched" style="@android:style/Widget.ProgressBar.Horizontal"
+            android:layout_width="match_parent" android:layout_height="3dp" android:layout_gravity="bottom"
+            android:max="100" android:progressDrawable="@drawable/watched_track" android:visibility="gone"/>
+        <ImageView android:id="@+id/dl_done" android:layout_width="20dp" android:layout_height="20dp"
+            android:layout_gravity="top|end" android:layout_margin="4dp" android:padding="3dp"
+            android:background="@drawable/circle_glass" android:src="@drawable/ic_check" android:visibility="gone"/>
     </FrameLayout>
 
     <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
@@ -16,7 +28,12 @@
             android:textColor="@color/nova_white" android:textSize="15sp" android:fontFamily="sans-serif-medium"
             android:maxLines="2" android:ellipsize="end"/>
         <TextView android:id="@+id/dl_sub" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:textColor="#99FFFFFF" android:textSize="13sp" android:layout_marginTop="2dp" android:maxLines="2" android:ellipsize="end"/>
+            android:textColor="#99FFFFFF" android:textSize="13sp" android:layout_marginTop="2dp" android:maxLines="2" android:ellipsize="end"
+            android:fontFeatureSettings="tnum"/>
+        <TextView android:id="@+id/dl_badge" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginTop="4dp" android:background="@drawable/badge_soft"
+            android:paddingStart="6dp" android:paddingEnd="6dp" android:paddingTop="1dp" android:paddingBottom="1dp"
+            android:textColor="#CCFFFFFF" android:textSize="11sp" android:visibility="gone"/>
     </LinearLayout>
 
     <com.anees.novamobile.ui.downloads.ProgressRing android:id="@+id/dl_ring"

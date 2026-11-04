@@ -1,7 +1,5 @@
 package com.anees.novamobile.calendar
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -11,6 +9,7 @@ import androidx.core.app.NotificationManagerCompat
 import com.anees.novamobile.MainActivity
 import com.anees.novamobile.R
 import com.anees.novamobile.data.local.LocalStore
+import com.anees.novamobile.notify.NotifyChannels
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -20,7 +19,6 @@ class AiringReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION_EPISODE = "com.anees.novamobile.AIRING_EPISODE"
         const val ACTION_DAILY = "com.anees.novamobile.AIRING_DAILY"
-        private const val CHANNEL = "nova_new_episodes"
     }
 
     override fun onReceive(ctx: Context, intent: Intent) {
@@ -34,20 +32,41 @@ class AiringReceiver : BroadcastReceiver() {
         }
     }
 
+    /** "S2 · E5 is out" with the poster; Play and Download right from the notification. */
     private fun notify(ctx: Context, i: Intent) {
-        val nm = NotificationManagerCompat.from(ctx)
-        if (android.os.Build.VERSION.SDK_INT >= 26)
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "New episodes", NotificationManager.IMPORTANCE_DEFAULT))
         val s = i.getIntExtra("season", 1); val e = i.getIntExtra("episode", 1)
-        val open = PendingIntent.getActivity(ctx, (i.getStringExtra("card") ?: "").hashCode(),
-            Intent(ctx, MainActivity::class.java).putExtra("play_card", i.getStringExtra("card")).putExtra("play_s", s).putExtra("play_e", e)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val n = NotificationCompat.Builder(ctx, CHANNEL)
-            .setSmallIcon(R.drawable.ic_calendar)
-            .setContentTitle(i.getStringExtra("title"))
-            .setContentText("S$s · E$e is out — tap to play")
-            .setContentIntent(open).setAutoCancel(true).build()
-        runCatching { nm.notify("$s:$e:${i.getStringExtra("title")}".hashCode(), n) }
+        val cardJson = i.getStringExtra("card")
+        val title = i.getStringExtra("title") ?: return
+        val nid = "$s:$e:$title".hashCode()
+        val done = goAsync()
+        CoroutineScope(Dispatchers.Main).launch {
+            try {
+                val card = cardJson?.let { runCatching { com.google.gson.Gson().fromJson(it, com.anees.novamobile.data.model.MediaCard::class.java) }.getOrNull() }
+                val open = PendingIntent.getActivity(ctx, nid,
+                    Intent(ctx, MainActivity::class.java).putExtra("play_card", cardJson).putExtra("play_s", s).putExtra("play_e", e)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                val b = NotificationCompat.Builder(ctx, NotifyChannels.NEW_EPISODES)
+                    .setSmallIcon(R.drawable.ic_calendar)
+                    .setContentTitle(title)
+                    .setContentText(listOfNotNull("S$s · E$e is out", i.getStringExtra("name")?.takeIf { it.isNotBlank() }).joinToString("  ·  "))
+                    .setContentIntent(open).setAutoCancel(true)
+                    .setGroup(NotifyChannels.GROUP_EPISODES)
+                    .setColor(com.anees.novamobile.ui.common.Ui.ACCENT)
+                    .addAction(R.drawable.ic_play, "Play", open)
+                if (card != null) {
+                    NotifyChannels.bitmap(ctx, card.posterUrl, 256)?.let { b.setLargeIcon(it) }
+                    val dl = PendingIntent.getBroadcast(ctx, nid + 1,
+                        Intent(ctx, com.anees.novamobile.download.DownloadActionReceiver::class.java)
+                            .setAction(com.anees.novamobile.download.DownloadActionReceiver.EPISODE)
+                            .putExtra("card", cardJson).putExtra("season", s).putExtra("episode", e).putExtra("nid", nid),
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                    b.addAction(R.drawable.ic_download, "Download", dl)
+                    // Smart Downloads: new episodes of shows you follow download on their own
+                    if (LocalStore.settings().smartDownloads) com.anees.novamobile.download.DownloadActionReceiver.queueEpisode(ctx, card, s, e)
+                }
+                runCatching { NotificationManagerCompat.from(ctx).notify(nid, b.build()) }
+            } finally { done.finish() }
+        }
     }
 }

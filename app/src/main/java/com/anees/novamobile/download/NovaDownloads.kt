@@ -43,7 +43,10 @@ data class DownloadMeta(
     val provider: String,
     val subtitle: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    val subtitles: List<String>? = null     // every subtitle file saved with the download
+    val subtitles: List<String>? = null,    // every subtitle file saved with the download
+    val subtitleLangs: List<String>? = null, // language code per file in [subtitles] ("" = unknown)
+    val quality: Int? = null,               // video height actually downloaded
+    val audioLangs: List<String>? = null    // audio languages kept
 
 ) {
     fun toBytes(): ByteArray = Gson().toJson(this).toByteArray()
@@ -72,7 +75,6 @@ object NovaDownloads {
     lateinit var dir: File; private set
     private lateinit var upstream: DataSource.Factory
     private val main = Handler(Looper.getMainLooper())
-    private val attempts = HashMap<String, Int>()
     @Volatile var storageFull = false; private set
 
     /** Tokens that change on every fresh link; dropping them from cache keys lets a refreshed link reuse saved data. */
@@ -111,7 +113,9 @@ object NovaDownloads {
         dm.addListener(Policy(app))
         manager = dm
         // Failed by network trouble while the app was closed: try again now
-        main.postDelayed({ all(app).filter { it.state == Download.STATE_FAILED && attempts[it.request.id] == null }.forEach { dm.addDownload(it.request) } }, 3000)
+        main.postDelayed({ all(app).filter { it.state == Download.STATE_FAILED && LocalStore.dlAttempts(it.request.id) < 3 }.forEach { dm.addDownload(it.request) } }, 3000)
+        // Subtitle files of downloads that no longer exist
+        main.postDelayed({ cleanOrphans(app) }, 10_000)
         return dm
     }
 
@@ -155,10 +159,10 @@ object NovaDownloads {
             val id = d.request.id
             when (d.state) {
                 Download.STATE_COMPLETED -> {
-                    attempts.remove(id)
+                    LocalStore.setDlAttempts(id, 0)
                     // A finished file that's clearly too small is broken, not a download
                     if (d.bytesDownloaded < 2L * 1024 * 1024) { Log.w(TAG, "$id too small, removed"); dm.removeDownload(id); return }
-                    notifyDone(ctx, d)
+                    DownloadNotifier.done(ctx, d)
                 }
                 Download.STATE_FAILED -> handleFailure(dm, d, finalException)
                 else -> {}
@@ -167,8 +171,8 @@ object NovaDownloads {
 
         private fun handleFailure(dm: DownloadManager, d: Download, e: Exception?) {
             val id = d.request.id
-            val n = (attempts[id] ?: 0) + 1
-            attempts[id] = n
+            val n = LocalStore.dlAttempts(id) + 1
+            LocalStore.setDlAttempts(id, n)
             val code = generateSequence(e as Throwable?) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode
             val msg = generateSequence(e as Throwable?) { it.cause }.mapNotNull { it.message }.joinToString(" ")
             Log.w(TAG, "$id failed (#$n): code=$code $msg")
@@ -176,6 +180,7 @@ object NovaDownloads {
                 msg.contains("ENOSPC") || msg.contains("No space", true) -> {
                     storageFull = true
                     dm.pauseDownloads()
+                    DownloadNotifier.storageFull(ctx)
                 }
                 code in setOf(403, 404, 410) -> {
                     // The link expired: get a fresh one (next source after 2 failures); saved data is kept
@@ -186,7 +191,7 @@ object NovaDownloads {
                     main.postDelayed({ dm.addDownload(d.request) }, wait)
                 }
                 n < 3 -> main.postDelayed({ dm.addDownload(d.request) }, 10_000L)
-                else -> {} // stays failed: "Failed — tap to retry"
+                else -> DownloadMeta.of(d)?.let { DownloadNotifier.failed(ctx, id, DownloadNotifier.name(it), "The stream stopped working. Retry finds a fresh link.") }
             }
         }
 
@@ -197,22 +202,20 @@ object NovaDownloads {
         }
     }
 
+    /** Every subtitle file saved with a download (they live outside the media cache). */
+    fun deleteSubtitles(d: Download) {
+        val m = DownloadMeta.of(d) ?: return
+        (m.subtitles.orEmpty() + listOfNotNull(m.subtitle)).distinct().forEach { runCatching { File(it).delete() } }
+    }
+
     fun clearStorageFull(ctx: Context) { storageFull = false; manager(ctx).resumeDownloads() }
 
-    fun retry(ctx: Context, d: Download) { attempts.remove(d.request.id); manager(ctx).addDownload(d.request) }
+    fun retry(ctx: Context, d: Download) { LocalStore.setDlAttempts(d.request.id, 0); manager(ctx).addDownload(d.request) }
 
-    private fun notifyDone(ctx: Context, d: Download) {
-        val meta = DownloadMeta.of(d) ?: return
-        val nm = NotificationManagerCompat.from(ctx)
-        if (android.os.Build.VERSION.SDK_INT >= 26) nm.createNotificationChannel(
-            android.app.NotificationChannel(DONE_CHANNEL, "Finished downloads", android.app.NotificationManager.IMPORTANCE_DEFAULT))
-        val title = if (meta.season > 0) "${meta.card.title} · S${meta.season} E${meta.episode}" else meta.card.title
-        val n = NotificationCompat.Builder(ctx, DONE_CHANNEL)
-            .setSmallIcon(R.drawable.ic_download)
-            .setContentTitle("Downloaded")
-            .setContentText(title)
-            .setAutoCancel(true)
-            .build()
-        runCatching { nm.notify(d.request.id.hashCode(), n) }
+    private fun cleanOrphans(ctx: Context) {
+        val keep = all(ctx).flatMap { d -> DownloadMeta.of(d)?.let { it.subtitles.orEmpty() + listOfNotNull(it.subtitle) }.orEmpty() }.toSet()
+        val old = System.currentTimeMillis() - 3_600_000   // files from a download being set up right now are kept
+        File(dir, "subs").listFiles()?.filter { it.absolutePath !in keep && it.lastModified() < old }?.forEach { it.delete() }
     }
+
 }

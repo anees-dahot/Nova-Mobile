@@ -114,10 +114,12 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
         val data = viewModel.homeData.value ?: return
         if (view == null) return
         val content = sections(data)
-        if (content.isEmpty()) return
-        featured = content.first().second.filter { it.backdropUrl != null }.take(6)
+        // Nothing from the network (offline, all sources down): Home still shows what's on the device
+        if (content.isEmpty() && tabIndex != 0) return
+        content.firstOrNull()?.let { featured = it.second.filter { c -> c.backdropUrl != null }.take(6) }
 
-        val items = mutableListOf<HomeItem>(HomeItem.Hero)
+        val items = mutableListOf<HomeItem>()
+        if (featured.isNotEmpty() || heroCard != null) items += HomeItem.Hero
         if (tabIndex == 0) {
             val history = LocalStore.history()
             if (history.isNotEmpty()) items += HomeItem.Row("cw", "Continue Watching", history.map { it.card }, wide = true,
@@ -125,9 +127,17 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
                 subtitles = history.map { h -> if (h.card.type == MediaType.MOVIE) "${((h.durationMs - h.positionMs) / 60_000).coerceAtLeast(1)} min left" else "S${h.season} · E${h.episode}" })
             val list = LocalStore.watchlist()
             if (list.isNotEmpty()) items += HomeItem.Row("mylist", "My List", list)
+            downloadsRow()?.let { row ->
+                // Offline: downloads are what can play, so they go first
+                if (offline() || content.isEmpty()) items.add(if (items.firstOrNull() == HomeItem.Hero) 1 else 0, row) else items += row
+            }
             viewModel.trending.value?.take(10)?.takeIf { it.size >= 5 }?.let { items += HomeItem.Row("top10", "Top 10 Today", it, ranked = true) }
         }
         content.forEach { (title, cards) -> items += HomeItem.Row(title, title, cards) }
+        if (items.isEmpty()) return  // keep skeletons until something arrives
+        // No banner (offline): first row would sit under the top bar
+        val top = if (items.first() == HomeItem.Hero) 0 else (activity as? MainActivity)?.topBarHeight() ?: 0
+        if (rows.paddingTop != top) { rows.clipToPadding = false; rows.setPadding(rows.paddingLeft, top, rows.paddingRight, rows.paddingBottom) }
         adapter.submitList(items)
         if (heroCard == null) featured.firstOrNull()?.let { setHero(it) }
 
@@ -140,7 +150,28 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
 
     override fun onCardFocused(card: MediaCard) {}
 
+    /** One card per downloaded show / movie. */
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    private fun downloadsRow(): HomeItem.Row? {
+        val done = com.anees.novamobile.download.NovaDownloads.all(requireContext())
+            .filter { it.state == androidx.media3.exoplayer.offline.Download.STATE_COMPLETED }
+            .mapNotNull { com.anees.novamobile.download.DownloadMeta.of(it) }
+        if (done.isEmpty()) return null
+        val groups = done.groupBy { "${it.card.type}:${it.card.id}" }.values.sortedByDescending { g -> g.maxOf { it.createdAt } }
+        return HomeItem.Row("downloads", "Downloads", groups.map { it.first().card },
+            subtitles = groups.map { g -> if (g.first().card.type == MediaType.MOVIE) "Downloaded" else "${g.size} episode${if (g.size > 1) "s" else ""}" })
+    }
+
+    private fun offline(): Boolean {
+        val cm = context?.getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        return cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) != true
+    }
+
     override fun onCardClick(row: HomeItem.Row, index: Int, card: MediaCard) {
+        if (row.key == "downloads") {
+            if (card.type == MediaType.MOVIE) PlayerActivity.launch(requireContext(), card) else (activity as? MainActivity)?.openDownloadsShow(card)
+            return
+        }
         if (row.key == "cw") {
             val h = LocalStore.history().getOrNull(index) ?: return
             PlayerActivity.launch(requireContext(), h.card, h.season, h.episode)
@@ -189,7 +220,9 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
             card.genres.ifEmpty { null },
             LangTags.label(card, LocalStore.audioLangs("${card.type}:${card.id}"))
         ).joinToString("  ·  ")
-        v.findViewById<Button>(R.id.btn_play).text = if (LocalStore.historyFor(card) != null) "▶  Resume" else "▶  Play"
+        v.findViewById<Button>(R.id.btn_play).apply {
+            text = com.anees.novamobile.ui.common.Ui.iconText(context, R.drawable.ic_play, if (LocalStore.historyFor(card) != null) "Resume" else "Play", currentTextColor)
+        }
         v.findViewById<Button>(R.id.btn_watchlist).text = if (LocalStore.inWatchlist(card)) "✓  My List" else "+  My List"
     }
 

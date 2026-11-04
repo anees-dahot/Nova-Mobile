@@ -21,6 +21,7 @@ import com.anees.novamobile.data.api.RetrofitClient
 import com.anees.novamobile.data.local.LocalStore
 import com.anees.novamobile.data.model.LangTags
 import com.anees.novamobile.data.model.MediaCard
+import com.anees.novamobile.ui.player.AudioProbe
 import com.anees.novamobile.data.repository.MediaRepository
 import com.anees.novamobile.ui.player.PngStripDataSource
 import com.anees.novamobile.ui.player.Prefetcher
@@ -45,7 +46,20 @@ object DownloadStarter {
     private val repo = MediaRepository()
     private var worker: Job? = null
 
-    data class Item(val card: MediaCard, val season: Int, val episode: Int, val refreshOf: String? = null, val skipProvider: String? = null)
+    /** [quality]: 0 480p, 1 720p, 2 1080p; null = the Settings default. */
+    data class Item(val card: MediaCard, val season: Int, val episode: Int, val refreshOf: String? = null, val skipProvider: String? = null,
+                    val quality: Int? = null)
+
+    /** True while items are being resolved (keeps [ResolveService] alive). */
+    val busy get() = worker?.isActive == true
+
+    /** Rough size of one item at a quality, from typical stream bitrates (GB per hour: 0.45 / 0.9 / 1.8). */
+    fun estimateBytes(card: MediaCard, quality: Int): Long {
+        val minutes = card.runtime?.takeIf { it > 0 } ?: when (card.type) { com.anees.novamobile.data.model.MediaType.MOVIE -> 120; com.anees.novamobile.data.model.MediaType.ANIME -> 24; else -> 45 }
+        val gbPerHour = when (quality) { 0 -> 0.45; 2 -> 1.8; else -> 0.9 }
+        return (minutes / 60.0 * gbPerHour * 1024 * 1024 * 1024).toLong()
+    }
+
 
     /** Single or bulk. Already downloaded / queued episodes are skipped. */
     /** Returns how many were added (0 = everything was already downloaded or queued). */
@@ -61,17 +75,25 @@ object DownloadStarter {
         return fresh.size
     }
 
-    /** Called at app start and after enqueue: resolve whatever is still pending. */
+    /**
+     * Called at app start, after enqueue, and by [ResolveService]: resolve whatever is still pending.
+     * With the app open every source is tried (hidden WebView in the app window). With the app closed
+     * only plain-HTTP sources can run; items they can't find wait for the app to open again.
+     */
     fun resume(ctx: Context) {
         if (worker?.isActive == true) return
         val app = ctx.applicationContext
         worker = scope.launch {
             while (isActive) {
                 val next = LocalStore.pendingDownloads().firstOrNull() ?: break
-                if (Prefetcher.host == null) break                    // app window gone: continue next launch
-                val ok = runCatching { start(app, next) }.onFailure { Log.w(TAG, "start failed: ${it.message}") }.getOrDefault(false)
+                val headless = Prefetcher.host == null
+                val ok = runCatching { start(app, next, headless) }.onFailure { Log.w(TAG, "start failed: ${it.message}") }.getOrDefault(false)
+                if (!ok && headless) break                           // needs a WebView source: continue when the app opens
                 LocalStore.savePendingDownloads(LocalStore.pendingDownloads().drop(1))
                 // No source had it: set aside, shown in Downloads as "Couldn't find a source — tap to retry"
+                if (!ok) DownloadNotifier.failed(app, DownloadMeta.id(next.card, next.season, next.episode),
+                    if (next.card.type == com.anees.novamobile.data.model.MediaType.MOVIE) next.card.title else "${next.card.title} · S${next.season} E${next.episode}",
+                    "No source had it right now. Retry later.")
                 if (!ok) LocalStore.saveUnresolved((LocalStore.unresolved().filterNot { it.card.id == next.card.id && it.episode == next.episode && it.season == next.season } + next).takeLast(50))
                 else LocalStore.saveUnresolved(LocalStore.unresolved().filterNot { it.card.id == next.card.id && it.episode == next.episode && it.season == next.season })
             }
@@ -84,29 +106,52 @@ object DownloadStarter {
         enqueue(ctx, listOf(Item(meta.card, meta.season, meta.episode, refreshOf = d.request.id, skipProvider = meta.provider.takeIf { nextSource })))
     }
 
-    private suspend fun start(ctx: Context, item: Item): Boolean {
-        val host = Prefetcher.host ?: return false          // needs the app's window for the hidden WebView
+    private suspend fun start(ctx: Context, item: Item, headless: Boolean): Boolean {
         val id = DownloadMeta.id(item.card, item.season, item.episode)
         val target = StreamExtractor.resolveTarget(item.card, item.season, item.episode, repo) ?: return false
-        for (p in StreamExtractor.ordered().filter { it.name != item.skipProvider }) {
-            val sniffed = StreamExtractor.cached(p, target) ?: WebStreamSniffer(ctx, host).sniff(StreamExtractor.embedUrl(p, target), p.timeoutMs) ?: continue
+        val sources = StreamExtractor.ordered().filter { it.name != item.skipProvider }
+        // Ask every multi-audio resolver at once and save the stream with the most real languages
+        val richest = richest(sources, target)
+        for (p in listOfNotNull(richest?.first) + sources.filter { it != richest?.first }) {
+            val host = Prefetcher.host
+            if (p.resolver == null && (headless || host == null) && StreamExtractor.cached(p, target) == null) continue
+            val sniffed = richest?.takeIf { it.first == p }?.second ?: StreamExtractor.cached(p, target)
+                ?: (if (p.resolver != null) withTimeoutOrNull(p.timeoutMs) { p.resolver.invoke(target) }
+                    else WebStreamSniffer(ctx, host!!).sniff(StreamExtractor.embedUrl(p, target), p.timeoutMs))
+                ?: continue
             StreamExtractor.remember(p, target, sniffed)
             rememberHeaders(sniffed)
             // Every subtitle the source offers, cleaned of ads
-            val subs = withContext(Dispatchers.IO) {
+            val saved = withContext(Dispatchers.IO) {
                 val dir = File(NovaDownloads.manager(ctx).let { NovaDownloads.dir }, "subs").apply { mkdirs() }
                 sniffed.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(10).mapIndexedNotNull { i, url ->
                     val out = File(dir, "${id.hashCode()}_$i.vtt")
-                    if (SubtitleCleaner.saveTo(ctx, url, RetrofitClient.base, sniffed.headers, out)) out.absolutePath else null
+                    if (SubtitleCleaner.saveTo(ctx, url, RetrofitClient.base, sniffed.headers, out)) out.absolutePath to (SubtitleCleaner.langOf(url) ?: "") else null
                 }
             }
-            val meta = DownloadMeta(item.card, item.season, item.episode, p.name, subs.firstOrNull(), subtitles = subs)
-            val request = runCatching { buildRequest(ctx, id, sniffed, meta) }.getOrNull() ?: continue
+            val subs = saved.map { it.first }
+            val meta = DownloadMeta(item.card, item.season, item.episode, p.name, subs.firstOrNull(), subtitles = subs,
+                subtitleLangs = saved.map { it.second })
+            val request = runCatching { buildRequest(ctx, id, sniffed, meta, item.quality) }.getOrNull() ?: continue
             DownloadService.sendAddDownload(ctx, NovaDownloadService::class.java, request, false)
             Log.i(TAG, "queued $id via ${p.name}")
             return true
         }
         return false
+    }
+
+    private suspend fun richest(sources: List<StreamExtractor.Provider>, t: StreamExtractor.Target):
+            Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed>? = coroutineScope {
+        val want = LocalStore.settings().audioLang
+        sources.filter { it.multiAudio && (it.resolver != null || StreamExtractor.cached(it, t) != null) }.map { p ->
+            async {
+                val r = StreamExtractor.cached(p, t)
+                    ?: withTimeoutOrNull(p.timeoutMs) { runCatching { p.resolver!!.invoke(t) }.getOrNull() }
+                r?.let { Triple(p, it, AudioProbe.langs(it)) }
+            }
+        }.awaitAll().filterNotNull()
+            .also { l -> Log.i(TAG, "download languages: ${l.joinToString { "${it.first.name}=${it.third}" }}") }
+            .maxByOrNull { AudioProbe.score(it.third, want) }?.let { it.first to it.second }
     }
 
     private fun rememberHeaders(s: WebStreamSniffer.Sniffed) {
@@ -117,7 +162,8 @@ object DownloadStarter {
     }
 
     /** Video at the chosen quality; audio in the preferred language plus English, so multi-audio survives offline. */
-    private suspend fun buildRequest(ctx: Context, id: String, s: WebStreamSniffer.Sniffed, meta: DownloadMeta): DownloadRequest {
+    private suspend fun buildRequest(ctx: Context, id: String, s: WebStreamSniffer.Sniffed, meta0: DownloadMeta, quality: Int?): DownloadRequest {
+        var meta = meta0
         val settings = LocalStore.settings()
         val http = OkHttpDataSource.Factory(RetrofitClient.base).setUserAgent(s.userAgent).setDefaultRequestProperties(s.headers)
         val factory: DataSource.Factory = ResolvingDataSource.Factory(
@@ -125,26 +171,38 @@ object DownloadStarter {
         ) { spec -> spec.withUri(StreamExtractor.unwrapProxy(spec.uri)) }
         val item = MediaItem.Builder().setUri(s.url).setCustomCacheKey(null)
             .apply { if (s.url.lowercase().contains("m3u8")) setMimeType(MimeTypes.APPLICATION_M3U8) }.build()
-        val (w, h) = when (settings.dlQuality) { 0 -> 854 to 480; 2 -> 1920 to 1080; else -> 1280 to 720 }
+        val (w, h) = when (quality ?: settings.dlQuality) { 0 -> 854 to 480; 2 -> 1920 to 1080; else -> 1280 to 720 }
         val params = DownloadHelper.getDefaultTrackSelectorParameters(ctx).buildUpon()
             .setMaxVideoSize(w, h).setForceHighestSupportedBitrate(true).build()
         val helper = DownloadHelper.forMediaItem(ctx, item, DefaultRenderersFactory(ctx), factory)
         try {
             withContext(Dispatchers.Main) { prepare(helper) }
+            // Audio: every language, or (Settings → Downloads) only the preferred one + English to save space
+            val want = setOf(settings.audioLang, "en")
+            fun lang(f: androidx.media3.common.Format) = f.language?.take(2)?.takeIf { it != "un" } ?: LangTags.code(f.label)
+            var height = 0
+            val audioKept = mutableSetOf<String>()
             for (period in 0 until helper.periodCount) {
                 helper.clearTrackSelections(period)
                 helper.addTrackSelection(period, params)   // video at the chosen quality
-                // Every audio language and every built-in subtitle track the stream has
                 val info = helper.getMappedTrackInfo(period)
                 for (r in 0 until info.rendererCount) {
                     val type = info.getRendererType(r)
-                    if (type != androidx.media3.common.C.TRACK_TYPE_AUDIO && type != androidx.media3.common.C.TRACK_TYPE_TEXT) continue
                     val groups = info.getTrackGroups(r)
-                    val overrides = mutableListOf<DefaultTrackSelector.SelectionOverride>()
-                    for (g in 0 until groups.length) for (t in 0 until groups[g].length) overrides += DefaultTrackSelector.SelectionOverride(g, t)
-                    if (overrides.isNotEmpty()) helper.addTrackSelectionForSingleRenderer(period, r, params, overrides)
+                    if (type == androidx.media3.common.C.TRACK_TYPE_VIDEO) {
+                        for (g in 0 until groups.length) for (t in 0 until groups[g].length)
+                            groups[g].getFormat(t).height.takeIf { it in 1..h }?.let { if (it > height) height = it }
+                    }
+                    if (type != androidx.media3.common.C.TRACK_TYPE_AUDIO && type != androidx.media3.common.C.TRACK_TYPE_TEXT) continue
+                    val all = mutableListOf<Pair<DefaultTrackSelector.SelectionOverride, String?>>()
+                    for (g in 0 until groups.length) for (t in 0 until groups[g].length) all += DefaultTrackSelector.SelectionOverride(g, t) to lang(groups[g].getFormat(t))
+                    val keep = if (type == androidx.media3.common.C.TRACK_TYPE_AUDIO && !settings.dlAudioAll && settings.audioLang != "orig")
+                        all.filter { it.second in want }.ifEmpty { all } else all
+                    if (type == androidx.media3.common.C.TRACK_TYPE_AUDIO) keep.mapNotNullTo(audioKept) { it.second }
+                    if (keep.isNotEmpty()) helper.addTrackSelectionForSingleRenderer(period, r, params, keep.map { it.first })
                 }
             }
+            meta = meta.copy(quality = height.takeIf { it > 0 }, audioLangs = audioKept.toList().takeIf { it.isNotEmpty() })
             return helper.getDownloadRequest(id, meta.toBytes())
         } finally {
             helper.release()
@@ -153,7 +211,7 @@ object DownloadStarter {
 
     private suspend fun prepare(helper: DownloadHelper) = suspendCancellableCoroutine<Unit> { cont ->
         helper.prepare(object : DownloadHelper.Callback {
-            override fun onPrepared(h: DownloadHelper) { if (cont.isActive) cont.resume(Unit) }
+            override fun onPrepared(h: DownloadHelper, tracksInfoAvailable: Boolean) { if (cont.isActive) cont.resume(Unit) }
             override fun onPrepareError(h: DownloadHelper, e: IOException) { if (cont.isActive) cont.resumeWithException(e) }
         })
     }

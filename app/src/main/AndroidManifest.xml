@@ -71,6 +71,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </service>
+        <!-- Finishes matching queued downloads to a stream after the app is closed -->
+        <service
+            android:name=".download.ResolveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <!-- Retry / delete actions from download notifications -->
+        <receiver android:name=".download.DownloadActionReceiver" android:exported="false" />
         <service
             android:name="androidx.media3.exoplayer.scheduler.PlatformScheduler$PlatformSchedulerService"
             android:exported="true"
@@ -81,9 +88,12 @@
             android:name=".ui.player.PlayerActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation"
             android:exported="false"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
+            android:taskAffinity=".player"
+            android:excludeFromRecents="true"
             android:screenOrientation="sensorLandscape"
-            android:supportsPictureInPicture="false"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true"
             android:theme="@style/Theme.NovaTV.Player" />
     </application>
 </manifest>

@@ -1,0 +1,38 @@
+Nova TV — third-party credits
+=============================
+
+Indflix (https://github.com/dipender98/Indflix)
+-----------------------------------------------
+Parts of this app are ported from Indflix, licensed under the
+GNU General Public License v3.0 (GPL-3.0):
+
+  app/src/main/java/com/anees/novamobile/data/sources/vegamovies/
+      VmHttp.kt            ← VegamoviesPlugin.kt (HTTP layer, domain healing, search index)
+      VegamoviesSource.kt  ← VegamoviesPlugin.kt (search → detail → link selection)
+      FuzzySearch.kt       ← FuzzySearch.kt (title matching / ranking)
+      LinkNaming.kt        ← LinkNaming.kt (quality & season/episode parsing)
+      NexdriveResolver.kt  ← NexdriveResolver.kt (gateway → fastdl / vcloud expansion)
+      VcloudResolver.kt    ← VcloudResolver.kt (double-atob token chain → r2 stream URLs)
+
+  app/src/main/java/com/anees/novamobile/data/sources/indstream/
+      IndStreamSources.kt  ← IndStream StreamEngine.kt (NetMirror, Braflix, VaPlayer resolvers)
+                             + ServerRegistry.kt (endpoint templates)
+  app/src/main/java/com/anees/novamobile/data/sources/multimovies/
+      MultimoviesSource.kt ← Multimovies MultimoviesPlugin.kt (V2 search, watchConfig servers,
+                             domain resolver, embed unwrapping) + ExternalSources.kt (ModiPlay)
+
+Each ported file carries a provenance header naming the original source file
+and describing the adaptations.
+
+Adaptations: CloudStream-specific code (SearchResponse/LoadResponse/ExtractorLink,
+CloudflareKiller, MetadataService, SettingsUi) was not ported; HTTP goes through
+OkHttp with coroutine cancellation instead of CloudStream's `app.get`.
+
+NOTE ON LICENSING: because these files derive from GPL-3.0-licensed code, the
+combined work is a derivative of the Indflix project and must be distributed
+under the terms of the GPL-3.0. If you distribute this app, keep the source
+available and comply with GPL-3.0.
+
+jsoup (https://jsoup.org/)
+-------------------------
+MIT-licensed HTML parser, used by the Vegamovies port (org.jsoup:jsoup:1.17.2).

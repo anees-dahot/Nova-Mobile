@@ -17,10 +17,22 @@ object StreamExtractor {
 
     /** [timeoutMs]: slow TV boxes need ~20-25s for vidsrc's page chain on a cold WebView. */
     data class Provider(val name: String, val movie: (Int) -> String, val tv: (Int, Int, Int) -> String,
-                        val timeoutMs: Long = 15_000, val multiAudio: Boolean = false)
+                        val timeoutMs: Long = 15_000, val multiAudio: Boolean = false,
+                        /**
+                         * Search-based source (Vegamovies-style): finds the stream over plain HTTP from
+                         * title + season/episode, so [movie]/[tv] are only its cache key, not a real page.
+                         */
+                        val resolver: (suspend (Target) -> WebStreamSniffer.Sniffed?)? = null) {
+        val isEmbed get() = resolver == null
+    }
 
-    /** What to ask providers for: always a TMDB id, movie or tv episode. */
-    data class Target(val tmdbId: Int, val isMovie: Boolean, val season: Int, val episode: Int, val malId: Int? = null)
+    /** What to ask providers for: a TMDB id (movie or tv episode) plus the title, so
+     *  search-based sources (Vegamovies) can find the page even though they don't take ids. */
+    data class Target(val tmdbId: Int, val isMovie: Boolean, val season: Int, val episode: Int,
+                      val malId: Int? = null, val title: String? = null, val year: Int? = null,
+                      val imdbId: String? = null,
+                      /** Anime: episode number within the AniList/MAL entry (season/episode are TVDB's). */
+                      val aniEpisode: Int? = null)
 
     /** Built-in list, used until (or if) the remote sources.json from GitHub loads. */
     val BUILT_IN = listOf(
@@ -38,8 +50,46 @@ object StreamExtractor {
         Provider("VidFast", { "https://vidfast.pro/movie/$it?autoPlay=true" }, { id, s, e -> "https://vidfast.pro/tv/$id/$s/$e?autoPlay=true" }),
     )
 
-    /** Remote list (sources.json in the GitHub repo) if available, else the built-in one. */
-    val PROVIDERS: List<Provider> get() = remote() ?: BUILT_IN
+    /**
+     * Sources ported from Indflix (GPL-3.0): always on, independent of sources.json.
+     * They resolve over plain HTTP, so they don't need an embed page (their movie/tv lambdas
+     * are only stable cache keys).
+     */
+    val RESOLVERS = listOf(
+        Provider("Vegamovies",
+            { id -> "vegamovies://movie/$id" },
+            { id, s, e -> "vegamovies://tv/$id/$s/$e" },
+            timeoutMs = 30_000,
+            resolver = { t -> com.anees.novamobile.data.sources.vegamovies.VegamoviesSource.resolve(t) }),
+        // IndStream JSON APIs (Nov 2026: all three answered Inception + GoT S1E1 with playable links)
+        Provider("NetMirror", { "netmirror://movie/$it" }, { id, s, e -> "netmirror://tv/$id/$s/$e" },
+            timeoutMs = 20_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.indstream.IndStreamSources.netmirror(t) }),
+        Provider("VaPlayer", { "vaplayer://movie/$it" }, { id, s, e -> "vaplayer://tv/$id/$s/$e" },
+            timeoutMs = 20_000,
+            resolver = { t -> com.anees.novamobile.data.sources.indstream.IndStreamSources.vaplayer(t) }),
+        Provider("Braflix", { "braflix://movie/$it" }, { id, s, e -> "braflix://tv/$id/$s/$e" },
+            timeoutMs = 20_000,
+            resolver = { t -> com.anees.novamobile.data.sources.indstream.IndStreamSources.braflix(t) }),
+        // Hub of iframe servers (Cineverse Hindi-first, Filmu 1080p multi-audio, …), unwrapped over HTTP
+        Provider("Multimovies", { "multimovies://movie/$it" }, { id, s, e -> "multimovies://tv/$id/$s/$e" },
+            timeoutMs = 30_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.multimovies.MultimoviesSource.resolve(t) }),
+        // Anime with every Indian dub in one HLS (FirePlayer); skip non-anime titles instantly
+        Provider("AnimeSalt", { "animesalt://movie/$it" }, { id, s, e -> "animesalt://tv/$id/$s/$e" },
+            timeoutMs = 25_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.anime.ToroAnimeSource.animeSalt.resolve(t) }),
+        Provider("AnimeWorld", { "animeworld://movie/$it" }, { id, s, e -> "animeworld://tv/$id/$s/$e" },
+            timeoutMs = 25_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.anime.ToroAnimeSource.animeWorld.resolve(t) }),
+        // HiAnime's player: MAL id + episode → 1080p sub/dub HLS, new episodes fast
+        Provider("ZokoAnime", { "zokoanime://movie/$it" }, { id, s, e -> "zokoanime://tv/$id/$s/$e" },
+            timeoutMs = 15_000,
+            resolver = { t -> com.anees.novamobile.data.sources.anime.ZokoAnimeSource.resolve(t) }),
+    )
+
+    /** Remote list (sources.json in the GitHub repo) if available, else the built-in one + resolvers. */
+    val PROVIDERS: List<Provider> get() = (remote() ?: BUILT_IN) + RESOLVERS
 
     private var remoteCache: Pair<String, List<Provider>>? = null
 
@@ -123,30 +173,35 @@ object StreamExtractor {
 
     /** Movies/series map 1:1; anime goes AniList → TMDB via ani.zip (season/episode from TVDB numbering). */
     suspend fun resolveTarget(card: MediaCard, season: Int, episode: Int, repo: MediaRepository): Target? = when (card.type) {
-        MediaType.MOVIE -> Target(card.tmdbId ?: card.id, true, 0, 0)
-        MediaType.SERIES -> Target(card.tmdbId ?: card.id, false, season.coerceAtLeast(1), episode.coerceAtLeast(1))
+        MediaType.MOVIE -> Target(card.tmdbId ?: card.id, true, 0, 0, title = card.title, year = card.year.toIntOrNull(), imdbId = card.imdbId)
+        MediaType.SERIES -> Target(card.tmdbId ?: card.id, false, season.coerceAtLeast(1), episode.coerceAtLeast(1),
+            title = card.title, year = card.year.toIntOrNull(), imdbId = card.imdbId)
         MediaType.ANIME -> {
             val zip = repo.animeMapping(card.aniListId ?: card.id)
             val tmdb = zip?.mappings?.tmdbId?.toIntOrNull()
             if (tmdb == null) null
-            else if (zip.mappings.type == "MOVIE") Target(tmdb, true, 0, 0, zip.mappings.malId)
+            else if (zip.mappings.type == "MOVIE") Target(tmdb, true, 0, 0, zip.mappings.malId, card.title, card.year.toIntOrNull(), aniEpisode = 1)
             else {
                 val ep = zip.episodes?.get(episode.toString())
-                Target(tmdb, false, ep?.seasonNumber ?: 1, ep?.episodeNumber ?: episode, zip.mappings.malId)
+                Target(tmdb, false, ep?.seasonNumber ?: 1, ep?.episodeNumber ?: episode, zip.mappings.malId,
+                    card.title, card.year.toIntOrNull(), aniEpisode = episode)
             }
         }
     }
 
     /** AniSkip opening interval in ms for an anime episode, or null. */
-    suspend fun animeIntro(malId: Int, episode: Int): LongRange? = withContext(Dispatchers.IO) {
+    /** AniSkip opening ("op") and ending ("ed") times for an anime episode. */
+    suspend fun animeSkips(malId: Int, episode: Int): Map<String, LongRange> = withContext(Dispatchers.IO) {
         runCatching {
-            val url = "https://api.aniskip.com/v2/skip-times/$malId/$episode?types[]=op&episodeLength=0"
+            val url = "https://api.aniskip.com/v2/skip-times/$malId/$episode?types[]=op&types[]=ed&episodeLength=0"
             RetrofitClient.http.newCall(Request.Builder().url(url).build()).execute().use { r ->
-                val results = JSONObject(r.body?.string() ?: return@use null).optJSONArray("results") ?: return@use null
-                if (results.length() == 0) return@use null
-                val iv = results.getJSONObject(0).getJSONObject("interval")
-                (iv.getDouble("startTime") * 1000).toLong()..(iv.getDouble("endTime") * 1000).toLong()
+                val results = JSONObject(r.body?.string() ?: return@use emptyMap()).optJSONArray("results") ?: return@use emptyMap()
+                (0 until results.length()).associate { i ->
+                    val o = results.getJSONObject(i)
+                    val iv = o.getJSONObject("interval")
+                    o.optString("skipType") to (iv.getDouble("startTime") * 1000).toLong()..(iv.getDouble("endTime") * 1000).toLong()
+                }
             }
-        }.getOrNull()
+        }.getOrDefault(emptyMap())
     }
 }

@@ -28,4 +28,38 @@
         <item name="android:focusableInTouchMode">true</item>
         <item name="android:stateListAnimator">@animator/card_focus</item>
     </style>
+    <!-- Quiet text buttons under the player's time bar -->
+    <style name="PlayerTextButton">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">36dp</item>
+        <item name="android:layout_marginEnd">4dp</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:paddingStart">8dp</item>
+        <item name="android:paddingEnd">10dp</item>
+        <item name="android:drawablePadding">6dp</item>
+        <item name="android:drawableTint">@color/nova_white</item>
+        <item name="android:background">@drawable/text_button</item>
+        <item name="android:textColor">@color/nova_white</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:maxLines">1</item>
+    </style>
+
+    <!-- Quick buttons under the player's time bar -->
+    <style name="PlayerChip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">36dp</item>
+        <item name="android:layout_marginEnd">8dp</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:drawablePadding">6dp</item>
+        <item name="android:drawableTint">@color/nova_white</item>
+        <item name="android:background">@drawable/player_chip</item>
+        <item name="android:textColor">@color/nova_white</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:maxLines">1</item>
+    </style>
+
 </resources>

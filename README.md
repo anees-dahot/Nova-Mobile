@@ -7,7 +7,14 @@ A lightweight Android TV app (Android 8+, built for low-RAM boxes) with an Apple
 - Movies & series from TMDB, anime from AniList (Hindi, Urdu and international rows)
 - Family-safe: adult titles filtered at the API level plus a local blocklist
 - Instant search with a built-in remote keyboard, recent searches and voice search
-- Player: Apple-style controls, resume prompt, next episode, skip intro (AniSkip), audio/subtitle/quality picker, volume boost, cleaned subtitles, 1080p cap
+- Player: Apple-style controls, resume prompt, next episode, skip intro (AniSkip), audio/subtitle/quality picker, volume boost, cleaned subtitles
+- Source racing: providers are searched in staggered waves of 3 (0s / 4s / 8s starts); the first real stream wins and the rest are cancelled
+- Quality gate: streams whose best variant is below 720p are skipped while better sources remain (still playable as a last resort), with a Settings → Video → Max Quality cap (720p / 1080p / 4K, default 1080p)
+- Vegamovies source: search-based HTTP scraper ported from Indflix (JSON index search → detail page → G-Drive / V-Cloud resolvers → direct file), no WebView needed
+- NetMirror (mp4, picks your dub), VaPlayer (HLS) and Braflix (DASH) sources: fast JSON APIs ported from Indflix's IndStream, no WebView needed
+- Multimovies source: finds the title's page and unwraps its iframe servers over HTTP (Cineverse with Hindi audio first, Filmu 1080p with English + Hindi), checking each playlist before playing it
+- AnimeSalt and Anime World India sources (anime only): one HLS stream with Hindi, Tamil, Telugu, Malayalam, Bengali, English and Japanese audio, resolved over HTTP
+- ZokoAnime source (HiAnime's player, anime only): looks episodes up by MAL id, 1080p HLS, sub or dub, English subtitles
 - Continue Watching, My List, Settings (audio language, subtitles, autoplay, frame-rate matching)
 - ~2 MB release APK, ~40 MB RAM while browsing
 

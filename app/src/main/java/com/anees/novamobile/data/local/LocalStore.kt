@@ -17,11 +17,22 @@ data class Settings(
     val lowCpuMode: Boolean = false,       // tunneled playback
     val matchFrameRate: Boolean = false,
     val volumeBoost: Int = 0,              // 0 off, 1 +6dB, 2 +10dB, 3 +15dB
+    val maxQuality: Int = 1080,            // playback cap: 720, 1080, or 2160 (a 4K stream would stutter a low-RAM box)
     val dlQuality: Int = 1,                // 0 480p, 1 720p, 2 1080p
     val dlWifiOnly: Boolean = false,
     val dlParallel: Int = 2,
     val dlAutoDeleteWatched: Boolean = false,
-    val newEpisodeAlerts: Boolean = true
+    val newEpisodeAlerts: Boolean = true,
+    val resizeMode: Int = 0,               // 0 fit, 4 zoom to fill (AspectRatioFrameLayout modes)
+    val autoPip: Boolean = true,           // leaving the player while playing opens picture-in-picture
+    val gestures: Boolean = true,          // swipe for brightness / volume / seek
+    val smartDownloads: Boolean = false,   // finished an episode: delete it, download the next
+    val keepNext: Int = 1,                 // smart downloads: how many upcoming episodes to keep ready
+    val dlAskQuality: Boolean = true,      // ask quality + audio before each download
+    val dlAudioAll: Boolean = true,        // keep every audio language (false: preferred + English only)
+    val dlStorage: Int = 0,                // 0 internal, 1 SD card / second storage
+    val notifyDownloadDone: Boolean = true,
+    val notifyDownloadProblem: Boolean = true
 )
 
 object LocalStore {
@@ -77,6 +88,13 @@ object LocalStore {
     fun clearHistory() = prefs.edit().remove("history").apply()
 
     // ── Per-title audio language (picked in the player, reused next episode) ─
+
+    fun subtitleFor(key: String): String? = prefs.getString("sub_$key", null)          // language code, "off", or null
+    fun setSubtitleFor(key: String, lang: String) = prefs.edit().putString("sub_$key", lang).apply()
+
+    /** Download retry counts survive the app being closed (no endless retry storm after restarts). */
+    fun dlAttempts(id: String): Int = prefs.getInt("dlatt_$id", 0)
+    fun setDlAttempts(id: String, n: Int) = prefs.edit().apply { if (n <= 0) remove("dlatt_$id") else putInt("dlatt_$id", n) }.apply()
 
     fun audioFor(key: String): String? = prefs.getString("audio_$key", null)
     fun setAudioFor(key: String, lang: String) = prefs.edit().putString("audio_$key", lang).apply()

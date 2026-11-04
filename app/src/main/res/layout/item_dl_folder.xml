@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Downloads: one show (folder) or one movie -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:orientation="horizontal" android:gravity="center_vertical"
+    android:paddingStart="16dp" android:paddingEnd="12dp" android:paddingTop="8dp" android:paddingBottom="8dp"
+    android:background="@color/nova_black" android:clickable="true"
+    android:foreground="?android:attr/selectableItemBackground">
+
+    <CheckBox android:id="@+id/f_check" android:layout_width="32dp" android:layout_height="32dp"
+        android:layout_marginEnd="8dp" android:buttonTint="@color/nova_accent" android:clickable="false"
+        android:focusable="false" android:visibility="gone"/>
+
+    <FrameLayout android:id="@+id/f_frame" android:layout_width="72dp" android:layout_height="108dp" android:background="@drawable/skeleton">
+        <ImageView android:id="@+id/f_poster" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
+        <TextView android:id="@+id/f_count" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_gravity="bottom|end" android:layout_margin="4dp" android:background="@drawable/badge_pill"
+            android:paddingStart="5dp" android:paddingEnd="5dp" android:textColor="@color/nova_white" android:textSize="11sp"
+            android:fontFamily="sans-serif-medium" android:visibility="gone"/>
+    </FrameLayout>
+
+    <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
+        android:orientation="vertical" android:layout_marginStart="14dp">
+        <TextView android:id="@+id/f_title" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:textColor="@color/nova_white" android:textSize="16sp" android:fontFamily="sans-serif-medium"
+            android:maxLines="2" android:ellipsize="end"/>
+        <TextView android:id="@+id/f_sub" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="3dp" android:textColor="#99FFFFFF" android:textSize="13sp" android:maxLines="2" android:ellipsize="end"
+            android:fontFeatureSettings="tnum"/>
+        <TextView android:id="@+id/f_badge" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginTop="6dp" android:background="@drawable/badge_soft"
+            android:paddingStart="6dp" android:paddingEnd="6dp" android:paddingTop="1dp" android:paddingBottom="1dp"
+            android:textColor="#CCFFFFFF" android:textSize="11sp" android:visibility="gone"/>
+        <ProgressBar android:id="@+id/f_progress" style="@android:style/Widget.ProgressBar.Horizontal"
+            android:layout_width="match_parent" android:layout_height="3dp" android:layout_marginTop="8dp" android:layout_marginEnd="24dp"
+            android:max="1000" android:progressDrawable="@drawable/accent_track" android:visibility="gone"/>
+    </LinearLayout>
+
+    <ImageView android:id="@+id/f_end" android:layout_width="24dp" android:layout_height="24dp" android:layout_marginStart="8dp"
+        android:src="@drawable/ic_chevron" android:tint="#66FFFFFF"/>
+</LinearLayout>

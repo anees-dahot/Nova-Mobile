@@ -64,7 +64,18 @@ class SettingsFragment : Fragment(), TabPage {
         val boosts = listOf("Off", "+6 dB", "+10 dB", "+15 dB")
         row("Volume Boost", boosts[s.volumeBoost]) { pick("Volume Boost", boosts, s.volumeBoost) { save(s.copy(volumeBoost = it)) } }
         row("Autoplay Next Episode", if (s.autoplayNext) "On" else "Off") { save(s.copy(autoplayNext = !s.autoplayNext)) }
+        row("Swipe Gestures", if (s.gestures) "On" else "Off") { save(s.copy(gestures = !s.gestures)) }
+        note("Swipe the left side for brightness, the right side for volume, sideways to seek. Hold for 2×, pinch to fill the screen.")
+        row("Picture-in-Picture", if (s.autoPip) "Automatic" else "Button only") { save(s.copy(autoPip = !s.autoPip)) }
+        note("Leaving the player while a video plays keeps it going in a small window.")
         header("Video")
+        val maxQs = listOf(720 to "720p", 1080 to "1080p", 2160 to "4K")
+        row("Max Quality", maxQs.firstOrNull { it.first == s.maxQuality }?.second ?: "1080p") {
+            pick("Max Quality", maxQs.map { it.second }, maxQs.indexOfFirst { it.first == s.maxQuality }.coerceAtLeast(0)) {
+                save(s.copy(maxQuality = maxQs[it].first))
+            }
+        }
+        note("Streams below 720p are skipped while better sources are available.")
         row("Low-CPU Playback", if (s.lowCpuMode) "On" else "Off") { save(s.copy(lowCpuMode = !s.lowCpuMode)) }
         note("Low-CPU Playback uses the phone's video chip directly (smoother, less battery) but some streams may not start — turn it off if that happens.")
         header("New Episodes")
@@ -92,7 +103,28 @@ class SettingsFragment : Fragment(), TabPage {
         row("Download Quality", qualities[s.dlQuality].substringBefore(" ")) { pick("Download Quality", qualities, s.dlQuality) { saveDl(s.copy(dlQuality = it)) } }
         row("Wi-Fi Only", if (s.dlWifiOnly) "On" else "Off") { saveDl(s.copy(dlWifiOnly = !s.dlWifiOnly)) }
         row("Downloads at Once", s.dlParallel.toString()) { pick("Downloads at Once", listOf("1", "2", "3"), s.dlParallel - 1) { saveDl(s.copy(dlParallel = it + 1)) } }
-        row("Delete After Watching", if (s.dlAutoDeleteWatched) "On" else "Off") { save(s.copy(dlAutoDeleteWatched = !s.dlAutoDeleteWatched)) }
+        row("Ask Quality Each Time", if (s.dlAskQuality) "On" else "Off") { save(s.copy(dlAskQuality = !s.dlAskQuality)) }
+        row("Audio Languages", if (s.dlAudioAll) "All" else "Preferred + English") { save(s.copy(dlAudioAll = !s.dlAudioAll)) }
+        note("Keeping only your language and English makes multi-audio downloads smaller.")
+        row("Smart Downloads", if (s.smartDownloads) "On" else "Off") { save(s.copy(smartDownloads = !s.smartDownloads)) }
+        if (s.smartDownloads) row("Keep Next Episodes Ready", s.keepNext.toString()) {
+            pick("Keep Next Episodes Ready", listOf("1", "2", "3"), s.keepNext - 1) { save(s.copy(keepNext = it + 1)) }
+        }
+        note("Finish a downloaded episode: it's deleted and the next one downloads. New episodes of shows you follow download on their own.")
+        row("Delete After Watching", if (s.dlAutoDeleteWatched || s.smartDownloads) "On" else "Off") { save(s.copy(dlAutoDeleteWatched = !s.dlAutoDeleteWatched)) }
+        header("Notifications")
+        row("Download Finished", if (s.notifyDownloadDone) "On" else "Off") { save(s.copy(notifyDownloadDone = !s.notifyDownloadDone)) }
+        row("Download Problems", if (s.notifyDownloadProblem) "On" else "Off") { save(s.copy(notifyDownloadProblem = !s.notifyDownloadProblem)) }
+        row("Sound & Style", "") {
+            val ctx = requireContext()
+            ActionSheet.show(ctx, "Notification settings", listOf(
+                "Downloads in progress" to com.anees.novamobile.notify.NotifyChannels.DL_PROGRESS,
+                "Finished downloads" to com.anees.novamobile.notify.NotifyChannels.DL_DONE,
+                "Download problems" to com.anees.novamobile.notify.NotifyChannels.DL_PROBLEM,
+                "New episodes" to com.anees.novamobile.notify.NotifyChannels.NEW_EPISODES,
+            ).map { (label, ch) -> ActionSheet.Item(label) { runCatching { startActivity(com.anees.novamobile.notify.NotifyChannels.settingsIntent(ctx, ch)) } } },
+                subtitle = "Opens Android's settings for each kind")
+        }
         header("Streaming")
         row("Sources", "${com.anees.novamobile.ui.player.StreamExtractor.PROVIDERS.size} active") { showSources() }
         header("Library")
@@ -141,20 +173,21 @@ class SettingsFragment : Fragment(), TabPage {
             val score = LocalStore.providerScore(p.name)
             val health = when { score >= 10 -> "●"; score >= 0 -> "◐"; else -> "○" }
             ActionSheet.Item("$health  ${p.name}${if (p.multiAudio) "  · multi-audio" else ""}${if (ms > 0) "  · ${"%.1f".format(ms / 1000f)}s" else ""}")
-        } + ActionSheet.Item("▶  Test all sources now") { testSources() }
+        } + ActionSheet.Item("Test all sources now") { testSources() }
         ActionSheet.show(ctx, "Sources", items, subtitle = "● working  ◐ unsure  ○ failing   ·   list updates from GitHub")
     }
 
     private fun testSources() {
         val host = com.anees.novamobile.ui.player.Prefetcher.host ?: return
         val ctx = requireContext()
-        val target = com.anees.novamobile.ui.player.StreamExtractor.Target(27205, true, 0, 0)   // Inception
+        val target = com.anees.novamobile.ui.player.StreamExtractor.Target(27205, true, 0, 0, title = "Inception", year = 2010)   // Inception
         android.widget.Toast.makeText(ctx, "Testing sources… (about a minute)", android.widget.Toast.LENGTH_SHORT).show()
         viewLifecycleOwner.lifecycleScope.launch {
             val results = mutableListOf<String>()
             for (p in com.anees.novamobile.ui.player.StreamExtractor.PROVIDERS) {
                 val t0 = System.currentTimeMillis()
-                val r = com.anees.novamobile.ui.player.WebStreamSniffer(ctx, host)
+                val r = if (p.resolver != null) p.resolver.invoke(target)
+                else com.anees.novamobile.ui.player.WebStreamSniffer(ctx, host)
                     .sniff(com.anees.novamobile.ui.player.StreamExtractor.embedUrl(p, target), p.timeoutMs)
                 val ms = System.currentTimeMillis() - t0
                 LocalStore.reportProvider(p.name, r != null)

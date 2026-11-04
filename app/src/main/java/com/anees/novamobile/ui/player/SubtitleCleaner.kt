@@ -30,6 +30,11 @@ object SubtitleCleaner {
         RegexOption.IGNORE_CASE
     )
 
+    /** Two-letter language guessed from a subtitle URL ("…/eng.vtt" → "en"), or null. */
+    fun langOf(url: String): String? =
+        Regex("""[/_\-.](en|eng|english|ar|ara|arabic|fr|es|de|ur|hi|hin|hindi)[/_\-.]""", RegexOption.IGNORE_CASE)
+            .find(url)?.groupValues?.get(1)?.lowercase()?.take(2)
+
     fun isThumbnailTrack(url: String) = Regex("thumb|sprite|storyboard|preview", RegexOption.IGNORE_CASE).containsMatchIn(url)
 
     fun wrap(url: String): Uri = Uri.parse("$SCHEME://sub?u=" + Uri.encode(url))

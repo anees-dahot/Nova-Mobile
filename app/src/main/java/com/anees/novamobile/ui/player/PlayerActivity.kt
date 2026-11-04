@@ -1,22 +1,41 @@
 package com.anees.novamobile.ui.player
 
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.Outline
+import android.graphics.Rect
+import android.graphics.drawable.Icon
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
-import android.view.KeyEvent
+import android.util.Rational
+import android.view.Gravity
 import android.view.View
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.*
 import androidx.media3.common.util.UnstableApi
@@ -24,50 +43,62 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.session.MediaSession
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.ui.PlayerView
 import coil.load
 import com.anees.novamobile.R
 import com.anees.novamobile.data.local.LocalStore
 import com.anees.novamobile.data.local.Settings
+import com.anees.novamobile.data.model.Episode
 import com.anees.novamobile.data.model.HistoryEntry
 import com.anees.novamobile.data.model.MediaCard
 import com.anees.novamobile.data.model.MediaType
 import com.anees.novamobile.data.repository.MediaRepository
 import com.anees.novamobile.ui.common.ActionSheet
+import com.anees.novamobile.ui.common.Ui
+import com.anees.novamobile.ui.common.dp
 import com.google.gson.Gson
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import okhttp3.Dns
-import okhttp3.OkHttpClient
 import java.net.Inet6Address
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 @UnstableApi
-class PlayerActivity : AppCompatActivity() {
+class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     // ── Views ─────────────────────────────────────────────────────────────────
     private lateinit var root: FrameLayout
     private lateinit var playerView: PlayerView
     private lateinit var buffering: ProgressBar
-    private lateinit var centerIcon: TextView
-    private lateinit var overlay: View
-    private lateinit var overlayTitle: TextView
-    private lateinit var overlaySub: TextView
-    private lateinit var overlayDesc: TextView
-    private lateinit var seekBar: ProgressBar
-    private lateinit var timeLeft: TextView
-    private lateinit var timeRight: TextView
+    private lateinit var topTitle: TextView
+    private lateinit var topSub: TextView
+    private lateinit var timeRemaining: TextView
+    private lateinit var speedBtn: TextView
+    private lateinit var qualityBtn: TextView
+    private lateinit var episodesBtn: TextView
+    private lateinit var nextEpBtn: TextView
+    private lateinit var hud: View
+    private lateinit var hudIcon: ImageView
+    private lateinit var hudText: TextView
+    private lateinit var hudBar: ProgressBar
+    private lateinit var seekLeft: TextView
+    private lateinit var seekRight: TextView
+    private lateinit var unlockBtn: ImageButton
+    private lateinit var nextCard: View
+    private lateinit var nextCountdown: ProgressBar
+    private lateinit var drawer: View
+    private lateinit var drawerScrim: View
     private lateinit var loadingLayer: View
     private lateinit var statusText: TextView
     private lateinit var loadingBar: ProgressBar
     private lateinit var retryBtn: Button
+    private lateinit var pickSourceBtn: Button
     private lateinit var skipBtn: Button
-    private lateinit var nextBtn: Button
-    private lateinit var topBar: View
 
     // ── State ─────────────────────────────────────────────────────────────────
     private lateinit var card: MediaCard
@@ -75,19 +106,26 @@ class PlayerActivity : AppCompatActivity() {
     private val repo = MediaRepository()
     private val sniffers = mutableListOf<WebStreamSniffer>()
     private var player: ExoPlayer? = null
+    private var session: MediaSession? = null
     private var season = 0
     private var episode = 0
     private var target: StreamExtractor.Target? = null
     private var providers = StreamExtractor.ordered()
     private var providerIndex = 0
+    /** Every stream found for this episode with its real audio languages, for the language menu. */
+    private val langSources = mutableListOf<Triple<StreamExtractor.Provider, WebStreamSniffer.Sniffed, List<String>>>()
+    private var langJob: kotlinx.coroutines.Job? = null
     private var usedCache = false
     private var resumeMs = 0L
     private var awaitingResumeChoice = false
     private var introRange: LongRange? = null
+    private var outroRange: LongRange? = null
+    private var skipShownAt = 0L
     private var nextEpisode: Pair<Int, Int>? = null
+    private var seasonEpisodes: List<Episode> = emptyList()
     private var nextDismissed = false
+    private var nextDeadline = 0L          // elapsedRealtime when the up-next countdown plays the next episode
     private var speed = 1f
-    private var pendingSeek: Long? = null
     private var originalModeId = 0
     private var loudness: android.media.audiofx.LoudnessEnhancer? = null
     private var boost = 0
@@ -98,24 +136,33 @@ class PlayerActivity : AppCompatActivity() {
     private var current: WebStreamSniffer.Sniffed? = null
     private var bypassedProxy = false
     private var proxyLastResort: WebStreamSniffer.Sniffed? = null
+    private var qualityLastResort: WebStreamSniffer.Sniffed? = null
     private var offlineItem: MediaItem? = null
     private var sleepJob: Job? = null
     private var sleepAt = 0L              // elapsedRealtime when the timer fires, 0 = off
     private var sleepAtEnd = false        // stop when this episode ends
     private var bandwidthMeter: androidx.media3.exoplayer.upstream.DefaultBandwidthMeter? = null
-    private val dubTried = mutableSetOf<String>()
+    private var locked = false
+    private var inPip = false
+    private var hudHide: Runnable? = null
+    private var episodeLine = ""          // "S1 · E3  ·  Episode name", shown under the title with "ends 10:42 PM"
 
     private var streamJob: Job? = null
     private var tickJob: Job? = null
     private var readyTimeout: Job? = null
-    private var hideOverlayJob: Job? = null
-    private var seekCommitJob: Job? = null
 
     companion object {
         private const val TAG = "NovaTV"
         private const val EXTRA_CARD = "card"
         private const val EXTRA_SEASON = "season"
         private const val EXTRA_EPISODE = "episode"
+        private const val ACTION_PIP = "com.anees.novamobile.PIP"
+        /** Sources searched per wave in race(), and the gap between their starts. */
+        private const val WAVE = 3
+        private const val WAVE_STAGGER_MS = 4_000L
+        private const val COLLECT_MS = 5_000L
+        private const val UP_NEXT_MS = 10_000L
+        private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
         private val CLOCK = SimpleDateFormat("h:mm a", Locale.getDefault())
 
         fun launch(ctx: Context, card: MediaCard, season: Int = 0, episode: Int = 0) {
@@ -123,7 +170,27 @@ class PlayerActivity : AppCompatActivity() {
                 putExtra(EXTRA_CARD, Gson().toJson(card))
                 putExtra(EXTRA_SEASON, season)
                 putExtra(EXTRA_EPISODE, episode)
+                if (ctx !is android.app.Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             })
+        }
+
+        /** For notifications: opens the player straight on an episode. */
+        fun intent(ctx: Context, card: MediaCard, season: Int, episode: Int): Intent =
+            Intent(ctx, PlayerActivity::class.java)
+                .putExtra(EXTRA_CARD, Gson().toJson(card)).putExtra(EXTRA_SEASON, season).putExtra(EXTRA_EPISODE, episode)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    /** Picture-in-picture buttons: −10s, play/pause, +10s. */
+    private val pipReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            val p = player ?: return
+            when (i.getIntExtra("a", 0)) {
+                1 -> p.seekTo((p.currentPosition - 10_000).coerceAtLeast(0))
+                2 -> p.playWhenReady = !p.playWhenReady
+                3 -> p.seekTo(p.currentPosition + 10_000)
+            }
+            updatePip()
         }
     }
 
@@ -139,20 +206,30 @@ class PlayerActivity : AppCompatActivity() {
         root = findViewById(R.id.player_root)
         playerView = findViewById(R.id.player_view)
         buffering = findViewById(R.id.buffering)
-        centerIcon = findViewById(R.id.center_icon)
-        overlay = findViewById(R.id.overlay)
-        overlayTitle = findViewById(R.id.top_title)
-        overlaySub = findViewById(R.id.overlay_sub)
-        overlayDesc = findViewById(R.id.overlay_desc)
-        seekBar = findViewById(R.id.seek_bar)
-        timeLeft = findViewById(R.id.time_left)
-        timeRight = findViewById(R.id.time_right)
+        topTitle = findViewById(R.id.top_title)
+        topSub = findViewById(R.id.top_sub)
+        timeRemaining = findViewById(R.id.time_remaining)
+        speedBtn = findViewById(R.id.btn_speed)
+        qualityBtn = findViewById(R.id.btn_quality)
+        episodesBtn = findViewById(R.id.btn_episodes)
+        nextEpBtn = findViewById(R.id.btn_next_ep)
+        hud = findViewById(R.id.gesture_hud)
+        hudIcon = findViewById(R.id.hud_icon)
+        hudText = findViewById(R.id.hud_text)
+        hudBar = findViewById(R.id.hud_bar)
+        seekLeft = findViewById(R.id.seek_left)
+        seekRight = findViewById(R.id.seek_right)
+        unlockBtn = findViewById(R.id.btn_unlock)
+        nextCard = findViewById(R.id.next_card)
+        nextCountdown = findViewById(R.id.next_countdown)
+        drawer = findViewById(R.id.episodes_drawer)
+        drawerScrim = findViewById(R.id.episodes_scrim)
         loadingLayer = findViewById(R.id.loading_layer)
         statusText = findViewById(R.id.status_text)
         loadingBar = findViewById(R.id.loading)
         retryBtn = findViewById(R.id.btn_retry)
+        pickSourceBtn = findViewById(R.id.btn_pick_source)
         skipBtn = findViewById(R.id.btn_skip)
-        nextBtn = findViewById(R.id.btn_next)
 
         card = Gson().fromJson(intent.getStringExtra(EXTRA_CARD), MediaCard::class.java)
         settings = LocalStore.settings()
@@ -166,33 +243,53 @@ class PlayerActivity : AppCompatActivity() {
             load(card.backdropUrl ?: card.posterUrl) { crossfade(300) }
         }
         styleSubtitles()
+        playerView.resizeMode = settings.resizeMode
+        playerView.controllerShowTimeoutMs = 3500
 
-        topBar = findViewById(R.id.player_top)
-        setupTouch()
+        setupControls()
+        PlayerGestures(this, playerView, this).attach()
         immersive()
-        skipBtn.setOnClickListener { skipIntro() }
-        nextBtn.setOnClickListener { playNext() }
-        retryBtn.setOnClickListener { startEpisode(season, episode) }
+        ContextCompat.registerReceiver(this, pipReceiver, IntentFilter(ACTION_PIP), ContextCompat.RECEIVER_NOT_EXPORTED)
 
         startEpisode(season, episode)
+    }
+
+    /** Player is single-instance (picture-in-picture): a new title replaces the one playing. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val json = intent.getStringExtra(EXTRA_CARD) ?: return
+        saveProgress()
+        card = Gson().fromJson(json, MediaCard::class.java)
+        target = null
+        seasonEpisodes = emptyList()
+        findViewById<ImageView>(R.id.loading_backdrop).load(card.backdropUrl ?: card.posterUrl)
+        startEpisode(intent.getIntExtra(EXTRA_SEASON, 0), intent.getIntExtra(EXTRA_EPISODE, 0))
     }
 
     // ── Episode start / resume prompt ─────────────────────────────────────────
 
     private fun startEpisode(s: Int, e: Int) {
-        playPressedAt = android.os.SystemClock.elapsedRealtime()
+        playPressedAt = SystemClock.elapsedRealtime()
         season = s; episode = e
         providers = StreamExtractor.ordered()
         providerIndex = 0
-        dubTried.clear()
+        langJob?.cancel(); langSources.clear()
         introRange = null
+        outroRange = null
+        skipShownAt = 0
         nextEpisode = null
         nextDismissed = false
+        nextDeadline = 0
         nextPrefetched = false
         syncedWatched = false
         proxyLastResort = null
-        listOf(skipBtn, nextBtn, retryBtn, overlay).forEach { it.visibility = View.GONE }
+        qualityLastResort = null
+        listOf(skipBtn, nextCard, retryBtn, pickSourceBtn, episodesBtn, nextEpBtn).forEach { it.visibility = View.GONE }
+        closeDrawer()
         releasePlayer()
+        topTitle.text = title()
+        episodeLine = ""
+        topSub.text = ""
         findViewById<TextView>(R.id.loading_title).text = title()
         loadingLayer.visibility = View.VISIBLE
         loadingLayer.alpha = 1f
@@ -205,7 +302,7 @@ class PlayerActivity : AppCompatActivity() {
         if (resumeMs > 0) {
             awaitingResumeChoice = true
             ActionSheet.show(this, title(), listOf(
-                ActionSheet.Item("▶  Resume from ${fmt(resumeMs)}") { onResumeChoice(resumeMs) },
+                ActionSheet.Item("Resume from ${fmt(resumeMs)}") { onResumeChoice(resumeMs) },
                 ActionSheet.Item("Start from Beginning") { onResumeChoice(0) }
             ), onDismiss = { if (awaitingResumeChoice) onResumeChoice(resumeMs) })
         }
@@ -221,7 +318,7 @@ class PlayerActivity : AppCompatActivity() {
             launch {
                 if (repo.isBlocked(card)) {
                     streamJob?.cancel(); releasePlayer()
-                    showRetry("This title isn't available in Nova TV", retry = false)
+                    showRetry("This title isn't available in Nova", retry = false)
                 }
             }
             target = StreamExtractor.resolveTarget(card, s, e, repo)
@@ -238,7 +335,9 @@ class PlayerActivity : AppCompatActivity() {
         player?.let { it.seekTo(ms); it.playWhenReady = true }
     }
 
-    // ── Source search: health-ordered, cached, two at a time on slow pages ───
+    // ── Source search: health-ordered, cached, three at a time in staggered waves ──
+
+    private fun sourceLabel(p: StreamExtractor.Provider) = "${p.name}  ·  source ${providers.indexOf(p) + 1} of ${providers.size}"
 
     private suspend fun findSource() {
         val t = target ?: return
@@ -247,34 +346,42 @@ class PlayerActivity : AppCompatActivity() {
             val cachedLink = StreamExtractor.cached(p, t)
             if (cachedLink != null) {
                 if (proxyOnly(cachedLink)) continue
+                if (!qualityGate(cachedLink)) continue
                 usedCache = true; Log.i(TAG, "instant: cached link for ${p.name}"); play(cachedLink); return
             }
             // A background search for exactly this may already be running (title page / Continue Watching)
             val inFlight = Prefetcher.claim(StreamExtractor.embedUrl(p, t))
             if (inFlight != null) {
-                showStatus("Connecting to ${p.name}…")
+                showStatus("Connecting to ${sourceLabel(p)}")
                 val r = runCatching { inFlight.await() }.getOrNull()
                 if (r != null) {
                     StreamExtractor.remember(p, t, r)
                     if (proxyOnly(r)) continue
+                    if (!qualityGate(r)) continue
                     Log.i(TAG, "instant: joined prefetch for ${p.name}"); usedCache = false; play(r); return
                 }
             }
-            val partner = providers.getOrNull(providerIndex + 1)
-            showStatus("Connecting to ${p.name}…")
-            val won = race(t, p, partner)
+            // Up to 3 sources per wave, 4s apart: the stagger keeps a low-RAM device from opening
+            // every hidden page at once but still beats waiting out one full timeout per source
+            // Race every multi-audio source at once (most are cheap HTTP resolvers) to find the richest stream
+            val size = maxOf(WAVE, providers.drop(providerIndex).takeWhile { it.multiAudio }.size)
+            val wave = providers.subList(providerIndex, minOf(providerIndex + size, providers.size))
+            showStatus("Connecting to ${sourceLabel(p)}")
+            val won = race(t, wave)
             if (won != null) {
                 providerIndex = providers.indexOf(won.first)
                 usedCache = false
                 StreamExtractor.remember(won.first, t, won.second)
                 if (proxyOnly(won.second)) continue
+                if (!qualityGate(won.second)) continue
                 play(won.second)
                 return
             }
-            providerIndex += if (partner != null) 2 else 1
+            providerIndex += wave.size
         }
         proxyLastResort?.let { s -> proxyLastResort = null; Log.i(TAG, "last resort: source's own proxy"); play(s, bypassProxy = false); return }
-        showRetry("No source answered in time.\nThe box may be busy — Retry usually works.")
+        qualityLastResort?.let { s -> qualityLastResort = null; Log.i(TAG, "last resort: only sub-720p sources answered"); play(s); return }
+        showRetry("No source answered in time.\nRetry usually works, or pick a source yourself.")
     }
 
     /**
@@ -293,14 +400,19 @@ class PlayerActivity : AppCompatActivity() {
     /** Saved download: same player and track rules, data from the download store, subtitles from disk. */
     private fun playOffline(d: androidx.media3.exoplayer.offline.Download) {
         val meta = com.anees.novamobile.download.DownloadMeta.of(d)
-        val files = (meta?.subtitles ?: listOfNotNull(meta?.subtitle)).map { java.io.File(it) }.filter { it.exists() }
-        val subs = files.mapIndexed { i, f ->
+        val paths = meta?.subtitles ?: listOfNotNull(meta?.subtitle)
+        val langs = meta?.subtitleLangs
+        val subs = paths.mapIndexedNotNull { i, path ->
+            val f = java.io.File(path)
+            if (!f.exists()) return@mapIndexedNotNull null
+            val lang = langs?.getOrNull(i)?.takeIf { it.isNotBlank() } ?: if (i == 0) "en" else null
             MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(f)).setMimeType(MimeTypes.TEXT_VTT)
-                .setLanguage(if (i == 0) "en" else null).setLabel(if (i == 0) "English" else "Subtitles ${i + 1}").build()
+                .setLanguage(lang)
+                .setLabel(lang?.let { Locale(it).displayLanguage } ?: "Subtitles ${i + 1}").build()
         }
         offlineItem = d.request.toMediaItem().buildUpon()
             .setSubtitleConfigurations(subs)
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(title()).build())
+            .setMediaMetadata(metadata())
             .build()
         Log.i(TAG, "offline: playing saved download")
         lifecycleScope.launch { runCatching { target = StreamExtractor.resolveTarget(card, season, episode, repo); loadExtras() } }
@@ -309,67 +421,117 @@ class PlayerActivity : AppCompatActivity() {
 
     /** "…/api/robot-proxy?url=https://origin/…" → "origin". */
     private fun originHost(url: String): String? =
-        runCatching { Uri.parse(Uri.parse(url).getQueryParameter("url")).host }.getOrNull()
+        // Braflix's /dash-proxy signs CDN cookies: never bypass it
+        if (url.contains("dash-proxy")) null else runCatching { Uri.parse(Uri.parse(url).getQueryParameter("url")).host }.getOrNull()
 
     /**
-     * Searches [a]; if it hasn't answered after 12s, also searches [b] in a second hidden page.
-     * First stream found wins and the other search is cancelled.
+     * Searches every provider in [wave]: hidden pages start 0s/4s/8s apart, resolvers (plain HTTP)
+     * at once. After the first answer the others get [COLLECT_MS] more; the stream with the most
+     * real audio languages (yours first) wins.
      */
-    private suspend fun race(t: StreamExtractor.Target, a: StreamExtractor.Provider, b: StreamExtractor.Provider?):
+    private suspend fun race(t: StreamExtractor.Target, wave: List<StreamExtractor.Provider>):
             Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed>? = coroutineScope {
-        val results = Channel<Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed?>>(2)
+        val results = Channel<Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed?>>(wave.size)
         fun search(p: StreamExtractor.Provider, delayMs: Long) = launch {
             delay(delayMs)
-            if (delayMs > 0) showStatus("Still looking… also trying ${p.name}")
-            val sn = WebStreamSniffer(this@PlayerActivity, root).also { sniffers += it }
+            if (delayMs > 0) showStatus("Still looking…  also trying ${sourceLabel(p)}")
             val t0 = System.currentTimeMillis()
-            val r = try { sn.sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs) } finally { sniffers -= sn }
+            val r = searchOne(t, p)
             if (r != null) LocalStore.setProviderSpeed(p.name, System.currentTimeMillis() - t0)
             results.send(p to r)
         }
-        val jobs = listOfNotNull(search(a, 0), b?.let { search(it, 12_000) })
+        var pages = 0
+        val jobs = wave.mapIndexed { i, p ->
+            search(p, if (p.resolver != null) 0L else pages++ * WAVE_STAGGER_MS)
+        }
         var pending = jobs.size
-        var winner: Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed>? = null
-        while (pending > 0 && winner == null) {
-            val (p, r) = results.receive()
+        val found = mutableListOf<Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed>>()
+        var deadline = 0L
+        while (pending > 0) {
+            val next = if (found.isEmpty()) results.receive()
+                else withTimeoutOrNull((deadline - SystemClock.elapsedRealtime()).coerceAtLeast(1)) { results.receive() } ?: break
+            val (p, r) = next
             pending--
-            if (r != null) winner = p to r
-            else { Log.i(TAG, "${p.name} gave nothing"); LocalStore.reportProvider(p.name, false) }
+            if (r == null) { Log.i(TAG, "${p.name} gave nothing"); LocalStore.reportProvider(p.name, false); continue }
+            found += p to r
+            if (deadline == 0L) { deadline = SystemClock.elapsedRealtime() + COLLECT_MS; showStatus("Checking languages…") }
         }
         jobs.forEach { it.cancel() }
-        winner
+        if (found.isEmpty()) return@coroutineScope null
+        found.forEach { (p, r) -> StreamExtractor.remember(p, t, r) }
+        val probed = found.map { (p, r) -> async { Triple(p, r, AudioProbe.langs(r)) } }.awaitAll()
+        addLangSources(probed)
+        val want = LocalStore.audioFor(key()) ?: settings.audioLang
+        val best = probed.maxByOrNull { AudioProbe.score(it.third, want) }!!
+        Log.i(TAG, "languages: ${probed.joinToString { "${it.first.name}=${it.third}" }} → ${best.first.name}")
+        best.first to best.second
+    }
+
+    private fun addLangSources(list: List<Triple<StreamExtractor.Provider, WebStreamSniffer.Sniffed, List<String>>>) {
+        list.forEach { n -> langSources.removeAll { it.first == n.first }; langSources += n }
     }
 
     /**
-     * The stream plays but lacks the preferred dub (e.g. VidLux has no Hindi for Loki):
-     * try the next multi-audio source once, from the same position. If none has it, remember that.
+     * Played from a saved or prefetched link skipped the race: fill the language menu in the
+     * background from the cheap multi-audio resolvers (no hidden pages), plus the stream playing now.
      */
-    private fun huntDub(want: String) {
-        // No automatic source switching for a missing dub: it made playback slow (and could fail) for
-        // titles that have no dub anywhere. The stream plays with every track it has; other sources
-        // stay one tap away in ▲ Options → Source.
-        Log.i(TAG, "${com.anees.novamobile.data.model.LangTags.name(want) ?: want} not in this stream; playing available audio")
-        return
-        val current = providers.getOrNull(providerIndex) ?: return
-        dubTried += current.name
-        if (LocalStore.noDub(key(), want)) return
-        val next = providers.indices.firstOrNull { it != providerIndex && providers[it].multiAudio && providers[it].name !in dubTried }
-        val langName = com.anees.novamobile.data.model.LangTags.name(want) ?: want
-        if (next == null) {
-            LocalStore.setNoDub(key(), want)
-            Log.i(TAG, "no $langName dub on any source")
-            return
+    private fun gatherLanguages(now: WebStreamSniffer.Sniffed) {
+        val t = target ?: return
+        val cur = providers.getOrNull(providerIndex)
+        langJob?.cancel()
+        langJob = lifecycleScope.launch {
+            val list = coroutineScope {
+                providers.filter { it.multiAudio && (it.resolver != null || it == cur) }.map { p ->
+                    async {
+                        val r = if (p == cur) now else StreamExtractor.cached(p, t)
+                            ?: withTimeoutOrNull(p.timeoutMs) { runCatching { p.resolver!!.invoke(t) }.getOrNull() }
+                        r?.let { StreamExtractor.remember(p, t, it); Triple(p, it, AudioProbe.langs(it)) }
+                    }
+                }.awaitAll().filterNotNull()
+            }
+            addLangSources(list)
+            Log.i(TAG, "languages found: ${langSources.joinToString { "${it.first.name}=${it.third}" }}")
         }
-        dubTried += providers[next].name   // counted as tried even if it fails, so the search can't loop
-        Log.i(TAG, "$langName not on ${current.name}, trying ${providers[next].name}")
-        android.widget.Toast.makeText(this, "$langName not on ${current.name} — trying ${providers[next].name}…", android.widget.Toast.LENGTH_SHORT).show()
-        resumeMs = player?.currentPosition?.takeIf { it > 0 } ?: resumeMs
+    }
+
+    /** Language menu picked a language only another found source has: play that stream from the same second. */
+    private fun switchTo(p: StreamExtractor.Provider, s: WebStreamSniffer.Sniffed) {
+        player?.currentPosition?.takeIf { it > 0 }?.let { resumeMs = it }
         releasePlayer()
+        providerIndex = providers.indexOf(p).coerceAtLeast(0)
+        usedCache = false   // a failure here counts against the source and moves past it
         loadingLayer.alpha = 1f
         loadingLayer.visibility = View.VISIBLE
-        providerIndex = next
-        streamJob?.cancel()
-        streamJob = lifecycleScope.launch { findSource() }
+        showStatus("Switching to ${sourceLabel(p)}")
+        play(s)
+    }
+
+    /**
+     * One attempt against a source: plain HTTP for resolver sources (search-based scrapers
+     * like Vegamovies return the stream URL directly), a hidden WebView for embed pages.
+     */
+    private suspend fun searchOne(t: StreamExtractor.Target, p: StreamExtractor.Provider): WebStreamSniffer.Sniffed? {
+        val resolver = p.resolver
+        if (resolver != null) return withTimeoutOrNull(p.timeoutMs) { resolver.invoke(t) }
+        val sn = WebStreamSniffer(this@PlayerActivity, root).also { sniffers += it }
+        return try { sn.sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs) } finally { sniffers -= sn }
+    }
+
+    /**
+     * Quality gate: a stream whose best variant is below 720p is skipped while other sources
+     * remain, but remembered so a low-res stream still beats no stream at all.
+     * Returns true when the link may play.
+     */
+    private suspend fun qualityGate(s: WebStreamSniffer.Sniffed): Boolean {
+        if (offlineItem != null || !s.url.contains("m3u8", ignoreCase = true)) return true
+        val max = QualityGate.maxHeightAsync(s)
+        if (max < 0 || max >= QualityGate.MIN_HEIGHT) return true
+        val p = providers.getOrNull(providerIndex)
+        Log.i(TAG, "${p?.name}: best variant ${max}p is below ${QualityGate.MIN_HEIGHT}p, trying other sources")
+        p?.let { LocalStore.reportProvider(it.name, false) }
+        if (qualityLastResort == null) qualityLastResort = s
+        providerIndex++
+        return false
     }
 
     /** Player error / stall: re-sniff once if the link was cached, else move on. */
@@ -382,34 +544,53 @@ class PlayerActivity : AppCompatActivity() {
             originHost(failed.url)?.let { LocalStore.setDirectBad(it) }
             proxyLastResort = failed
         }
-        providers.getOrNull(providerIndex)?.let { dubTried += it.name }   // a failed source isn't a dub candidate
         val t = target
         val p = providers.getOrNull(providerIndex)
         if (t != null && p != null) {
             StreamExtractor.forget(p, t)
             if (!usedCache) { LocalStore.reportProvider(p.name, false); providerIndex++ }
+            // Another stream found for this episode beats a new search
+            langSources.removeAll { it.first == p }
+            val want = LocalStore.audioFor(key()) ?: settings.audioLang
+            langSources.maxByOrNull { AudioProbe.score(it.third, want) }?.let { (np, ns) ->
+                Log.i(TAG, "trying ${np.name}, already found for this episode")
+                switchTo(np, ns); return
+            }
         }
         usedCache = false
-        resumeMs = player?.currentPosition?.takeIf { it > 0 } ?: resumeMs
+        switchSource(providerIndex)
+    }
+
+    /** Stop the current stream and search again from source [index], keeping the position. */
+    private fun switchSource(index: Int) {
+        player?.currentPosition?.takeIf { it > 0 }?.let { resumeMs = it }
         releasePlayer()
+        providerIndex = index
+        retryBtn.visibility = View.GONE; pickSourceBtn.visibility = View.GONE
+        loadingLayer.alpha = 1f
         loadingLayer.visibility = View.VISIBLE
         streamJob?.cancel()
-        streamJob = lifecycleScope.launch { findSource() }
+        streamJob = lifecycleScope.launch {
+            if (target == null) target = StreamExtractor.resolveTarget(card, season, episode, repo)
+            findSource()
+        }
     }
 
     private suspend fun loadExtras() {
         val t = target ?: return
-        introRange = when {
-            card.type == MediaType.ANIME && t.malId != null -> StreamExtractor.animeIntro(t.malId, episode)
-            card.type == MediaType.SERIES -> 20_000L..100_000L
-            else -> null
+        if (card.type == MediaType.ANIME && t.malId != null) {
+            val skips = StreamExtractor.animeSkips(t.malId, episode)
+            introRange = skips["op"]
+            outroRange = skips["ed"]
+        } else if (card.type == MediaType.SERIES) {
+            introRange = 30_000L..180_000L      // no intro data for series: a short-lived "Skip +85s" hint
         }
         nextEpisode = when (card.type) {
             MediaType.SERIES -> {
                 val eps = repo.getSeasonEpisodes(card.id, season)
+                seasonEpisodes = eps
                 eps.firstOrNull { it.episodeNumber == episode }?.let { ep ->
-                    overlaySub.text = "S$season · E$episode  ${ep.name}"
-                    overlayDesc.text = ep.overview
+                    if (ep.name.isNotBlank()) { episodeLine = "E$episode  ·  ${ep.name}"; updateTimes() }
                 }
                 val seasons = card.totalSeasons ?: repo.getSeriesDetail(card.id)?.second?.numberOfSeasons ?: season
                 when {
@@ -421,9 +602,18 @@ class PlayerActivity : AppCompatActivity() {
             MediaType.ANIME -> if (!t.isMovie && (card.episodes == null || episode < card.episodes!!)) 1 to episode + 1 else null
             else -> null
         }
+        val hasEpisodes = (card.type == MediaType.SERIES && seasonEpisodes.isNotEmpty()) || (card.type == MediaType.ANIME && !t.isMovie)
+        episodesBtn.visibility = if (hasEpisodes) View.VISIBLE else View.GONE
+        nextEpBtn.visibility = if (nextEpisode != null) View.VISIBLE else View.GONE
     }
 
     // ── Playback ──────────────────────────────────────────────────────────────
+
+    private fun metadata(): MediaMetadata = MediaMetadata.Builder()
+        .setTitle(title())
+        .setArtist(if (card.type == MediaType.MOVIE) null else card.title)
+        .setArtworkUri((card.backdropUrl ?: card.posterUrl)?.let { Uri.parse(it) })
+        .build()
 
     /**
      * [bypassProxy]: fetch straight from the origin behind a source's proxy (much faster). Some
@@ -431,6 +621,7 @@ class PlayerActivity : AppCompatActivity() {
      */
     private fun play(s: WebStreamSniffer.Sniffed, bypassProxy: Boolean = true) {
         current = s
+        if (offlineItem == null && langSources.isEmpty() && langJob?.isActive != true) gatherLanguages(s)
         val origin = originHost(s.url)
         bypassedProxy = bypassProxy && s.url.contains("proxy?") && origin != null && !LocalStore.directBad(origin)
         // Stream tokens are often locked to the IP family the WebView used (usually IPv6)
@@ -445,15 +636,19 @@ class PlayerActivity : AppCompatActivity() {
         val subs = s.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(8).mapIndexed { i, url ->
             MediaItem.SubtitleConfiguration.Builder(SubtitleCleaner.wrap(url))
                 .setMimeType(if (url.lowercase().contains(".srt")) MimeTypes.APPLICATION_SUBRIP else MimeTypes.TEXT_VTT)
-                .setLanguage(guessLang(url) ?: "en")
+                .setLanguage(SubtitleCleaner.langOf(url) ?: "en")
                 .setLabel(subLabel(url, i))
                 .build()
         }
         val item = MediaItem.Builder()
             .setUri(s.url)
-            .apply { if (s.url.lowercase().contains("m3u8")) setMimeType(MimeTypes.APPLICATION_M3U8) }
+            .apply {
+                val u = s.url.lowercase()
+                if (u.contains("m3u8")) setMimeType(MimeTypes.APPLICATION_M3U8)
+                else if (u.contains(".mpd") || u.contains("dash-proxy")) setMimeType(MimeTypes.APPLICATION_MPD)
+            }
             .setSubtitleConfigurations(subs)
-            .setMediaMetadata(MediaMetadata.Builder().setTitle(title()).build())
+            .setMediaMetadata(metadata())
             .build()
             .let { offlineItem ?: it }
 
@@ -462,7 +657,7 @@ class PlayerActivity : AppCompatActivity() {
             .setTargetBufferBytes(24 * 1024 * 1024)
             .setPrioritizeTimeOverSizeThresholds(false)
             .build()
-        // Low-CPU mode: tunneled playback hands A/V sync to the box's video chip
+        // Low-CPU mode: tunneled playback hands A/V sync to the video chip
         val selector = androidx.media3.exoplayer.trackselection.DefaultTrackSelector(this).apply {
             setParameters(buildUponParameters().setTunnelingEnabled(settings.lowCpuMode))
         }
@@ -477,10 +672,15 @@ class PlayerActivity : AppCompatActivity() {
             .setLoadControl(loadControl)
             .setTrackSelector(selector)
             .setBandwidthMeter(meter)
+            .setSeekBackIncrementMs(10_000)
+            .setSeekForwardIncrementMs(10_000)
+            .setHandleAudioBecomingNoisy(true)       // headphones unplugged: pause
             .build()
         player = exo
         audioPicked = false
         playerView.player = exo
+        // Headset buttons, Bluetooth, Android's media controls (also in picture-in-picture)
+        session = runCatching { MediaSession.Builder(this, exo).setId("nova-${SystemClock.elapsedRealtimeNanos()}").build() }.getOrNull()
         applyTrackPrefs(exo)
         attachBoost(exo)
 
@@ -491,26 +691,40 @@ class PlayerActivity : AppCompatActivity() {
                         if (readyTimeout?.isActive == true) providers.getOrNull(providerIndex)?.let { LocalStore.reportProvider(it.name, true) }
                         readyTimeout?.cancel()
                         buffering.visibility = View.GONE
+                        findViewById<View>(R.id.center_controls).visibility = View.VISIBLE
                         if (loadingLayer.visibility == View.VISIBLE) {
-                            Log.i(TAG, "timing: first frame ${android.os.SystemClock.elapsedRealtime() - playPressedAt}ms after Play")
+                            Log.i(TAG, "timing: first frame ${SystemClock.elapsedRealtime() - playPressedAt}ms after Play")
                             loadingLayer.animate().alpha(0f).setDuration(300).withEndAction { loadingLayer.visibility = View.GONE }.start()
-                            showOverlay(3000)
+                            if (!inPip) playerView.showController()
                             matchFrameRate(exo)
                         }
                     }
-                    Player.STATE_BUFFERING -> if (loadingLayer.visibility != View.VISIBLE) buffering.visibility = View.VISIBLE
+                    Player.STATE_BUFFERING -> if (loadingLayer.visibility != View.VISIBLE) {
+                        buffering.visibility = View.VISIBLE
+                        findViewById<View>(R.id.center_controls).visibility = View.INVISIBLE
+                    }
                     Player.STATE_ENDED -> {
                         saveProgress()
-                        if (sleepAtEnd) goToSleep()
-                        else if (nextEpisode != null && settings.autoplayNext) playNext()
-                        else if (nextEpisode != null) { nextBtn.text = "▶  Next Episode"; nextBtn.visibility = View.VISIBLE; nextBtn.requestFocus() }
-                        else finish()
+                        when {
+                            sleepAtEnd -> goToSleep()
+                            nextEpisode != null && settings.autoplayNext -> playNext()
+                            nextEpisode != null -> { nextDismissed = false; showNextCard(countdown = false) }
+                            else -> finish()
+                        }
                     }
                     else -> {}
                 }
             }
-            override fun onPlayerError(error: PlaybackException) = fallback(error.errorCodeName)
+            override fun onIsPlayingChanged(isPlaying: Boolean) = updatePip()
+            override fun onVideoSizeChanged(videoSize: VideoSize) { updatePip(); updateQualityLabel() }
+            override fun onPlayerError(error: PlaybackException) {
+                (error.cause as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.let {
+                    Log.w(TAG, "HTTP ${it.responseCode} on ${it.dataSpec.uri.toString().take(200)}")
+                }
+                fallback(error.errorCodeName)
+            }
             override fun onTracksChanged(tracks: Tracks) {
+                updateQualityLabel()
                 val audio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
                 fun langOf(f: Format) = f.language?.take(2)?.takeIf { it != "un" } ?: com.anees.novamobile.data.model.LangTags.code(f.label)
                 // Remember real audio languages so cards can be tagged "Hindi · English"
@@ -532,7 +746,8 @@ class PlayerActivity : AppCompatActivity() {
                         return
                     }
                 }
-                huntDub(want)
+                // No automatic source switching for a missing dub: other sources stay one tap away (⋯ → Source)
+                Log.i(TAG, "${com.anees.novamobile.data.model.LangTags.name(want) ?: want} not in this stream; playing available audio")
             }
         })
 
@@ -547,14 +762,17 @@ class PlayerActivity : AppCompatActivity() {
         Log.i(TAG, if (offlineItem != null) "playing saved download" else "playing via ${providers.getOrNull(providerIndex)?.name}, subs=${subs.size}")
     }
 
-    /** Audio language from Settings (or what was picked for this title), subtitles, 1080p cap, low-CPU mode. */
+    /** Audio language from Settings (or what was picked for this title), subtitles, quality cap, low-CPU mode. */
     private fun applyTrackPrefs(exo: ExoPlayer) {
         val lang = LocalStore.audioFor(key()) ?: settings.audioLang
+        val sub = LocalStore.subtitleFor(key())
+        val subsOn = if (sub != null) sub != "off" else settings.subtitlesOn
+        val cap = settings.maxQuality
         exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
             .apply { if (lang != "orig") setPreferredAudioLanguages(lang, "en") }
-            .setPreferredTextLanguage("en")
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !settings.subtitlesOn)
-            .setMaxVideoSize(1920, 1080)   // a 4K stream would stutter this box
+            .setPreferredTextLanguage(sub?.takeIf { it != "off" } ?: "en")
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subsOn)
+            .setMaxVideoSize(cap * 16 / 9, cap)   // a 4K stream would stutter a weak device unless allowed
             .build()
     }
 
@@ -562,9 +780,9 @@ class PlayerActivity : AppCompatActivity() {
     private fun attachBoost(exo: ExoPlayer) {
         loudness?.release()
         loudness = null
-        val session = androidx.media3.common.util.Util.generateAudioSessionIdV21(this)
-        exo.setAudioSessionId(session)
-        loudness = runCatching { android.media.audiofx.LoudnessEnhancer(session) }.getOrNull()
+        val sessionId = androidx.media3.common.util.Util.generateAudioSessionIdV21(this)
+        exo.setAudioSessionId(sessionId)
+        loudness = runCatching { android.media.audiofx.LoudnessEnhancer(sessionId) }.getOrNull()
         applyBoost()
     }
 
@@ -582,11 +800,11 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
-    /** Switch the TV to a refresh rate that fits the film (e.g. 24Hz) to remove judder. */
+    /** Switch the display to a refresh rate that fits the film (e.g. 24Hz) to remove judder. */
     private fun matchFrameRate(exo: ExoPlayer) {
         if (!settings.matchFrameRate) return
         val fps = exo.videoFormat?.frameRate?.takeIf { it > 0 } ?: return
-        val display = windowManager.defaultDisplay
+        @Suppress("DEPRECATION") val display = windowManager.defaultDisplay
         val cur = display.mode
         val best = display.supportedModes
             .filter { it.physicalWidth == cur.physicalWidth && it.physicalHeight == cur.physicalHeight }
@@ -595,27 +813,105 @@ class PlayerActivity : AppCompatActivity() {
         if (best.modeId != cur.modeId) window.attributes = window.attributes.apply { preferredDisplayModeId = best.modeId }
     }
 
-    // ── Overlay / ticker ──────────────────────────────────────────────────────
+    // ── Controls ──────────────────────────────────────────────────────────────
 
-    /** Built-in Media3 controls on phones; title shown in the top bar. */
-    private fun showOverlay(autoHideMs: Long = 4000, withInfo: Boolean = false) {
-        overlayTitle.text = title()
-        playerView.controllerShowTimeoutMs = autoHideMs.toInt()
-        playerView.showController()
+    private fun setupControls() {
+        findViewById<View>(R.id.btn_back).setOnClickListener { finish() }
+        findViewById<View>(R.id.loading_close).setOnClickListener { finish() }
+        findViewById<View>(R.id.btn_options).setOnClickListener { moreSheet() }
+        findViewById<View>(R.id.btn_tracks).setOnClickListener { tracksSheet() }
+        findViewById<View>(R.id.btn_lock).setOnClickListener { setLocked(true) }
+        findViewById<View>(R.id.btn_pip).apply {
+            visibility = if (pipSupported()) View.VISIBLE else View.GONE
+            setOnClickListener { enterPip() }
+        }
+        findViewById<View>(R.id.btn_rew10).setOnClickListener { player?.let { p -> p.seekBack(); seekFlash(false, 10) } }
+        findViewById<View>(R.id.btn_fwd10).setOnClickListener { player?.let { p -> p.seekForward(); seekFlash(true, 10) } }
+        // Quiet text buttons: 18dp icons
+        listOf(R.id.btn_speed, R.id.btn_tracks, R.id.btn_quality, R.id.btn_episodes, R.id.btn_next_ep).forEach { id ->
+            findViewById<TextView>(id).apply {
+                val d = compoundDrawablesRelative[0]?.mutate()?.apply { setBounds(0, 0, 18.dp, 18.dp) }
+                setCompoundDrawablesRelative(d, null, null, null)
+            }
+        }
+        speedBtn.setOnClickListener { speedSheet() }
+        qualityBtn.setOnClickListener { qualitySheet() }
+        episodesBtn.setOnClickListener { openDrawer() }
+        nextEpBtn.setOnClickListener { playNext() }
+        unlockBtn.setOnClickListener { setLocked(false) }
+        skipBtn.setOnClickListener { skip() }
+        retryBtn.setOnClickListener { startEpisode(season, episode) }
+        pickSourceBtn.setOnClickListener { sourceSheet() }
+        findViewById<View>(R.id.next_play).setOnClickListener { playNext() }
+        findViewById<View>(R.id.next_dismiss).setOnClickListener { nextDismissed = true; hideNextCard() }
+        drawerScrim.setOnClickListener { closeDrawer() }
+        findViewById<View>(R.id.next_still).apply {
+            outlineProvider = object : ViewOutlineProvider() { override fun getOutline(v: View, o: Outline) = o.setRoundRect(0, 0, v.width, v.height, 8f.dp) }
+            clipToOutline = true
+        }
+        speedBtn.text = speedLabel(speed)
+        // Skip / up-next sit above the time bar while controls show, lower when they hide
+        playerView.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { v ->
+            val lift = if (v == View.VISIBLE) 0f else 56f.dp
+            skipBtn.animate().translationY(lift).setDuration(200).start()
+            nextCard.animate().translationY(lift).setDuration(200).start()
+            // Subtitles move up out of the way of the time bar while controls show
+            playerView.subtitleView?.setBottomPaddingFraction(if (v == View.VISIBLE) 0.2f else 0.08f)
+            if (v == View.VISIBLE) updateTimes()
+        })
     }
 
-    private fun hideOverlay() = playerView.hideController()
+    private fun rotate() {
+        requestedOrientation = if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+    }
+
+    private fun setLocked(on: Boolean) {
+        locked = on
+        unlockBtn.setImageResource(R.drawable.ic_lock)
+        playerView.useController = !on
+        if (on) {
+            playerView.hideController()
+            flashUnlock()
+            hud(R.drawable.ic_lock, "Screen locked", null); scheduleHudHide(900)
+        } else {
+            unlockBtn.visibility = View.GONE
+            playerView.showController()
+        }
+        updatePip()
+    }
+
+    private fun flashUnlock() {
+        unlockBtn.animate().cancel()
+        unlockBtn.visibility = View.VISIBLE
+        unlockBtn.alpha = 1f
+        unlockBtn.animate().alpha(0f).setStartDelay(2500).setDuration(300).withEndAction { if (locked) unlockBtn.visibility = View.GONE }.start()
+    }
 
     private fun updateTimes() {
         val p = player ?: return
         val dur = p.duration.takeIf { it > 0 } ?: return
-        val pos = pendingSeek ?: p.currentPosition
-        seekBar.progress = (pos * 1000 / dur).toInt()
-        seekBar.secondaryProgress = (p.bufferedPosition * 1000 / dur).toInt()
-        timeLeft.text = fmt(pos)
-        val remaining = ((dur - pos) / speed).toLong()
-        val sleep = if (sleepAt > 0) "   ·   💤 ${(sleepAt - android.os.SystemClock.elapsedRealtime()) / 60_000 + 1}m" else if (sleepAtEnd) "   ·   💤 end" else ""
-        timeRight.text = "-${fmt(remaining)}   ·   Ends at ${CLOCK.format(Date(System.currentTimeMillis() + remaining))}$sleep"
+        val remaining = ((dur - p.currentPosition) / speed).toLong()
+        val sleep = when {
+            sleepAt > 0 -> "  ·  sleep in ${(sleepAt - SystemClock.elapsedRealtime()) / 60_000 + 1}m"
+            sleepAtEnd -> "  ·  sleep at end"
+            else -> ""
+        }
+        timeRemaining.text = "-${fmt(remaining)}"
+        val ends = "ends ${CLOCK.format(Date(System.currentTimeMillis() + remaining))}$sleep"
+        topSub.text = if (episodeLine.isNotEmpty()) "$episodeLine  ·  $ends" else ends
+    }
+
+    private fun updateQualityLabel() {
+        val p = player ?: return
+        val h = p.videoSize.height.takeIf { it > 0 }
+        val manual = p.trackSelectionParameters.overrides.keys.any { it.type == C.TRACK_TYPE_VIDEO }
+        qualityBtn.text = when {
+            offlineItem != null -> if (h != null) "Downloaded · ${h}p" else "Downloaded"
+            h == null -> "Auto"
+            manual -> "${h}p"
+            else -> "Auto · ${h}p"
+        }
     }
 
     private fun startTicker() {
@@ -623,132 +919,315 @@ class PlayerActivity : AppCompatActivity() {
         tickJob = lifecycleScope.launch {
             var n = 0
             while (isActive) {
-                delay(500)
+                delay(250)
                 val p = player ?: continue
-                if (overlay.visibility == View.VISIBLE) updateTimes()
-                if (++n % 2 != 0) continue
                 val pos = p.currentPosition
                 val dur = p.duration.takeIf { it > 0 } ?: continue
-
-                val intro = introRange
-                val showSkip = intro != null && pos in intro && pos < intro.last - 3000
-                if (showSkip && skipBtn.visibility != View.VISIBLE) {
-                    skipBtn.text = if (card.type == MediaType.ANIME) "Skip Intro" else "Skip Intro  +85s"
-                    // Only real intro data (anime) takes focus; for series it's a hint you reach with ▼.
-                    // Non-focusable until then, or Android would hand it focus automatically.
-                    skipBtn.visibility = View.VISIBLE
-                } else if (!showSkip && skipBtn.visibility == View.VISIBLE) skipBtn.visibility = View.GONE
-
-                val next = nextEpisode
                 val remaining = dur - pos
+                val next = nextEpisode
+
+                // Up-next countdown fills the Play button, then plays the next episode
+                if (nextCard.visibility == View.VISIBLE && nextDeadline > 0) {
+                    val left = nextDeadline - SystemClock.elapsedRealtime()
+                    nextCountdown.progress = (1000 - left * 1000 / UP_NEXT_MS).toInt().coerceIn(0, 1000)
+                    if (left <= 0 && p.isPlaying) { playNext(); continue }
+                }
+                if (++n % 2 != 0) continue          // everything below: twice a second
+
+                if (playerView.isControllerFullyVisible) updateTimes()
+
+                // Skip intro (anime: AniSkip times; series: a hint shown 8s at most) / skip credits (anime)
+                val intro = introRange
+                val outro = outroRange
+                val inIntro = intro != null && pos in intro && pos < intro.last - 3000
+                val inOutro = outro != null && pos in outro && pos < outro.last - 3000 && (next == null || nextDismissed)
+                val seriesHint = card.type == MediaType.SERIES
+                if ((inIntro || inOutro) && !inPip && nextCard.visibility != View.VISIBLE) {
+                    if (skipBtn.visibility != View.VISIBLE) {
+                        skipBtn.text = when { inOutro -> "Skip Credits"; seriesHint -> "Skip  +85s"; else -> "Skip Intro" }
+                        skipBtn.visibility = View.VISIBLE
+                        skipBtn.alpha = 0f; skipBtn.animate().alpha(1f).setDuration(200).start()
+                        skipShownAt = SystemClock.elapsedRealtime()
+                    } else if (seriesHint && inIntro && SystemClock.elapsedRealtime() - skipShownAt > 8_000) {
+                        skipBtn.visibility = View.GONE; introRange = null
+                    }
+                } else if (skipBtn.visibility == View.VISIBLE) skipBtn.visibility = View.GONE
+
                 // Two minutes before the end, find the next episode's stream so "Next" starts at once
                 if (next != null && !nextPrefetched && remaining in 1..120_000) {
                     nextPrefetched = true
                     Prefetcher.request(this@PlayerActivity, card, next.first, next.second, hostOverride = root)
                 }
-                if (next != null && !nextDismissed && remaining in 1..20_000) {
-                    nextBtn.text = "▶  Next: S${next.first} · E${next.second}   ${remaining / 1000}s"
-                    if (nextBtn.visibility != View.VISIBLE) nextBtn.visibility = View.VISIBLE
-                } else if (nextBtn.visibility == View.VISIBLE && remaining > 20_000) nextBtn.visibility = View.GONE
+                // Up next: at the credits (when known) or 20s before the end
+                val creditsAt = outro?.first ?: (dur - 20_000)
+                if (next != null && !nextDismissed && pos >= creditsAt && remaining > 0 && nextCard.visibility != View.VISIBLE && !inPip)
+                    showNextCard(countdown = settings.autoplayNext)
 
                 if (n % 20 == 0) saveProgress()
             }
         }
     }
 
-    private fun flash(icon: String) {
-        centerIcon.text = icon
-        centerIcon.visibility = View.VISIBLE
-        centerIcon.alpha = 1f; centerIcon.scaleX = 0.9f; centerIcon.scaleY = 0.9f
-        centerIcon.animate().scaleX(1f).scaleY(1f).setDuration(150).withEndAction {
-            centerIcon.animate().alpha(0f).setStartDelay(350).setDuration(250).withEndAction { centerIcon.visibility = View.GONE }.start()
+    private fun showNextCard(countdown: Boolean) {
+        val next = nextEpisode ?: return
+        val ep = if (next.first == season) seasonEpisodes.firstOrNull { it.episodeNumber == next.second } else null
+        findViewById<TextView>(R.id.next_title).text = buildString {
+            append(if (card.type == MediaType.ANIME) "Episode ${next.second}" else "S${next.first} · E${next.second}")
+            ep?.name?.takeIf { it.isNotBlank() }?.let { append("  ·  $it") }
+        }
+        findViewById<ImageView>(R.id.next_still).load(ep?.stillPath?.let { "https://image.tmdb.org/t/p/w300$it" } ?: card.backdropUrl)
+        nextDeadline = if (countdown) SystemClock.elapsedRealtime() + UP_NEXT_MS else 0
+        nextCountdown.progress = if (countdown) 0 else 1000
+        findViewById<TextView>(R.id.next_play_label).text = if (countdown) "Next episode" else "Play next"
+        skipBtn.visibility = View.GONE
+        nextCard.visibility = View.VISIBLE
+        nextCard.alpha = 0f; nextCard.translationX = 40f.dp
+        nextCard.animate().alpha(1f).translationX(0f).setDuration(250).start()
+    }
+
+    private fun hideNextCard() {
+        nextDeadline = 0
+        nextCard.animate().alpha(0f).setDuration(150).withEndAction { nextCard.visibility = View.GONE }.start()
+    }
+
+    // ── Gesture host ──────────────────────────────────────────────────────────
+
+    override val enabled get() = !locked && loadingLayer.visibility != View.VISIBLE && drawer.visibility != View.VISIBLE
+    override val swipes get() = settings.gestures
+    override fun position() = player?.currentPosition ?: 0L
+    override fun duration() = player?.duration ?: 0L
+    override fun seekTo(ms: Long) { player?.seekTo(ms) }
+    override fun togglePlay(): Boolean { val p = player ?: return false; p.playWhenReady = !p.playWhenReady; return p.playWhenReady }
+    override fun setTempSpeed(speed: Float?) { player?.setPlaybackSpeed(speed ?: this.speed) }
+    override fun boost() = boost
+    override fun setBoost(level: Int) { boost = level; applyBoost() }
+    override fun onResize(mode: Int) { settings = settings.copy(resizeMode = mode); LocalStore.saveSettings(LocalStore.settings().copy(resizeMode = mode)) }
+    override fun onLockedTap() = flashUnlock()
+
+    override fun hud(icon: Int, text: String, fraction: Float?) {
+        hudHide?.let { hud.removeCallbacks(it) }
+        // Brightness and volume: vertical bars at the sides; everything else: the pill on top
+        if (fraction != null && (icon == R.drawable.ic_brightness || icon == R.drawable.ic_volume)) {
+            val left = icon == R.drawable.ic_brightness
+            val bar = findViewById<View>(if (left) R.id.side_left else R.id.side_right)
+            val track = findViewById<View>(if (left) R.id.side_left_track else R.id.side_right_track)
+            val fill = findViewById<View>(if (left) R.id.side_left_fill else R.id.side_right_fill)
+            fill.layoutParams = fill.layoutParams.apply { height = (track.layoutParams.height * fraction.coerceIn(0f, 1f)).toInt() }
+            if (!left) findViewById<TextView>(R.id.side_right_text).apply {
+                visibility = if (text.startsWith("Boost")) View.VISIBLE else View.GONE
+                this.text = text.removePrefix("Boost ")
+                fill.setBackgroundColor(if (text.startsWith("Boost")) Ui.WARNING else Ui.TEXT)
+            }
+            bar.animate().cancel(); bar.alpha = 1f; bar.visibility = View.VISIBLE
+            return
+        }
+        hud.animate().cancel()
+        hudIcon.setImageResource(icon)
+        hudText.text = text
+        hudBar.visibility = if (fraction == null) View.GONE else View.VISIBLE
+        fraction?.let { hudBar.progress = (it * 1000).toInt() }
+        if (hud.visibility != View.VISIBLE || hud.alpha < 1f) { hud.visibility = View.VISIBLE; hud.animate().alpha(1f).setDuration(120).start() }
+    }
+
+    override fun hideHud() {
+        hud.animate().alpha(0f).setDuration(200).withEndAction { hud.visibility = View.GONE }.start()
+        listOf(R.id.side_left, R.id.side_right).map { findViewById<View>(it) }.filter { it.visibility == View.VISIBLE }
+            .forEach { b -> b.animate().alpha(0f).setDuration(250).withEndAction { b.visibility = View.GONE }.start() }
+    }
+
+    private fun scheduleHudHide(ms: Long) {
+        hudHide?.let { hud.removeCallbacks(it) }
+        hudHide = Runnable { hideHud() }.also { hud.postDelayed(it, ms) }
+    }
+
+    override fun seekFlash(forward: Boolean, seconds: Int) {
+        val v = if (forward) seekRight else seekLeft
+        (if (forward) seekLeft else seekRight).visibility = View.GONE
+        v.text = "$seconds seconds"
+        v.animate().cancel()
+        if (v.visibility != View.VISIBLE) { v.alpha = 0f; v.visibility = View.VISIBLE }
+        v.animate().alpha(1f).setStartDelay(0).setDuration(100).withEndAction {
+            v.animate().alpha(0f).setStartDelay(550).setDuration(250).withEndAction { v.visibility = View.GONE }.start()
         }.start()
     }
 
-    // ── Touch: tap toggles controls, double-tap left/right skips 10s ─────────
+    // ── Picture-in-picture ────────────────────────────────────────────────────
 
-    private fun setupTouch() {
-        val detector = android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
-            override fun onDown(e: android.view.MotionEvent) = true
-            override fun onSingleTapConfirmed(e: android.view.MotionEvent): Boolean {
-                if (playerView.isControllerFullyVisible) playerView.hideController() else playerView.showController()
-                return true
-            }
-            override fun onDoubleTap(e: android.view.MotionEvent): Boolean {
-                val p = player ?: return true
-                val third = playerView.width / 3f
-                when {
-                    e.x < third -> { p.seekTo((p.currentPosition - 10_000).coerceAtLeast(0)); flash("⟲ 10") }
-                    e.x > third * 2 -> { p.seekTo(p.currentPosition + 10_000); flash("10 ⟳") }
-                    else -> { p.playWhenReady = !p.playWhenReady; flash(if (p.playWhenReady) "▶" else "❚❚") }
-                }
-                return true
-            }
-        })
-        playerView.setOnTouchListener { _, e -> detector.onTouchEvent(e) }
-        playerView.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { v ->
-            topBar.visibility = v
-        })
-        findViewById<View>(R.id.btn_back).setOnClickListener { finish() }
-        findViewById<View>(R.id.btn_options).setOnClickListener { showPicker() }
+    private fun pipSupported() = packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_PICTURE_IN_PICTURE)
+
+    private fun pipParams(): PictureInPictureParams {
+        val p = player
+        val vs = p?.videoSize
+        val ratio = if (vs != null && vs.width > 0 && vs.height > 0) {
+            val r = vs.width.toFloat() * vs.pixelWidthHeightRatio / vs.height
+            Rational((r.coerceIn(0.42f, 2.38f) * 1000).toInt(), 1000)
+        } else Rational(16, 9)
+        fun action(code: Int, icon: Int, label: String) = RemoteAction(Icon.createWithResource(this, icon), label, label,
+            PendingIntent.getBroadcast(this, code, Intent(ACTION_PIP).setPackage(packageName).putExtra("a", code),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
+        val playing = p?.playWhenReady == true
+        val b = PictureInPictureParams.Builder()
+            .setAspectRatio(ratio)
+            .setActions(listOf(
+                action(1, R.drawable.ic_replay10, "Back 10 seconds"),
+                action(2, if (playing) R.drawable.ic_pause else R.drawable.ic_play, if (playing) "Pause" else "Play"),
+                action(3, R.drawable.ic_forward10, "Forward 10 seconds"),
+            ))
+        val r = Rect(); playerView.getGlobalVisibleRect(r); if (!r.isEmpty) b.setSourceRectHint(r)
+        if (Build.VERSION.SDK_INT >= 31) {
+            b.setAutoEnterEnabled(settings.autoPip && p?.isPlaying == true && !locked)
+            b.setSeamlessResizeEnabled(true)
+        }
+        return b.build()
     }
 
-    /** Hide status + navigation bars (swipe from the edge brings them back briefly). */
-    private fun immersive() {
-        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
-        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
-            hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
-            systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    private fun updatePip() {
+        if (!pipSupported() || player == null) return
+        runCatching { setPictureInPictureParams(pipParams()) }
+    }
+
+    private fun enterPip() {
+        if (!pipSupported() || player == null || loadingLayer.visibility == View.VISIBLE) return
+        runCatching { enterPictureInPictureMode(pipParams()) }
+    }
+
+    /** Before Android 12 there's no auto-enter: going Home while playing opens PiP here. */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (Build.VERSION.SDK_INT < 31 && settings.autoPip && player?.isPlaying == true && !locked) enterPip()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        inPip = isInPictureInPictureMode
+        playerView.useController = !inPip && !locked
+        if (inPip) {
+            playerView.hideController()
+            listOf(hud, skipBtn, nextCard, seekLeft, seekRight, unlockBtn).forEach { it.visibility = View.GONE }
+            closeDrawer()
+            playerView.subtitleView?.setFractionalTextSize(0.08f)
+        } else {
+            styleSubtitles()
+            // PiP window closed with ✕: the activity is already stopped
+            if (lifecycle.currentState == Lifecycle.State.CREATED) { saveProgress(); player?.pause(); finish() }
         }
     }
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) immersive()
+    // ── Episodes drawer ───────────────────────────────────────────────────────
+
+    private fun openDrawer() {
+        val list = findViewById<LinearLayout>(R.id.episodes_list)
+        list.removeAllViews()
+        val progress = LocalStore.episodeProgress(key())
+        findViewById<TextView>(R.id.episodes_title).text = if (card.type == MediaType.ANIME) card.title else "${card.title} · Season $season"
+        val rows: List<Triple<Int, String, String?>> = if (card.type == MediaType.SERIES)
+            seasonEpisodes.map { Triple(it.episodeNumber, it.name, it.stillPath?.let { p -> "https://image.tmdb.org/t/p/w300$p" }) }
+        else (1..(card.episodes ?: (episode + 1))).map { Triple(it, "", null) }
+        var currentRow: View? = null
+        rows.forEach { (num, name, still) ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                setPadding(16.dp, 8.dp, 16.dp, 8.dp)
+                if (num == episode) setBackgroundColor(0x1AFFFFFF)
+                setOnClickListener { closeDrawer(); if (num != episode) { saveProgress(); startEpisode(season, num) } }
+            }
+            Ui.pressable(row, 0.98f)
+            val thumb = FrameLayout(this).apply {
+                setBackgroundColor(0x22FFFFFF)
+                outlineProvider = object : ViewOutlineProvider() { override fun getOutline(v: View, o: Outline) = o.setRoundRect(0, 0, v.width, v.height, 6f.dp) }
+                clipToOutline = true
+            }
+            if (still != null) thumb.addView(ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; load(still) }, FrameLayout.LayoutParams(-1, -1))
+            else thumb.addView(TextView(this).apply { text = "$num"; gravity = Gravity.CENTER; setTextColor(Ui.TEXT); textSize = 15f }, FrameLayout.LayoutParams(-1, -1))
+            val p = progress["$season:$num"] ?: 0f
+            if (p > 0.02f) thumb.addView(ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                max = 100; this.progress = (p * 100).toInt(); progressDrawable = ContextCompat.getDrawable(this@PlayerActivity, R.drawable.seek_track)
+            }, FrameLayout.LayoutParams(-1, 3.dp, Gravity.BOTTOM))
+            row.addView(thumb, LinearLayout.LayoutParams(if (still != null) 120.dp else 44.dp, if (still != null) 68.dp else 44.dp))
+            row.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(12.dp, 0, 0, 0)
+                addView(TextView(this@PlayerActivity).apply {
+                    text = if (name.isNotBlank()) "$num. $name" else "Episode $num"
+                    setTextColor(if (num == episode) Ui.ACCENT else Ui.TEXT); textSize = 14f; maxLines = 2
+                })
+                val status = when { num == episode -> "Playing"; p >= 0.9f -> "Watched"; p > 0.02f -> "${(p * 100).toInt()}% watched"; else -> "" }
+                if (status.isNotEmpty()) addView(TextView(this@PlayerActivity).apply { text = status; setTextColor(Ui.TEXT2); textSize = 12f })
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            list.addView(row)
+            if (num == episode) currentRow = row
+        }
+        playerView.hideController()
+        drawerScrim.visibility = View.VISIBLE
+        drawer.visibility = View.VISIBLE
+        drawer.translationX = 380f.dp
+        drawer.animate().translationX(0f).setDuration(220).start()
+        val scroll = list.parent as ScrollView
+        currentRow?.let { r -> scroll.post { scroll.smoothScrollTo(0, (r.top - 80.dp).coerceAtLeast(0)) } }
+    }
+
+    private fun closeDrawer() {
+        if (drawer.visibility != View.VISIBLE) return
+        drawerScrim.visibility = View.GONE
+        drawer.animate().translationX(380f.dp).setDuration(180).withEndAction { drawer.visibility = View.GONE }.start()
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (nextBtn.visibility == View.VISIBLE) { nextDismissed = true; nextBtn.visibility = View.GONE; return }
-        @Suppress("DEPRECATION") super.onBackPressed()
+        when {
+            drawer.visibility == View.VISIBLE -> closeDrawer()
+            locked -> flashUnlock()
+            nextCard.visibility == View.VISIBLE -> { nextDismissed = true; hideNextCard() }
+            else -> @Suppress("DEPRECATION") super.onBackPressed()
+        }
     }
 
-    private fun skipIntro() {
+    private fun skip() {
         val p = player ?: return
+        val pos = p.currentPosition
+        val outro = outroRange
         val intro = introRange
-        p.seekTo(if (card.type == MediaType.ANIME && intro != null) intro.last else p.currentPosition + 85_000)
+        when {
+            outro != null && pos in outro -> if (nextEpisode != null) playNext() else p.seekTo(outro.last)
+            card.type == MediaType.ANIME && intro != null -> { p.seekTo(intro.last); introRange = null }
+            else -> { p.seekTo(pos + 85_000); introRange = null }
+        }
         skipBtn.visibility = View.GONE
-        introRange = null
     }
 
     private fun playNext() {
         val next = nextEpisode ?: return
         saveProgress()
-        overlaySub.text = ""
-        overlayDesc.text = ""
+        nextCard.visibility = View.GONE
         startEpisode(next.first, next.second)
     }
 
     private fun saveProgress() {
         val p = player ?: return
         if (p.duration <= 0) return
-        if (offlineItem != null && settings.dlAutoDeleteWatched && p.currentPosition > p.duration * 0.95) {
-            androidx.media3.exoplayer.offline.DownloadService.sendRemoveDownload(this,
-                com.anees.novamobile.download.NovaDownloadService::class.java,
-                com.anees.novamobile.download.DownloadMeta.id(card, season, episode), false)
-        }
+        if (offlineItem != null && p.currentPosition > p.duration * 0.95)
+            com.anees.novamobile.download.SmartDownloads.onWatched(this, card, season, episode)
         LocalStore.saveProgress(HistoryEntry(card, season, episode, p.currentPosition, p.duration))
         LocalStore.setEpisodeProgress(key(), season, episode, p.currentPosition.toFloat() / p.duration)
         if (!syncedWatched && p.currentPosition > p.duration * 0.9) { syncedWatched = true; com.anees.novamobile.sync.Sync.watched(card, season, episode) }
     }
 
-    // ── Audio · Subtitles · Quality · Speed · Source ──────────────────────────
+    // ── Sheets: Speed · Audio & Subtitles · Quality · More (playback keeps going) ──
 
-    private fun showPicker() {
+    private fun speedLabel(s: Float) = if (s == 1f) "1×" else "${s.toString().removeSuffix(".0")}×"
+
+    private fun speedSheet() {
         val exo = player ?: return
-        val wasPlaying = exo.playWhenReady
-        val items = mutableListOf<ActionSheet.Item>()
+        ActionSheet.show(this, "Playback speed", SPEEDS.map { sp ->
+            ActionSheet.Item(if (sp == 1f) "Normal" else speedLabel(sp), checked = speed == sp) {
+                speed = sp; exo.setPlaybackSpeed(sp); speedBtn.text = speedLabel(sp)
+            }
+        })
+    }
 
+    private fun tracksSheet() {
+        val exo = player ?: return
+        val items = mutableListOf<ActionSheet.Item>()
         val audio = exo.currentTracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
         if (audio.sumOf { it.length } > 0) items += ActionSheet.Item("Audio", header = true)
         audio.forEach { g ->
@@ -762,47 +1241,95 @@ class PlayerActivity : AppCompatActivity() {
                 }
             }
         }
+        // Languages only other found sources have: picking one switches source at the same second
+        val have = audio.flatMap { g -> (0 until g.length).mapNotNull { i -> val f = g.getTrackFormat(i)
+            f.language?.take(2)?.takeIf { it != "un" } ?: com.anees.novamobile.data.model.LangTags.code(f.label) } }.toSet()
+        val cur = providers.getOrNull(providerIndex)
+        val extra = langSources.filter { it.first != cur }
+            .flatMap { (p, s, ls) -> ls.map { Triple(it, p, s) } }
+            .filter { it.first !in have }.distinctBy { it.first }
+        if (extra.isNotEmpty() && audio.sumOf { it.length } == 0) items += ActionSheet.Item("Audio", header = true)
+        extra.forEach { (lang, p, s) ->
+            items += ActionSheet.Item("${com.anees.novamobile.data.model.LangTags.name(lang) ?: lang}  ·  ${p.name}") {
+                LocalStore.setAudioFor(key(), lang)
+                switchTo(p, s)
+            }
+        }
 
         val text = exo.currentTracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
         items += ActionSheet.Item("Subtitles", header = true)
         items += ActionSheet.Item("Off", checked = text.none { it.isSelected }) {
             exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+            LocalStore.setSubtitleFor(key(), "off")
         }
         text.forEach { g ->
             for (i in 0 until g.length) {
-                items += ActionSheet.Item(trackName(g.getTrackFormat(i), "Subtitle ${i + 1}"), checked = g.isTrackSelected(i)) {
+                val f = g.getTrackFormat(i)
+                items += ActionSheet.Item(trackName(f, "Subtitle ${i + 1}"), checked = g.isTrackSelected(i)) {
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                        .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
+                    LocalStore.setSubtitleFor(key(), f.language?.take(2) ?: "en")
+                }
+            }
+        }
+        items += ActionSheet.Item("Subtitle size", header = true)
+        listOf("Small", "Medium", "Large").forEachIndexed { i, label ->
+            items += ActionSheet.Item(label, checked = settings.subtitleSize == i) {
+                settings = settings.copy(subtitleSize = i)
+                LocalStore.saveSettings(LocalStore.settings().copy(subtitleSize = i))
+                styleSubtitles()
+            }
+        }
+        ActionSheet.show(this, "Audio & Subtitles", items)
+    }
+
+    private fun qualitySheet() {
+        val exo = player ?: return
+        val items = mutableListOf<ActionSheet.Item>()
+        val manual = exo.trackSelectionParameters.overrides.keys.any { it.type == C.TRACK_TYPE_VIDEO }
+        items += ActionSheet.Item("Auto (recommended)", checked = !manual) {
+            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
+        }
+        exo.currentTracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO }.forEach { g ->
+            // Below-720p variants are hidden only when the stream really has better ones,
+            // so a 480p-only last-resort stream still offers its only quality
+            val maxH = (0 until g.length).map { g.getTrackFormat(it).height }.filter { it > 0 }.maxOrNull() ?: 0
+            (0 until g.length).sortedByDescending { g.getTrackFormat(it).height }.forEach { i ->
+                val f = g.getTrackFormat(i)
+                val h = f.height
+                if (h <= 0 || h > settings.maxQuality) return@forEach
+                if (maxH >= QualityGate.MIN_HEIGHT && h < QualityGate.MIN_HEIGHT) return@forEach
+                val mbps = f.bitrate.takeIf { it > 0 }?.let { "  ·  %.1f Mbps".format(it / 1_000_000f) } ?: ""
+                items += ActionSheet.Item("${h}p$mbps", checked = manual && exo.trackSelectionParameters.overrides[g.mediaTrackGroup]?.trackIndices?.contains(i) == true) {
+                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
                 }
             }
         }
+        ActionSheet.show(this, "Quality", items, subtitle = when {
+            offlineItem != null -> "Downloaded copy"
+            items.size == 1 -> "This stream has one quality"
+            else -> null
+        })
+    }
 
-        val video = exo.currentTracks.groups.filter { it.type == C.TRACK_TYPE_VIDEO && it.length > 1 }
-        if (video.isNotEmpty()) {
-            items += ActionSheet.Item("Quality", header = true)
-            items += ActionSheet.Item("Auto", checked = exo.trackSelectionParameters.overrides.keys.none { it.type == C.TRACK_TYPE_VIDEO }) {
-                exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon().clearOverridesOfType(C.TRACK_TYPE_VIDEO).build()
-            }
-            video.forEach { g ->
-                for (i in 0 until g.length) {
-                    val h = g.getTrackFormat(i).height
-                    if (h <= 0 || h > 1080) continue
-                    items += ActionSheet.Item("${h}p", checked = exo.trackSelectionParameters.overrides[g.mediaTrackGroup]?.trackIndices?.contains(i) == true) {
-                        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                            .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
-                    }
-                }
-            }
-        }
-
-        items += ActionSheet.Item("Sleep Timer", header = true)
-        val left = if (sleepAt > 0) (sleepAt - android.os.SystemClock.elapsedRealtime()) / 60_000 else 0
+    private fun moreSheet() {
+        val items = mutableListOf<ActionSheet.Item>()
+        items += ActionSheet.Item("Sleep timer", header = true)
+        val left = if (sleepAt > 0) (sleepAt - SystemClock.elapsedRealtime()) / 60_000 else 0
         items += ActionSheet.Item(if (sleepAt > 0) "On · ${left + 1} min left" else "Off", checked = sleepAt == 0L && !sleepAtEnd) { setSleep(0) }
-        listOf(30, 60, 90).forEach { m -> items += ActionSheet.Item("$m minutes") { setSleep(m) } }
+        listOf(15, 30, 60).forEach { m -> items += ActionSheet.Item("$m minutes") { setSleep(m) } }
         items += ActionSheet.Item("End of this ${if (card.type == MediaType.MOVIE) "movie" else "episode"}", checked = sleepAtEnd) { setSleep(-1) }
 
-        items += ActionSheet.Item("Volume Boost", header = true)
+        items += ActionSheet.Item("Picture", header = true)
+        items += ActionSheet.Item(if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "Rotate to portrait" else "Rotate to landscape") { rotate() }
+        listOf(AspectRatioFrameLayout.RESIZE_MODE_FIT to "Fit", AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "Zoom to fill",
+            AspectRatioFrameLayout.RESIZE_MODE_FILL to "Stretch").forEach { (m, label) ->
+            items += ActionSheet.Item(label, checked = playerView.resizeMode == m) { playerView.resizeMode = m; onResize(m) }
+        }
+
+        items += ActionSheet.Item("Volume boost", header = true)
         listOf("Off", "+6 dB", "+10 dB", "+15 dB").forEachIndexed { i, label ->
             items += ActionSheet.Item(label, checked = boost == i) {
                 boost = i
@@ -810,27 +1337,21 @@ class PlayerActivity : AppCompatActivity() {
                 LocalStore.saveSettings(LocalStore.settings().copy(volumeBoost = i))   // quiet sources stay fixed next time
             }
         }
-
-        items += ActionSheet.Item("Speed", header = true)
-        listOf(1f, 1.25f, 1.5f).forEach { sp -> items += ActionSheet.Item("${sp}×", checked = speed == sp) { speed = sp; exo.setPlaybackSpeed(sp) } }
-
-        items += ActionSheet.Item("Source", header = true)
-        providers.forEachIndexed { i, p ->
-            items += ActionSheet.Item(p.name, checked = i == providerIndex) {
-                if (i != providerIndex) {
-                    resumeMs = exo.currentPosition
-                    releasePlayer()
-                    providerIndex = i
-                    loadingLayer.alpha = 1f
-                    loadingLayer.visibility = View.VISIBLE
-                    streamJob?.cancel()
-                    streamJob = lifecycleScope.launch { findSource() }
-                }
-            }
+        if (offlineItem == null) {
+            items += ActionSheet.Item("Source", header = true)
+            items += ActionSheet.Item("Switch source…") { sourceSheet() }
         }
+        ActionSheet.show(this, null, items)
+    }
 
-        exo.playWhenReady = false
-        ActionSheet.show(this, null, items, onDismiss = { player?.playWhenReady = wasPlaying })
+    private fun sourceSheet() {
+        ActionSheet.show(this, "Source", providers.mapIndexed { i, p ->
+            val ms = LocalStore.providerSpeed(p.name)
+            ActionSheet.Item(p.name + (if (ms > 0) "  ·  ~${(ms + 500) / 1000}s" else "") + (if (p.multiAudio) "  ·  multi-audio" else ""),
+                checked = i == providerIndex && player != null) {
+                if (i != providerIndex || player == null) { usedCache = false; switchSource(i) }
+            }
+        }, subtitle = "If a stream stutters or lacks your language, try another")
     }
 
     /** minutes > 0: stop after that long; -1: at the end of this episode; 0: off. */
@@ -838,14 +1359,15 @@ class PlayerActivity : AppCompatActivity() {
         sleepJob?.cancel()
         sleepAt = 0; sleepAtEnd = minutes < 0
         if (minutes > 0) {
-            sleepAt = android.os.SystemClock.elapsedRealtime() + minutes * 60_000L
+            sleepAt = SystemClock.elapsedRealtime() + minutes * 60_000L
             sleepJob = lifecycleScope.launch { delay(minutes * 60_000L); goToSleep() }
         }
-        android.widget.Toast.makeText(this, when {
-            minutes > 0 -> "Sleep timer: $minutes minutes"
-            minutes < 0 -> "Will stop at the end"
+        hud(R.drawable.ic_pause, when {
+            minutes > 0 -> "Sleep in $minutes minutes"
+            minutes < 0 -> "Stops at the end"
             else -> "Sleep timer off"
-        }, android.widget.Toast.LENGTH_SHORT).show()
+        }, null)
+        scheduleHudHide(1200)
     }
 
     private fun goToSleep() {
@@ -885,7 +1407,10 @@ class PlayerActivity : AppCompatActivity() {
         loadingLayer.visibility = View.VISIBLE
         loadingBar.visibility = View.INVISIBLE
         statusText.text = msg
-        if (retry) { retryBtn.visibility = View.VISIBLE; retryBtn.requestFocus() }
+        if (retry) {
+            retryBtn.visibility = View.VISIBLE; retryBtn.requestFocus()
+            pickSourceBtn.visibility = if (target != null) View.VISIBLE else View.GONE
+        }
     }
 
     /** Reads `ip_cidr` from a JWT `token=` param if present; otherwise prefer IPv6 like Chromium does. */
@@ -896,35 +1421,49 @@ class PlayerActivity : AppCompatActivity() {
         cidr.contains(':')
     }.getOrDefault(true)
 
-    private fun guessLang(url: String): String? =
-        Regex("""[/_\-.](en|eng|english|ar|ara|arabic|fr|es|de|ur|hi)[/_\-.]""", RegexOption.IGNORE_CASE)
-            .find(url)?.groupValues?.get(1)?.lowercase()?.take(2)
-
     private fun subLabel(url: String, i: Int): String =
-        guessLang(url)?.let { Locale(it).displayLanguage } ?: if (i == 0) "English" else "Subtitles ${i + 1}"
+        SubtitleCleaner.langOf(url)?.let { Locale(it).displayLanguage } ?: if (i == 0) "English" else "Subtitles ${i + 1}"
 
     private fun releasePlayer() {
         bandwidthMeter?.bitrateEstimate?.takeIf { it > 300_000 }?.let { LocalStore.setLastBandwidth(it) }
+        session?.release()
+        session = null
         loudness?.release()
         loudness = null
         readyTimeout?.cancel()
         tickJob?.cancel()
-        seekCommitJob?.cancel()
-        pendingSeek = null
         player?.release()
         player = null
         playerView.player = null
         buffering.visibility = View.GONE
     }
 
+    /** Hide status + navigation bars (swipe from the edge brings them back briefly). */
+    private fun immersive() {
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        if (Build.VERSION.SDK_INT >= 28) window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) immersive()
+    }
+
     override fun onStop() {
         super.onStop()
         saveProgress()
-        player?.pause()
+        if (!inPip) player?.pause()      // in picture-in-picture it keeps playing
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        runCatching { unregisterReceiver(pipReceiver) }
         streamJob?.cancel()
         sniffers.toList().forEach { it.release() }
         Prefetcher.cancel()

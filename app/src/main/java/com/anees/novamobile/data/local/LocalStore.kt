@@ -32,7 +32,8 @@ data class Settings(
     val dlAudioAll: Boolean = true,        // keep every audio language (false: preferred + English only)
     val dlStorage: Int = 0,                // 0 internal, 1 SD card / second storage
     val notifyDownloadDone: Boolean = true,
-    val notifyDownloadProblem: Boolean = true
+    val notifyDownloadProblem: Boolean = true,
+    val autoSaveGallery: Boolean = false   // copy each finished download into Movies/Nova (uses the space twice)
 )
 
 object LocalStore {

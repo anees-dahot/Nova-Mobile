@@ -99,6 +99,11 @@ class SettingsFragment : Fragment(), TabPage {
         row("Wi-Fi Only", if (s.dlWifiOnly) "On" else "Off") { saveDl(s.copy(dlWifiOnly = !s.dlWifiOnly)) }
         row("Downloads at Once", s.dlParallel.toString()) { pick("Downloads at Once", listOf("1", "2", "3"), s.dlParallel - 1) { saveDl(s.copy(dlParallel = it + 1)) } }
         row("Ask Quality Each Time", if (s.dlAskQuality) "On" else "Off") { save(s.copy(dlAskQuality = !s.dlAskQuality)) }
+        row("Auto-save to Gallery", if (s.autoSaveGallery) "On" else "Off") {
+            val on = !s.autoSaveGallery
+            save(s.copy(autoSaveGallery = on))
+            if (on) com.anees.novamobile.download.PublicExport.catchUp(requireContext().applicationContext)
+        }
         row("Smart Downloads", if (s.smartDownloads) "On" else "Off") { save(s.copy(smartDownloads = !s.smartDownloads)) }
         if (s.smartDownloads) row("Keep Next Episodes Ready", s.keepNext.toString()) {
             pick("Keep Next Episodes Ready", listOf("1", "2", "3"), s.keepNext - 1) { save(s.copy(keepNext = it + 1)) }

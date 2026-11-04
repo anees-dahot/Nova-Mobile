@@ -76,6 +76,11 @@
             android:name=".download.ResolveService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- Save to phone keeps going with the app closed -->
+        <service
+            android:name=".download.ExportService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <!-- Retry / delete actions from download notifications -->
         <receiver android:name=".download.DownloadActionReceiver" android:exported="false" />
         <service

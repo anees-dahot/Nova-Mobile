@@ -49,6 +49,11 @@ object PublicExport {
     private const val EXPORT_VERSION = 2
     private val main = Handler(Looper.getMainLooper())
 
+    private fun autoOn(ctx: Context): Boolean {
+        com.anees.novamobile.data.local.LocalStore.init(ctx)
+        return com.anees.novamobile.data.local.LocalStore.settings().autoSaveGallery
+    }
+
     private fun prefs(ctx: Context) = ctx.applicationContext.getSharedPreferences("public_export", Context.MODE_PRIVATE)
 
     /** A copy made by this version of the exporter (multi-audio included). */
@@ -90,6 +95,10 @@ object PublicExport {
     private val queue = ArrayDeque<Request>()
     private var running: Request? = null
 
+    /** Something is being saved or waits to be (the foreground service stays up while true). */
+    val busy get() = running != null || queue.isNotEmpty()
+    val pending get() = queue.size
+
     /**
      * "Save to phone" from the downloads screens: export now into [tree] (a folder the user picked)
      * or Movies/Nova when null. Runs even if the download was already copied before.
@@ -109,6 +118,7 @@ object PublicExport {
 
     /** Queue one finished download for the automatic copy in Movies/Nova (safe to call many times). */
     fun enqueue(ctx: Context, id: String) = main.post {
+        if (!autoOn(ctx)) return@post
         val d = NovaDownloads.get(ctx, id) ?: return@post
         if (DownloadMeta.of(d) == null) return@post
         // Copies from the old path-based exporter may not exist at all (scoped storage), so every
@@ -127,6 +137,7 @@ object PublicExport {
     /** Finished downloads from before this feature, old single-audio copies, or interrupted exports. */
     fun catchUp(ctx: Context) {
         if (running == null) tmpDir(ctx).listFiles()?.forEach { it.delete() }   // left by a killed export
+        if (!autoOn(ctx)) return
         NovaDownloads.all(ctx).forEach { d ->
             if (d.state != Download.STATE_COMPLETED) return@forEach
             val m = DownloadMeta.of(d) ?: return@forEach
@@ -211,6 +222,7 @@ object PublicExport {
         val free = runCatching { android.os.StatFs((ctx.getExternalFilesDir(null) ?: ctx.filesDir).absolutePath).availableBytes }.getOrDefault(Long.MAX_VALUE)
         if (free < need) { Log.w(TAG, "${req.id}: ${free shr 20} MB free, need ${need shr 20} MB"); fail(ctx, req, "Not enough space: ${need shr 20} MB needed"); return }
         running = req
+        ExportService.start(ctx)   // keeps the save going when the app is left
         val preferred = (DownloadStarter.audioFor(m.card)?.let { LangTags.norm(it) }?.takeIf { it in langList }) ?: langList.firstOrNull()
         val base = File(tmpDir(ctx), "export_${req.id.hashCode()}.mp4").apply { delete() }
         val job = Job(req, d, m, langList, multi, base).apply { this.preferred = preferred }
@@ -241,6 +253,7 @@ object PublicExport {
 
     private fun fail(ctx: Context, req: Request, msg: String) {
         Log.w(TAG, "${req.id}: $msg")
+        if (msg != "Cancelled") SaveProgress.result(ctx, false, "Couldn't save: $msg")
         req.done(false, msg)
         if (running === req) running = null
         next(ctx)
@@ -248,6 +261,7 @@ object PublicExport {
 
     private fun finish(ctx: Context, job: Job, ok: Boolean, msg: String) {
         if (ok && job.req.tree == null) markExported(ctx, job.req.id)
+        SaveProgress.result(ctx, ok, msg)
         job.req.done(ok, msg)
         if (running === job.req) running = null
         next(ctx)
@@ -557,9 +571,10 @@ object PublicExport {
         val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
         val (_, base) = place(m)
         val title = clean(m.card.title)
-        // Re-use the title folder from an earlier save; createDocument returns null for an existing name
+        // Re-use the title folder from an earlier save. List the picked folder's CHILDREN: querying the
+        // folder's own uri returns only itself, which made a new "Title (1)" folder for every file.
         val existing = runCatching {
-            r.query(root, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            r.query(DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(root)), arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME, DocumentsContract.Document.COLUMN_MIME_TYPE),
                 null, null, null)?.use { c ->
                 var found: Uri? = null
@@ -576,7 +591,7 @@ object PublicExport {
             ?: root
         fun replace(name: String) {
             runCatching {
-                r.query(dir, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { c ->
+                r.query(DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getDocumentId(dir)), arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use { c ->
                     while (c.moveToNext()) {
                         if (c.getString(1) == name) runCatching {
                             DocumentsContract.deleteDocument(r, DocumentsContract.buildDocumentUriUsingTree(tree, c.getString(0)))

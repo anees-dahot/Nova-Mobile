@@ -66,7 +66,8 @@ class MainActivity : AppCompatActivity() {
         topBar = findViewById(R.id.top_bar)
         com.anees.novamobile.ui.player.Prefetcher.host = findViewById(R.id.sniff_host)
         handler.postDelayed({ runCatching { android.webkit.WebSettings.getDefaultUserAgent(this) } }, 4000)
-        if (savedInstanceState == null) handler.postDelayed({ com.anees.novamobile.update.Updater.check(this, lifecycleScope) }, 8000)
+        com.anees.novamobile.update.UpdateJob.schedule(this)
+        if (intent?.getStringExtra("open") == "update") handler.postDelayed(updateFromNote, 800)
 
         val nav = findViewById<LinearLayout>(R.id.bottom_nav)
         val dp = resources.displayMetrics.density
@@ -200,6 +201,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
+        handler.removeCallbacks(autoUpdateCheck)
         if (isFinishing) com.anees.novamobile.download.ResolveService.startIfNeeded(this)
     }
 
@@ -209,8 +211,19 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
     }
 
+    /** Opened from the "update available" notification: show the sheet and start downloading. */
+    private val updateFromNote = Runnable { com.anees.novamobile.update.Updater.check(this, lifecycleScope, manual = true, autoStart = true) }
+    private val autoUpdateCheck = Runnable { com.anees.novamobile.update.Updater.check(this, lifecycleScope) }
+
+    override fun onResume() {
+        super.onResume()
+        // Every time Nova is opened or brought back (throttled inside), not only on a cold start
+        handler.postDelayed(autoUpdateCheck, 4000)
+    }
+
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
+        if (intent.getStringExtra("open") == "update") handler.postDelayed(updateFromNote, 300)
         if (intent.getStringExtra("open") == "downloads") openDownloads()
         openShowFromIntent(intent)
         handlePlayIntent(intent)

@@ -76,6 +76,11 @@
             android:name=".download.ResolveService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- Checks for a new Nova release every few hours -->
+        <service
+            android:name=".update.UpdateJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
         <!-- Save to phone keeps going with the app closed -->
         <service
             android:name=".download.ExportService"

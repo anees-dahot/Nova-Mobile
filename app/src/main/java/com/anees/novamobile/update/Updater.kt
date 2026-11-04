@@ -2,13 +2,21 @@ package com.anees.novamobile.update
 
 import android.app.Activity
 import android.app.Dialog
+import android.annotation.SuppressLint
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import com.anees.novamobile.MainActivity
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -47,12 +55,16 @@ import java.io.File
  */
 object Updater {
     private const val LATEST = "https://api.github.com/repos/anees-dahot/Nova-Mobile/releases/latest"
-    /** Automatic checks at most this often; Settings → Check for Updates always checks. */
-    private const val CHECK_EVERY_MS = 6 * 60 * 60 * 1000L
+    /** Automatic checks (app opened / brought back) at most this often; Settings → Check for Updates always checks. */
+    private const val CHECK_EVERY_MS = 30 * 60 * 1000L
+    private const val CHANNEL = "nova_updates"
+    private const val NOTE_ID = 7500
+    private var sheetOpen = false
 
     data class Release(val version: String, val notes: String, val apkUrl: String, val size: Long)
 
-    fun check(activity: Activity, scope: LifecycleCoroutineScope, manual: Boolean = false) {
+    fun check(activity: Activity, scope: LifecycleCoroutineScope, manual: Boolean = false, autoStart: Boolean = false) {
+        if (sheetOpen) return
         if (!manual && System.currentTimeMillis() - LocalStore.lastUpdateCheck() < CHECK_EVERY_MS) return
         scope.launch {
             val rel = withContext(Dispatchers.IO) { latest() }
@@ -62,7 +74,8 @@ object Updater {
                 rel == null -> if (manual) toast(activity, "Couldn't reach GitHub")
                 !isNewer(rel.version, BuildConfig.VERSION_NAME) -> if (manual) toast(activity, "You're on the latest version (${BuildConfig.VERSION_NAME})")
                 !manual && LocalStore.skippedUpdate() == rel.version -> {}
-                else -> Sheet(activity, scope, rel).show()
+                sheetOpen -> {}
+                else -> { cancelNote(activity); Sheet(activity, scope, rel).show(); if (autoStart) Sheet.last?.startDownload() }
             }
         }
     }
@@ -79,6 +92,33 @@ object Updater {
                 apk.getString("browser_download_url"), apk.optLong("size"))
         }
     }.getOrNull()
+
+    // ── Background check (UpdateJob) ──────────────────────────────────────────
+
+    /** Run off the main thread: notify once per new version, tapping opens the update sheet and downloads. */
+    fun checkInBackground(ctx: Context) {
+        LocalStore.init(ctx)
+        val rel = latest() ?: return
+        LocalStore.setLastUpdateCheck(System.currentTimeMillis())
+        if (!isNewer(rel.version, BuildConfig.VERSION_NAME) || LocalStore.skippedUpdate() == rel.version) return
+        val prefs = ctx.getSharedPreferences("updater", Context.MODE_PRIVATE)
+        if (prefs.getString("notified", null) == rel.version) return
+        if (Build.VERSION.SDK_INT >= 26) ctx.getSystemService(NotificationManager::class.java)?.createNotificationChannel(
+            NotificationChannel(CHANNEL, "App updates", NotificationManager.IMPORTANCE_DEFAULT).apply { description = "When a new Nova version is out" })
+        val open = PendingIntent.getActivity(ctx, 5, Intent(ctx, MainActivity::class.java).putExtra("open", "update")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val n = NotificationCompat.Builder(ctx, CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle("Nova ${rel.version} is available")
+            .setContentText("Tap to download and install (${mb(rel.size)})")
+            .setContentIntent(open).setAutoCancel(true)
+            .build()
+        @SuppressLint("MissingPermission")
+        val ok = runCatching { NotificationManagerCompat.from(ctx).notify(NOTE_ID, n) }.isSuccess
+        if (ok) prefs.edit().putString("notified", rel.version).apply()
+    }
+
+    private fun cancelNote(ctx: Context) = runCatching { NotificationManagerCompat.from(ctx).cancel(NOTE_ID) }
 
     /** "2.10" > "2.9", "2.2" > "2.1.5". */
     fun isNewer(remote: String, local: String): Boolean {
@@ -97,7 +137,13 @@ object Updater {
 
     /** Bottom sheet: icon, "1.0 → 1.1", changelog, then the Update button turns into the download's progress. */
     private class Sheet(val act: Activity, val scope: LifecycleCoroutineScope, val rel: Release) {
-        private val dialog = Dialog(act, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen)
+        companion object { var last: Sheet? = null }
+        private val dialog = Dialog(act, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen).apply {
+            setOnDismissListener { sheetOpen = false; last = null }
+        }
+
+        /** Opened from the "update available" notification: the user already said yes. */
+        fun startDownload() = primary()
         private val button = TextView(act)
         private val bar = ProgressBar(act, null, android.R.attr.progressBarStyleHorizontal)
         private val status = TextView(act)
@@ -181,6 +227,7 @@ object Updater {
             dialog.setContentView(scrim)
             dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT) }
             dialog.setOnDismissListener { job?.cancel() }
+            sheetOpen = true; last = this
             dialog.show()
             sheet.translationY = 500f.dp
             sheet.animate().translationY(0f).setDuration((280 * Ui.motion(act)).toLong()).setInterpolator(DecelerateInterpolator(2.2f)).start()

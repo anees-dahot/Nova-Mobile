@@ -47,6 +47,27 @@ object SubtitleCleaner {
         return "WEBVTT\n\n" + t.replace(Regex("""(\d{2}:\d{2}:\d{2}),(\d{3})"""), "$1.$2")
     }
 
+    /**
+     * Karaoke song lyrics (converted from styled .ass subs) arrive as one cue per syllable, all at the
+     * same time with their positions lost, so they stack into a tall column of "yu / shi / ri…".
+     * A time slot holding 4+ tiny cues is karaoke: drop it, keep normal dialogue.
+     */
+    fun dropKaraoke(blocks: List<String>): List<String> {
+        fun timing(b: String) = b.lines().firstOrNull { it.contains("-->") }?.substringBefore(" line")?.substringBefore(" position")?.trim()
+        fun text(b: String) = b.lines().filterNot { it.contains("-->") || it.trim().matches(Regex("\\d+")) }.joinToString(" ").replace(Regex("<[^>]+>|\\{[^}]*\\}"), "").trim()
+        val groups = blocks.groupBy { timing(it) }
+        val karaoke = groups.filter { (t, g) -> t != null && g.size >= 4 && g.count { text(it).length <= 4 } >= g.size * 3 / 4 }.keys
+        return if (karaoke.isEmpty()) blocks else blocks.filterNot { timing(it) in karaoke }
+    }
+
+    /** Saved subtitle files from before the karaoke fix: clean them once when played offline. */
+    fun fixFile(f: java.io.File) = runCatching {
+        val raw = f.readText(); if (!raw.contains("-->")) return@runCatching
+        val blocks = raw.replace("\r\n", "\n").split(Regex("\n{2,}"))
+        val kept = dropKaraoke(blocks)
+        if (kept.size != blocks.size) { f.writeText(kept.joinToString("\n\n")); Log.i("NovaTV", "subtitle: ${blocks.size - kept.size} karaoke cues removed") }
+    }
+
     fun wrap(url: String): Uri = Uri.parse("$SCHEME://sub?u=" + Uri.encode(url))
 
     /** Data source that resolves novasub:// to a cleaned local file; everything else passes through. */
@@ -92,7 +113,7 @@ object SubtitleCleaner {
             val blocks = raw.replace("\r\n", "\n").split(Regex("\n{2,}"))
             val kept = blocks.filterNot { b -> b.contains("-->") && b.lines().filter { !it.contains("-->") }.any { AD.containsMatchIn(it) } }
             Log.i("NovaTV", "subtitle cleaned: ${blocks.size - kept.size} ad cues removed")
-            toVtt(kept.joinToString("\n\n"))
+            toVtt(dropKaraoke(kept).joinToString("\n\n"))
         }
         out.writeText(text)
         return out

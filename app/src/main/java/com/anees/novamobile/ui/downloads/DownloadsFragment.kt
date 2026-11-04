@@ -63,6 +63,7 @@ class DownloadsFragment : Fragment() {
     private lateinit var offline: TextView
     private lateinit var empty: View
     private lateinit var editBar: View
+    private lateinit var saveSelected: TextView
     private lateinit var deleteSelected: TextView
     private lateinit var doneEditing: TextView
     private val adapter = Adapter()
@@ -130,6 +131,12 @@ class DownloadsFragment : Fragment() {
             doneEditing = TextView(ctx).apply { text = "Done"; textSize = 15f; setTextColor(Ui.ACCENT); setOnClickListener { setEditing(false) } }
             addView(doneEditing)
             addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
+            saveSelected = TextView(ctx).apply {
+                textSize = 15f; setTextColor(Ui.ACCENT); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setPadding(0, 0, 20.dp, 0)
+                setOnClickListener { saveSelection() }
+            }
+            addView(saveSelected)
             deleteSelected = TextView(ctx).apply {
                 textSize = 15f; setTextColor(Ui.DANGER); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 setOnClickListener { deleteSelection() }
@@ -263,6 +270,8 @@ class DownloadsFragment : Fragment() {
         offline.visibility = if (isOnline()) View.GONE else View.VISIBLE
         deleteSelected.text = if (selected.isEmpty()) "Delete" else "Delete (${selected.size})"
         deleteSelected.alpha = if (selected.isEmpty()) 0.4f else 1f
+        saveSelected.text = if (selected.isEmpty()) "Save" else "Save (${selected.size})"
+        saveSelected.alpha = if (selected.isEmpty()) 0.4f else 1f
     }
 
     private fun isOnline(): Boolean {
@@ -315,7 +324,7 @@ class DownloadsFragment : Fragment() {
         return NovaDownloads.all(ctx).filter { d ->
             val m = DownloadMeta.of(d) ?: return@filter false
             key == "m:${d.request.id}" || key == "f:${m.card.type}:${m.card.id}"
-        }
+        }.sortedWith(compareBy({ DownloadMeta.of(it)?.season ?: 0 }, { DownloadMeta.of(it)?.episode ?: 0 }))
     }
 
     private fun deleteSelection() {
@@ -327,6 +336,17 @@ class DownloadsFragment : Fragment() {
             ActionSheet.Item("Delete and free $bytes") { DownloadUi.delete(ctx, targets) { setEditing(false) } },
             ActionSheet.Item("Keep")
         ))
+    }
+
+    /** Bulk save: every finished download behind the selected rows, in episode order. */
+    private fun saveSelection() {
+        if (selected.isEmpty()) return
+        val targets = selected.flatMap { idsFor(it) }
+            .filter { it.state == Download.STATE_COMPLETED }
+            .distinctBy { it.request.id }
+            .sortedWith(compareBy({ DownloadMeta.of(it)?.season ?: 0 }, { DownloadMeta.of(it)?.episode ?: 0 }))
+        if (targets.isEmpty()) { (activity as? MainActivity)?.showBanner("Finish downloading first"); return }
+        (activity as? MainActivity)?.let { SaveToPhone.show(it, targets) }
     }
 
     private fun deleteWatched() {
@@ -488,7 +508,6 @@ class DownloadsFragment : Fragment() {
         }
 
         override fun onBindViewHolder(h: RecyclerView.ViewHolder, p: Int) {
-            val ctx = requireContext()
             val v = h.itemView
             when (val row = getItem(p)) {
                 is Row.Summary -> {

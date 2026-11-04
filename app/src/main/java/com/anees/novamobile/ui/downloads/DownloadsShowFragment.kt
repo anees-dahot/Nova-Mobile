@@ -51,6 +51,7 @@ class DownloadsShowFragment : Fragment() {
     private lateinit var list: RecyclerView
     private lateinit var summary: TextView
     private lateinit var chips: LinearLayout
+    private lateinit var saveAll: TextView
     private var season = -1
     private val adapter = Adapter()
     /** "season:episode" → TMDB episode (still image + name), filled in after the screen opens. */
@@ -103,10 +104,15 @@ class DownloadsShowFragment : Fragment() {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Ui.SURFACE); setPadding(16.dp, 12.dp, 16.dp, 12.dp)
             addView(TextView(ctx).apply {
-                text = "Download more episodes"; textSize = 15f; setTextColor(Ui.ACCENT)
+                text = "More episodes"; textSize = 15f; setTextColor(Ui.ACCENT)
                 setOnClickListener { (activity as? MainActivity)?.openDetail(card) }
             })
             addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
+            saveAll = TextView(ctx).apply {
+                textSize = 15f; setTextColor(Ui.ACCENT); setPadding(0, 0, 20.dp, 0)
+                setOnClickListener { saveAll() }
+            }
+            addView(saveAll)
             addView(TextView(ctx).apply {
                 text = "Delete all"; textSize = 15f; setTextColor(Ui.DANGER)
                 setOnClickListener { deleteAll() }
@@ -170,6 +176,8 @@ class DownloadsShowFragment : Fragment() {
         }
         val done = eps.filter { it.d.state == Download.STATE_COMPLETED }
         val active = eps.size - done.size
+        saveAll.visibility = if (done.isEmpty()) View.GONE else View.VISIBLE
+        saveAll.text = if (done.size > 1) "Save all" else "Save"
         summary.text = listOfNotNull(
             "${done.size} episode${if (done.size == 1) "" else "s"}",
             DownloadUi.size(ctx, done.sumOf { it.d.bytesDownloaded }),
@@ -189,9 +197,22 @@ class DownloadsShowFragment : Fragment() {
         if (e.d.state == Download.STATE_COMPLETED) items += ActionSheet.Item(if (e.watched in 0.02f..0.9f) "Resume" else "Play") { play(e) }
         else items += ActionSheet.Item(if (DownloadUi.paused(e.d)) "Resume download" else "Pause download") { DownloadUi.toggle(ctx, e.d) }
         items += ActionSheet.Item("Go to show") { (activity as? MainActivity)?.openDetail(card) }
-        if (e.d.state == Download.STATE_COMPLETED) items += ActionSheet.Item("Save to phone…") { (activity as? com.anees.novamobile.MainActivity)?.let { SaveToPhone.show(it, listOf(e.d)) } }
+        if (e.d.state == Download.STATE_COMPLETED) {
+            items += ActionSheet.Item("Save to phone…") { (activity as? MainActivity)?.let { SaveToPhone.show(it, listOf(e.d)) } }
+            val done = episodes().filter { it.d.state == Download.STATE_COMPLETED }
+            if (done.size > 1) items += ActionSheet.Item("Save all ${done.size} episodes to phone…") {
+                (activity as? MainActivity)?.let { SaveToPhone.show(it, done.map { ep -> ep.d }) }
+            }
+        }
         items += ActionSheet.Item(if (e.d.state == Download.STATE_COMPLETED) "Delete download" else "Cancel download") { DownloadUi.delete(ctx, listOf(e.d)) { main.postDelayed({ load() }, 300) } }
         ActionSheet.show(ctx, DownloadUi.name(e.m), items, subtitle = DownloadUi.details(e.m).ifBlank { null })
+    }
+
+    /** Bulk save: every finished episode of this show, one phone file each (all languages inside). */
+    private fun saveAll() {
+        val done = episodes().filter { it.d.state == Download.STATE_COMPLETED }
+        if (done.isEmpty()) { (activity as? MainActivity)?.showBanner("Finish downloading first"); return }
+        (activity as? MainActivity)?.let { SaveToPhone.show(it, done.map { e -> e.d }) }
     }
 
     private fun deleteAll() {

@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.View
 import android.view.ViewConfiguration
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -69,20 +70,69 @@ class PlayerGestures(
     private var streakSeconds = 0
     private var streakDownTime = -1L
 
-    private val scale = ScaleGestureDetector(activity, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-        private var total = 1f
-        override fun onScaleBegin(d: ScaleGestureDetector): Boolean { total = 1f; scaling = true; return host.enabled }
-        override fun onScale(d: ScaleGestureDetector): Boolean { total *= d.scaleFactor; return true }
-        override fun onScaleEnd(d: ScaleGestureDetector) {
-            val zoom = when { total > 1.08f -> true; total < 0.92f -> false; else -> return }
-            val m = if (zoom) AspectRatioFrameLayout.RESIZE_MODE_ZOOM else AspectRatioFrameLayout.RESIZE_MODE_FIT
-            if (view.resizeMode != m) {
-                view.resizeMode = m
-                host.onResize(m)
-                host.hud(R.drawable.ic_aspect, if (zoom) "Zoom to fill" else "Fit to screen", null)
-                view.postDelayed({ host.hideHud() }, 900)
-            }
+    /**
+     * Pinch zoom, 100%–400%: only the video picture is scaled (its surface), so subtitles and controls
+     * stay where they are. Snaps at 100% (fit) and at the exact "fill screen" zoom. Moving the
+     * fingers while pinching pans the zoomed picture.
+     */
+    var zoom = 1f; private set
+    private var panX = 0f
+    private var panY = 0f
+    private var lastFx = 0f
+    private var lastFy = 0f
+
+    /** Zoom at which the fitted picture covers the whole screen (no black bars). */
+    fun fillZoom(): Float {
+        val frame = view.videoSurfaceView?.parent as? View ?: return 1f
+        if (frame.width == 0 || frame.height == 0) return 1f
+        return maxOf(view.width.toFloat() / frame.width, view.height.toFloat() / frame.height).coerceIn(1f, 4f)
+    }
+
+    fun setZoom(z: Float, showHud: Boolean = true) {
+        if (view.resizeMode != AspectRatioFrameLayout.RESIZE_MODE_FIT) { view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT; host.onResize(AspectRatioFrameLayout.RESIZE_MODE_FIT) }
+        val fill = fillZoom()
+        zoom = z.coerceIn(1f, 4f).let { when { kotlin.math.abs(it - 1f) < 0.04f -> 1f; kotlin.math.abs(it - fill) < 0.04f -> fill; else -> it } }
+        if (zoom == 1f) { panX = 0f; panY = 0f }
+        apply()
+        if (showHud) host.hud(R.drawable.ic_aspect, zoomLabel(), null)
+    }
+
+    fun zoomLabel(): String {
+        val fill = fillZoom()
+        return when {
+            zoom == 1f -> "Fit  ·  100%"
+            kotlin.math.abs(zoom - fill) < 0.005f -> "Fill screen  ·  ${(zoom * 100).toInt()}%"
+            else -> "Zoom  ·  ${(zoom * 100).toInt()}%"
         }
+    }
+
+    private fun apply() {
+        val v = view.videoSurfaceView ?: return
+        val frame = v.parent as? View ?: return
+        // Pan limits: the zoomed picture may move until its edge reaches the screen edge
+        val maxX = maxOf(0f, (frame.width * zoom - view.width) / 2f)
+        val maxY = maxOf(0f, (frame.height * zoom - view.height) / 2f)
+        panX = panX.coerceIn(-maxX, maxX); panY = panY.coerceIn(-maxY, maxY)
+        // Let the scaled picture draw past its fitted frame (the black bars) up to the screen edges
+        (frame as? android.view.ViewGroup)?.clipChildren = false
+        ((frame.parent) as? android.view.ViewGroup)?.clipChildren = false
+        view.clipChildren = false
+        v.scaleX = zoom; v.scaleY = zoom
+        v.translationX = panX; v.translationY = panY
+    }
+
+    private val scale = ScaleGestureDetector(activity, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScaleBegin(d: ScaleGestureDetector): Boolean {
+            scaling = true; lastFx = d.focusX; lastFy = d.focusY
+            return host.enabled
+        }
+        override fun onScale(d: ScaleGestureDetector): Boolean {
+            panX += d.focusX - lastFx; panY += d.focusY - lastFy
+            lastFx = d.focusX; lastFy = d.focusY
+            setZoom(zoom * d.scaleFactor)
+            return true
+        }
+        override fun onScaleEnd(d: ScaleGestureDetector) { view.postDelayed({ host.hideHud() }, 900) }
     })
 
     private val detector = GestureDetector(activity, object : GestureDetector.SimpleOnGestureListener() {

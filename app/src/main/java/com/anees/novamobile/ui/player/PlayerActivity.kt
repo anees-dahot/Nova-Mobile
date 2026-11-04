@@ -147,6 +147,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private var inPip = false
     private var hudHide: Runnable? = null
     private var episodeLine = ""          // "S1 · E3  ·  Episode name", shown under the title with "ends 10:42 PM"
+    private lateinit var gestures: PlayerGestures
     private lateinit var subOverlay: androidx.media3.ui.SubtitleView
     private lateinit var subSync: SubtitleSync
     /** Audio sync in ms (+ = sound later); kept for the whole session, applied to every new player. */
@@ -257,11 +258,14 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         root.addView(subOverlay, root.indexOfChild(playerView) + 1, FrameLayout.LayoutParams(-1, -1))
         subSync = SubtitleSync(subOverlay, { playerView.subtitleView }, lifecycleScope)
         styleSubtitles()
-        playerView.resizeMode = settings.resizeMode
+        // Zoom is now a picture scale on top of Fit; an old "zoom to fill" setting becomes Fit + fill zoom
+        val wasZoom = settings.resizeMode == AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        playerView.resizeMode = if (wasZoom) AspectRatioFrameLayout.RESIZE_MODE_FIT else settings.resizeMode
+        if (wasZoom) playerView.post { playerView.postDelayed({ gestures.setZoom(gestures.fillZoom(), showHud = false) }, 1500) }
         playerView.controllerShowTimeoutMs = 3500
 
         setupControls()
-        PlayerGestures(this, playerView, this).attach()
+        gestures = PlayerGestures(this, playerView, this).also { it.attach() }
         immersive()
         ContextCompat.registerReceiver(this, pipReceiver, IntentFilter(ACTION_PIP), ContextCompat.RECEIVER_NOT_EXPORTED)
 
@@ -447,6 +451,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val subs = paths.mapIndexedNotNull { i, path ->
             val f = java.io.File(path)
             if (!f.exists()) return@mapIndexedNotNull null
+            SubtitleCleaner.fixFile(f)
             val lang = langs?.getOrNull(i)?.takeIf { it.isNotBlank() } ?: if (i == 0) "en" else null
             MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(f)).setMimeType(MimeTypes.TEXT_VTT)
                 .setId("nsub:$i")
@@ -812,7 +817,11 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) = updatePip()
             override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) = subSync.onCues(cueGroup)
-            override fun onVideoSizeChanged(videoSize: VideoSize) { updatePip(); updateQualityLabel() }
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                updatePip(); updateQualityLabel()
+                // Keep the zoom after the picture's frame is re-laid out for the new size
+                if (gestures.zoom > 1f) playerView.post { gestures.setZoom(gestures.zoom, showHud = false) }
+            }
             override fun onPlayerError(error: PlaybackException) {
                 (error.cause as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.let {
                     Log.w(TAG, "HTTP ${it.responseCode} on ${it.dataSpec.uri.toString().take(200)}")
@@ -1472,9 +1481,16 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
         items += ActionSheet.Item("Picture", header = true)
         items += ActionSheet.Item(if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) "Rotate to portrait" else "Rotate to landscape") { rotate() }
-        listOf(AspectRatioFrameLayout.RESIZE_MODE_FIT to "Fit", AspectRatioFrameLayout.RESIZE_MODE_ZOOM to "Zoom to fill",
-            AspectRatioFrameLayout.RESIZE_MODE_FILL to "Stretch").forEach { (m, label) ->
-            items += ActionSheet.Item(label, checked = playerView.resizeMode == m) { playerView.resizeMode = m; onResize(m) }
+        // Zoom presets (pinch for any value 100%–400%); subtitles stay in place at any zoom
+        val fill = gestures.fillZoom()
+        val stretched = playerView.resizeMode == AspectRatioFrameLayout.RESIZE_MODE_FILL
+        val z = gestures.zoom
+        listOf(1f to "Fit  ·  100%", fill to "Fill screen  ·  ${(fill * 100).toInt()}%", 1.25f to "125%", 1.5f to "150%", 2f to "200%").distinctBy { it.first }.forEach { (v, label) ->
+            items += ActionSheet.Item(label, checked = !stretched && kotlin.math.abs(z - v) < 0.01f) { gestures.setZoom(v); scheduleHudHide(1000) }
+        }
+        items += ActionSheet.Item("Stretch", checked = stretched) {
+            gestures.setZoom(1f, showHud = false)
+            playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL; onResize(AspectRatioFrameLayout.RESIZE_MODE_FILL)
         }
 
         items += ActionSheet.Item("Volume boost", header = true)

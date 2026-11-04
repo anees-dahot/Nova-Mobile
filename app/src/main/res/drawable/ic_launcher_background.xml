@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Night sky: deep indigo into violet, with a warm nebula glow behind the star -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="linear" android:startX="0" android:startY="108" android:endX="108" android:endY="0">
+                <item android:offset="0" android:color="#FF070A1F" />
+                <item android:offset="0.55" android:color="#FF1A1260" />
+                <item android:offset="1" android:color="#FF4B1E9E" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path android:pathData="M70,35m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="radial" android:centerX="70" android:centerY="35" android:gradientRadius="40">
+                <item android:offset="0" android:color="#66FF5FA2" />
+                <item android:offset="0.45" android:color="#227C4DFF" />
+                <item android:offset="1" android:color="#00000000" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <!-- a few far stars -->
+    <path android:fillColor="#99FFFFFF" android:pathData="M28,26m-0.9,0a0.9,0.9 0,1 1,1.8 0a0.9,0.9 0,1 1,-1.8 0" />
+    <path android:fillColor="#66FFFFFF" android:pathData="M84,78m-0.7,0a0.7,0.7 0,1 1,1.4 0a0.7,0.7 0,1 1,-1.4 0" />
+    <path android:fillColor="#80FFFFFF" android:pathData="M22,70m-0.6,0a0.6,0.6 0,1 1,1.2 0a0.6,0.6 0,1 1,-1.2 0" />
+    <path android:fillColor="#59FFFFFF" android:pathData="M50,22m-0.6,0a0.6,0.6 0,1 1,1.2 0a0.6,0.6 0,1 1,-1.2 0" />
+</vector>

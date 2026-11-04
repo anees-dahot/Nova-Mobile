@@ -48,7 +48,40 @@ object DownloadStarter {
 
     /** [quality]: 0 480p, 1 720p, 2 1080p; null = the Settings default. */
     data class Item(val card: MediaCard, val season: Int, val episode: Int, val refreshOf: String? = null, val skipProvider: String? = null,
-                    val quality: Int? = null)
+                    val quality: Int? = null,
+                    /** Source picked in the download sheet (tried first); null = the richest in languages. */
+                    val provider: String? = null)
+
+    /** One answering source for the download sheet: real audio languages and best picture height (-1 unknown). */
+    data class Probe(val provider: String, val langs: List<String>, val height: Int)
+
+    /**
+     * Asks every source for [item] at once (plain-HTTP resolvers right away, hidden pages a little
+     * apart) and reports each that answers. Found links are cached, so the download then starts instantly.
+     */
+    fun probe(ctx: Context, item: Item): kotlinx.coroutines.flow.Flow<Probe> = kotlinx.coroutines.flow.channelFlow {
+        val t = StreamExtractor.resolveTarget(item.card, item.season, item.episode, repo) ?: return@channelFlow
+        val host = Prefetcher.host
+        var pages = 0
+        for (p in StreamExtractor.ordered()) {
+            val cached = StreamExtractor.cached(p, t)
+            if (cached == null && p.resolver == null && (host == null || pages >= MAX_PROBE_PAGES)) continue
+            val wait = if (cached != null || p.resolver != null) 0L else pages++ * PROBE_STAGGER_MS
+            launch {
+                delay(wait)
+                val r = cached ?: withTimeoutOrNull(p.timeoutMs) {
+                    runCatching { p.resolver?.invoke(t) ?: WebStreamSniffer(ctx, host!!).sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs) }.getOrNull()
+                } ?: return@launch
+                StreamExtractor.remember(p, t, r)
+                val langs = AudioProbe.langs(r)
+                val h = runCatching { com.anees.novamobile.ui.player.QualityGate.maxHeightAsync(r) }.getOrDefault(-1)
+                send(Probe(p.name, langs, h))
+            }
+        }
+    }
+
+    private const val MAX_PROBE_PAGES = 6
+    private const val PROBE_STAGGER_MS = 1_500L
 
     /** True while items are being resolved (keeps [ResolveService] alive). */
     val busy get() = worker?.isActive == true
@@ -110,9 +143,11 @@ object DownloadStarter {
         val id = DownloadMeta.id(item.card, item.season, item.episode)
         val target = StreamExtractor.resolveTarget(item.card, item.season, item.episode, repo) ?: return false
         val sources = StreamExtractor.ordered().filter { it.name != item.skipProvider }
-        // Ask every multi-audio resolver at once and save the stream with the most real languages
-        val richest = richest(sources, target)
-        for (p in listOfNotNull(richest?.first) + sources.filter { it != richest?.first }) {
+        // Your pick from the sheet first; else ask every multi-audio resolver at once and save the stream with the most real languages
+        val picked = item.provider?.let { n -> sources.firstOrNull { it.name == n } }
+        val richest = if (picked != null) null else richest(sources, target)
+        val first = picked ?: richest?.first
+        for (p in listOfNotNull(first) + sources.filter { it != first }) {
             val host = Prefetcher.host
             if (p.resolver == null && (headless || host == null) && StreamExtractor.cached(p, target) == null) continue
             val sniffed = richest?.takeIf { it.first == p }?.second ?: StreamExtractor.cached(p, target)
@@ -129,6 +164,16 @@ object DownloadStarter {
                     if (SubtitleCleaner.saveTo(ctx, url, RetrofitClient.base, sniffed.headers, out)) out.absolutePath to (SubtitleCleaner.langOf(url) ?: "") else null
                 }
             }
+            // Source brought no subtitles: OpenSubtitles (English + yours)
+                .ifEmpty {
+                    val dir = File(NovaDownloads.dir, "subs").apply { mkdirs() }
+                    val langs = listOf("en")
+                    com.anees.novamobile.ui.player.OpenSubs.await(target, repo, langs, 8_000).take(3).mapIndexedNotNull { i, sub ->
+                        val out = File(dir, "${id.hashCode()}_os$i.vtt")
+                        withContext(Dispatchers.IO) { SubtitleCleaner.saveTo(ctx, sub.url, RetrofitClient.base, emptyMap(), out) }
+                            .takeIf { it }?.let { out.absolutePath to sub.lang }
+                    }
+                }
             val subs = saved.map { it.first }
             val meta = DownloadMeta(item.card, item.season, item.episode, p.name, subs.firstOrNull(), subtitles = subs,
                 subtitleLangs = saved.map { it.second })

@@ -103,10 +103,6 @@ object LocalStore {
     fun audioLangs(key: String): List<String>? = prefs.getString("langs_$key", null)?.split(",")?.filter { it.isNotBlank() }
     fun setAudioLangs(key: String, langs: List<String>) = prefs.edit().putString("langs_$key", langs.joinToString(",")).apply()
 
-    /** Remembers "no source had a Hindi dub for this title", so the dub search isn't repeated. */
-    fun noDub(key: String, lang: String) = prefs.getBoolean("nodub_${key}_$lang", false)
-    fun setNoDub(key: String, lang: String) = prefs.edit().putBoolean("nodub_${key}_$lang", true).apply()
-
     /** Last measured network speed (bits/s), used as the player's starting estimate. */
     fun lastBandwidth(): Long = prefs.getLong("bw", 0)
     fun setLastBandwidth(bps: Long) = prefs.edit().putLong("bw", bps).apply()
@@ -188,6 +184,12 @@ object LocalStore {
 
     fun skippedUpdate(): String? = prefs.getString("skip_update", null)
     fun setSkippedUpdate(v: String) = prefs.edit().putString("skip_update", v).apply()
+    /** A title whose sources had no [lang] dub when last raced (kept 12h, then searched again). */
+    fun noDub(key: String, lang: String): Boolean =
+        System.currentTimeMillis() - prefs.getLong("nodub:$key:$lang", 0L) < 12 * 60 * 60 * 1000L
+    fun setNoDub(key: String, lang: String) = prefs.edit().putLong("nodub:$key:$lang", System.currentTimeMillis()).apply()
+    fun lastUpdateCheck(): Long = prefs.getLong("update_checked_at", 0L)
+    fun setLastUpdateCheck(v: Long) = prefs.edit().putLong("update_checked_at", v).apply()
 
     /** Origin servers that refused direct access (must go through the source's proxy). */
     fun directBad(host: String) = prefs.getBoolean("direct_bad_$host", false)

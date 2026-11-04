@@ -74,6 +74,12 @@ object NovaDownloads {
     lateinit var cache: SimpleCache; private set
     lateinit var dir: File; private set
     private lateinit var upstream: DataSource.Factory
+    /**
+     * HLS/DASH segments downloaded at once, shared by all running downloads. Stream CDNs answer
+     * each small segment slowly (~0.5s to first byte), so throughput grows with parallel requests:
+     * Nov 2026 test on VidLux, 4 → 0.67 MB/s, 12 → 1.4 MB/s, 24 → 1.8 MB/s.
+     */
+    private const val SEGMENT_THREADS = 24
     private val main = Handler(Looper.getMainLooper())
     @Volatile var storageFull = false; private set
 
@@ -99,14 +105,18 @@ object NovaDownloads {
         val db = StandaloneDatabaseProvider(app)
         cache = SimpleCache(File(dir, "media"), NoOpCacheEvictor(), db)
 
-        val http = OkHttpDataSource.Factory(RetrofitClient.base).setUserAgent(LocalStore.downloadUserAgent())
+        // Own pool: segments of every running download are fetched side by side (default keeps only 5 warm sockets)
+        val client = RetrofitClient.base.newBuilder()
+            .connectionPool(okhttp3.ConnectionPool(SEGMENT_THREADS, 5, java.util.concurrent.TimeUnit.MINUTES))
+            .build()
+        val http = OkHttpDataSource.Factory(client).setUserAgent(LocalStore.downloadUserAgent())
         upstream = ResolvingDataSource.Factory(
             DataSource.Factory { PngStripDataSource(DefaultDataSource.Factory(app, http).createDataSource()) }
         ) { spec -> resolve(spec) }
         val cacheFactory = CacheDataSource.Factory().setCache(cache).setUpstreamDataSourceFactory(upstream).setCacheKeyFactory(KEYS)
 
         val s = LocalStore.settings()
-        val dm = DownloadManager(app, DefaultDownloadIndex(db), DefaultDownloaderFactory(cacheFactory, Executors.newFixedThreadPool(4)))
+        val dm = DownloadManager(app, DefaultDownloadIndex(db), DefaultDownloaderFactory(cacheFactory, Executors.newFixedThreadPool(SEGMENT_THREADS)))
         dm.maxParallelDownloads = s.dlParallel.coerceIn(1, 3)
         dm.minRetryCount = 3
         dm.requirements = Requirements(if (s.dlWifiOnly) Requirements.NETWORK_UNMETERED else Requirements.NETWORK)
@@ -116,6 +126,8 @@ object NovaDownloads {
         main.postDelayed({ all(app).filter { it.state == Download.STATE_FAILED && LocalStore.dlAttempts(it.request.id) < 3 }.forEach { dm.addDownload(it.request) } }, 3000)
         // Subtitle files of downloads that no longer exist
         main.postDelayed({ cleanOrphans(app) }, 10_000)
+        // Finished downloads not yet copied to the phone's Movies/Nova folder
+        main.postDelayed({ PublicExport.catchUp(app) }, 15_000)
         return dm
     }
 
@@ -163,6 +175,7 @@ object NovaDownloads {
                     // A finished file that's clearly too small is broken, not a download
                     if (d.bytesDownloaded < 2L * 1024 * 1024) { Log.w(TAG, "$id too small, removed"); dm.removeDownload(id); return }
                     DownloadNotifier.done(ctx, d)
+                    PublicExport.enqueue(ctx, id)
                 }
                 Download.STATE_FAILED -> handleFailure(dm, d, finalException)
                 else -> {}

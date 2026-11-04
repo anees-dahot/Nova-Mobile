@@ -37,6 +37,16 @@ object SubtitleCleaner {
 
     fun isThumbnailTrack(url: String) = Regex("thumb|sprite|storyboard|preview", RegexOption.IGNORE_CASE).containsMatchIn(url)
 
+    /**
+     * Everything is stored as WebVTT, so saved downloads (always played as VTT) work for SubRip
+     * sources too: SRT differs only by the header and the comma before milliseconds.
+     */
+    private fun toVtt(text: String): String {
+        val t = text.trimStart()
+        if (t.startsWith("WEBVTT")) return t
+        return "WEBVTT\n\n" + t.replace(Regex("""(\d{2}:\d{2}:\d{2}),(\d{3})"""), "$1.$2")
+    }
+
     fun wrap(url: String): Uri = Uri.parse("$SCHEME://sub?u=" + Uri.encode(url))
 
     /** Data source that resolves novasub:// to a cleaned local file; everything else passes through. */
@@ -55,12 +65,23 @@ object SubtitleCleaner {
 
     private fun clean(ctx: Context, url: String, client: OkHttpClient, headers: Map<String, String>): File {
         val dir = File(ctx.cacheDir, "subs").apply { mkdirs() }
-        val out = File(dir, "${url.hashCode()}.${if (url.lowercase().contains(".srt")) "srt" else "vtt"}")
-        if (out.exists()) return out
-        val raw = runCatching {
-            val req = Request.Builder().url(url).apply { headers.forEach { (k, v) -> header(k, v) } }.build()
-            client.newCall(req).execute().use { it.body?.string() } ?: ""
-        }.getOrDefault("")
+        val out = File(dir, "${url.hashCode()}.vtt")
+        if (out.exists() && out.length() > 20) return out   // an old empty file is fetched again
+        fun fetch(h: Map<String, String>): String? = runCatching {
+            val req = Request.Builder().url(url).apply { h.forEach { (k, v) -> header(k, v) } }.build()
+            val bytes = client.newCall(req).execute().use { r -> if (r.isSuccessful) r.body?.bytes() else null } ?: return null
+            // OpenSubtitles hands out gzip files
+            val plain = if (bytes.size > 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte())
+                java.util.zip.GZIPInputStream(bytes.inputStream()).readBytes() else bytes
+            String(plain, Charsets.UTF_8).removePrefix("\uFEFF").takeIf { it.contains("-->") }
+        }.getOrNull()
+        // Stream headers first (some hosts need the Referer); subtitle CDNs that refuse them get a plain retry
+        val raw = fetch(headers) ?: fetch(emptyMap())
+        if (raw == null) {
+            // Not cached: a failed fetch (timeout, 403, error page) used to stick as an empty track for good
+            Log.w("NovaTV", "subtitle unavailable: ${url.take(120)}")
+            return File(dir, "unavailable.vtt").apply { writeText("WEBVTT\n\n") }
+        }
 
         val text = if (raw.contains("#xywh") || Regex("\\.(jpe?g|png|webp)\\b").findAll(raw).count() > 3) {
             "WEBVTT\n\n"   // preview thumbnails, not subtitles
@@ -68,7 +89,7 @@ object SubtitleCleaner {
             val blocks = raw.replace("\r\n", "\n").split(Regex("\n{2,}"))
             val kept = blocks.filterNot { b -> b.contains("-->") && b.lines().filter { !it.contains("-->") }.any { AD.containsMatchIn(it) } }
             Log.i("NovaTV", "subtitle cleaned: ${blocks.size - kept.size} ad cues removed")
-            kept.joinToString("\n\n")
+            toVtt(kept.joinToString("\n\n"))
         }
         out.writeText(text)
         return out

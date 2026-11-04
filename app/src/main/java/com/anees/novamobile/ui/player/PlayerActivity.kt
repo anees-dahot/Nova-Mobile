@@ -116,6 +116,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private val langSources = mutableListOf<Triple<StreamExtractor.Provider, WebStreamSniffer.Sniffed, List<String>>>()
     private var langJob: kotlinx.coroutines.Job? = null
     private var usedCache = false
+    /** Sources already searched for this episode, so later waves don't repeat them. */
+    private val raced = mutableSetOf<StreamExtractor.Provider>()
     private var resumeMs = 0L
     private var awaitingResumeChoice = false
     private var introRange: LongRange? = null
@@ -161,6 +163,9 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         private const val WAVE = 3
         private const val WAVE_STAGGER_MS = 4_000L
         private const val COLLECT_MS = 5_000L
+        /** Longest wait for a source with your language after the first answer. */
+        private const val DUB_WAIT_MS = 14_000L
+        private const val SETTLE_MS = 1_500L
         private const val UP_NEXT_MS = 10_000L
         private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
         private val CLOCK = SimpleDateFormat("h:mm a", Locale.getDefault())
@@ -273,7 +278,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         season = s; episode = e
         providers = StreamExtractor.ordered()
         providerIndex = 0
-        langJob?.cancel(); langSources.clear()
+        langJob?.cancel(); langSources.clear(); raced.clear()
         introRange = null
         outroRange = null
         skipShownAt = 0
@@ -341,13 +346,17 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     private suspend fun findSource() {
         val t = target ?: return
+        OpenSubs.prefetch(t, repo, subLangs())
+        // An instant start gives the search a moment; a race takes longer than the search anyway
+        if (providers.any { StreamExtractor.cached(it, t) != null }) OpenSubs.await(t, repo, subLangs(), 1_500)
         while (providerIndex < providers.size) {
             val p = providers[providerIndex]
             val cachedLink = StreamExtractor.cached(p, t)
             if (cachedLink != null) {
                 if (proxyOnly(cachedLink)) continue
                 if (!qualityGate(cachedLink)) continue
-                usedCache = true; Log.i(TAG, "instant: cached link for ${p.name}"); play(cachedLink); return
+                if (!lacksWanted(cachedLink)) { usedCache = true; Log.i(TAG, "instant: cached link for ${p.name}"); play(cachedLink); return }
+                Log.i(TAG, "cached ${p.name} link has no ${wantedLang()}: racing dub sources first")
             }
             // A background search for exactly this may already be running (title page / Continue Watching)
             val inFlight = Prefetcher.claim(StreamExtractor.embedUrl(p, t))
@@ -358,14 +367,17 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                     StreamExtractor.remember(p, t, r)
                     if (proxyOnly(r)) continue
                     if (!qualityGate(r)) continue
-                    Log.i(TAG, "instant: joined prefetch for ${p.name}"); usedCache = false; play(r); return
+                    if (!lacksWanted(r)) { Log.i(TAG, "instant: joined prefetch for ${p.name}"); usedCache = false; play(r); return }
+                    Log.i(TAG, "prefetched ${p.name} link has no ${wantedLang()}: racing dub sources first")
                 }
             }
             // Up to 3 sources per wave, 4s apart: the stagger keeps a low-RAM device from opening
             // every hidden page at once but still beats waiting out one full timeout per source
             // Race every multi-audio source at once (most are cheap HTTP resolvers) to find the richest stream
-            val size = maxOf(WAVE, providers.drop(providerIndex).takeWhile { it.multiAudio }.size)
-            val wave = providers.subList(providerIndex, minOf(providerIndex + size, providers.size))
+            // Movies, series and anime alike: every multi-audio source left joins, wherever it sits in the order
+            val rest = providers.drop(providerIndex).filter { it == p || it !in raced }
+            val wave = (rest.take(WAVE) + rest.filter { it.multiAudio }).distinct()
+            raced += wave
             showStatus("Connecting to ${sourceLabel(p)}")
             val won = race(t, wave)
             if (won != null) {
@@ -377,11 +389,26 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 play(won.second)
                 return
             }
-            providerIndex += wave.size
+            providerIndex++
+            while (providerIndex < providers.size && providers[providerIndex] in raced) providerIndex++
         }
         proxyLastResort?.let { s -> proxyLastResort = null; Log.i(TAG, "last resort: source's own proxy"); play(s, bypassProxy = false); return }
         qualityLastResort?.let { s -> qualityLastResort = null; Log.i(TAG, "last resort: only sub-720p sources answered"); play(s); return }
         showRetry("No source answered in time.\nRetry usually works, or pick a source yourself.")
+    }
+
+    /** Subtitle languages worth fetching: yours, then English. */
+    private fun subLangs() = listOfNotNull(LocalStore.subtitleFor(key())?.takeIf { it != "off" }, "en")
+
+    private fun wantedLang() = LocalStore.audioFor(key()) ?: settings.audioLang
+
+    /** First search only: a ready link without your language waits for the dub race (the link stays cached). */
+    private suspend fun lacksWanted(s: WebStreamSniffer.Sniffed): Boolean {
+        val want = wantedLang()
+        if (want == "orig" || raced.isNotEmpty() || providers.none { it.multiAudio && it !in raced }) return false
+        if (LocalStore.noDub(key(), want)) return false   // searched lately and nobody had it
+        val langs = AudioProbe.langs(s)
+        return langs.isNotEmpty() && want !in langs || langs.isEmpty() && want != "en"
     }
 
     /**
@@ -454,7 +481,12 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             pending--
             if (r == null) { Log.i(TAG, "${p.name} gave nothing"); LocalStore.reportProvider(p.name, false); continue }
             found += p to r
-            if (deadline == 0L) { deadline = SystemClock.elapsedRealtime() + COLLECT_MS; showStatus("Checking languages…") }
+            val want = wantedLang()
+            val now = SystemClock.elapsedRealtime()
+            // Dub pages (VidLux) often answer last: while nobody has your language, wait longer for them;
+            // once one has it, settle quickly
+            if (deadline == 0L) { deadline = now + if (want == "orig") COLLECT_MS else DUB_WAIT_MS; showStatus("Checking languages…") }
+            if (want != "orig" && want in AudioProbe.langs(r)) deadline = minOf(deadline, now + SETTLE_MS)
         }
         jobs.forEach { it.cancel() }
         if (found.isEmpty()) return@coroutineScope null
@@ -463,6 +495,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         addLangSources(probed)
         val want = LocalStore.audioFor(key()) ?: settings.audioLang
         val best = probed.maxByOrNull { AudioProbe.score(it.third, want) }!!
+        // No source had your language: next plays of this title start from the saved link right away
+        if (want != "orig" && want !in best.third) LocalStore.setNoDub(key(), want)
         Log.i(TAG, "languages: ${probed.joinToString { "${it.first.name}=${it.third}" }} → ${best.first.name}")
         best.first to best.second
     }
@@ -511,6 +545,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
      * like Vegamovies return the stream URL directly), a hidden WebView for embed pages.
      */
     private suspend fun searchOne(t: StreamExtractor.Target, p: StreamExtractor.Provider): WebStreamSniffer.Sniffed? {
+        StreamExtractor.cached(p, t)?.let { return it }   // already found: answers the race at once
         val resolver = p.resolver
         if (resolver != null) return withTimeoutOrNull(p.timeoutMs) { resolver.invoke(t) }
         val sn = WebStreamSniffer(this@PlayerActivity, root).also { sniffers += it }
@@ -552,9 +587,12 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             // Another stream found for this episode beats a new search
             langSources.removeAll { it.first == p }
             val want = LocalStore.audioFor(key()) ?: settings.audioLang
-            langSources.maxByOrNull { AudioProbe.score(it.third, want) }?.let { (np, ns) ->
+            langSources.maxByOrNull { AudioProbe.score(it.third, want) }?.let { (np, ns, ls) ->
                 Log.i(TAG, "trying ${np.name}, already found for this episode")
-                switchTo(np, ns); return
+                switchTo(np, ns)
+                if (want != "orig" && want !in ls)   // say why the dub is gone instead of switching silently
+                    showStatus("${com.anees.novamobile.data.model.LangTags.name(want) ?: want} source failed · trying ${sourceLabel(np)}")
+                return
             }
         }
         usedCache = false
@@ -633,11 +671,22 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val dataSource = if (offlineItem != null) com.anees.novamobile.download.NovaDownloads.playbackFactory(this)
             else SubtitleCleaner.factory(this, http, client, s.headers + ("User-Agent" to s.userAgent), bypassedProxy)
 
-        val subs = s.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(8).mapIndexed { i, url ->
+        val own = s.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(8)
+        val ownLangs = own.map { SubtitleCleaner.langOf(it) ?: "en" }
+        // Source brought none (or not yours): OpenSubtitles fills in, found while sources raced
+        val extra = if (offlineItem != null) emptyList() else target?.let { OpenSubs.ready(it) }.orEmpty()
+            .filter { it.lang !in ownLangs }.take(3)
+        val subs = own.mapIndexed { i, url ->
             MediaItem.SubtitleConfiguration.Builder(SubtitleCleaner.wrap(url))
-                .setMimeType(if (url.lowercase().contains(".srt")) MimeTypes.APPLICATION_SUBRIP else MimeTypes.TEXT_VTT)
-                .setLanguage(SubtitleCleaner.langOf(url) ?: "en")
+                .setMimeType(MimeTypes.TEXT_VTT)   // the cleaner turns SubRip into WebVTT
+                .setLanguage(ownLangs[i])
                 .setLabel(subLabel(url, i))
+                .build()
+        } + extra.map { sub ->
+            MediaItem.SubtitleConfiguration.Builder(SubtitleCleaner.wrap(sub.url))
+                .setMimeType(MimeTypes.TEXT_VTT)
+                .setLanguage(sub.lang)
+                .setLabel("${Locale(sub.lang).displayLanguage} · OpenSubtitles")
                 .build()
         }
         val item = MediaItem.Builder()
@@ -1006,27 +1055,28 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     override fun hud(icon: Int, text: String, fraction: Float?) {
         hudHide?.let { hud.removeCallbacks(it) }
-        // Brightness and volume: vertical bars at the sides; everything else: the pill on top
-        if (fraction != null && (icon == R.drawable.ic_brightness || icon == R.drawable.ic_volume)) {
-            val left = icon == R.drawable.ic_brightness
-            val bar = findViewById<View>(if (left) R.id.side_left else R.id.side_right)
-            val track = findViewById<View>(if (left) R.id.side_left_track else R.id.side_right_track)
-            val fill = findViewById<View>(if (left) R.id.side_left_fill else R.id.side_right_fill)
-            fill.layoutParams = fill.layoutParams.apply { height = (track.layoutParams.height * fraction.coerceIn(0f, 1f)).toInt() }
-            if (!left) findViewById<TextView>(R.id.side_right_text).apply {
-                visibility = if (text.startsWith("Boost")) View.VISIBLE else View.GONE
-                this.text = text.removePrefix("Boost ")
-                fill.setBackgroundColor(if (text.startsWith("Boost")) Ui.WARNING else Ui.TEXT)
-            }
-            bar.animate().cancel(); bar.alpha = 1f; bar.visibility = View.VISIBLE
-            return
-        }
+        // Everything, brightness and volume included, shows in the pill at the top
         hud.animate().cancel()
         hudIcon.setImageResource(icon)
         hudText.text = text
         hudBar.visibility = if (fraction == null) View.GONE else View.VISIBLE
         fraction?.let { hudBar.progress = (it * 1000).toInt() }
         if (hud.visibility != View.VISIBLE || hud.alpha < 1f) { hud.visibility = View.VISIBLE; hud.animate().alpha(1f).setDuration(120).start() }
+    }
+
+    /** Phone volume keys: same pill on top instead of the system slider covering the picture. */
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        if (keyCode != android.view.KeyEvent.KEYCODE_VOLUME_UP && keyCode != android.view.KeyEvent.KEYCODE_VOLUME_DOWN)
+            return super.onKeyDown(keyCode, event)
+        val audio = getSystemService(AUDIO_SERVICE) as android.media.AudioManager
+        val stream = android.media.AudioManager.STREAM_MUSIC
+        audio.adjustStreamVolume(stream,
+            if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_UP) android.media.AudioManager.ADJUST_RAISE else android.media.AudioManager.ADJUST_LOWER, 0)
+        val max = audio.getStreamMaxVolume(stream).coerceAtLeast(1)
+        val cur = audio.getStreamVolume(stream)
+        hud(R.drawable.ic_volume, if (cur == 0) "Muted" else "${cur * 100 / max}%", cur.toFloat() / max)
+        scheduleHudHide(1200)
+        return true
     }
 
     override fun hideHud() {
@@ -1225,6 +1275,13 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         })
     }
 
+    /** Turning subtitles on or off here becomes the default for every title, not just this one. */
+    private fun rememberSubsOn(on: Boolean) {
+        if (settings.subtitlesOn == on) return
+        settings = settings.copy(subtitlesOn = on)
+        LocalStore.saveSettings(LocalStore.settings().copy(subtitlesOn = on))
+    }
+
     private fun tracksSheet() {
         val exo = player ?: return
         val items = mutableListOf<ActionSheet.Item>()
@@ -1261,6 +1318,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         items += ActionSheet.Item("Off", checked = text.none { it.isSelected }) {
             exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
             LocalStore.setSubtitleFor(key(), "off")
+            rememberSubsOn(false)
         }
         text.forEach { g ->
             for (i in 0 until g.length) {
@@ -1270,6 +1328,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                         .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
                     LocalStore.setSubtitleFor(key(), f.language?.take(2) ?: "en")
+                    rememberSubsOn(true)
                 }
             }
         }

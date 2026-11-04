@@ -227,9 +227,27 @@ object MultimoviesSource {
     /** One fetch of the playlist: token-locked or dead links (403, HTML error page) are dropped here. */
     private suspend fun playable(url: String, referer: String): Boolean {
         if (!url.contains("m3u8", ignoreCase = true)) return true    // mp4: the player's own retry covers it
-        val body = VmHttp.get(url, headers + ("Referer" to referer), 6_000) ?: return false
-        return body.trimStart().startsWith("#EXTM3U")
+        val h = headers + ("Referer" to referer)
+        var playlist = url
+        var body = VmHttp.get(playlist, h, 6_000) ?: return false
+        if (!body.trimStart().startsWith("#EXTM3U")) return false
+        // A live playlist can still point at dead segments (Cineverse's proxied CDN links go 410):
+        // follow the first variant and fetch the first KB of its first segment
+        if (body.contains("#EXT-X-STREAM-INF")) {
+            playlist = firstUri(body)?.let { resolveAgainst(playlist, it) } ?: return true
+            body = VmHttp.get(playlist, h, 6_000) ?: return false
+        }
+        val seg = firstUri(body)?.let { resolveAgainst(playlist, it) } ?: return true
+        val ok = VmHttp.get(seg, h + ("Range" to "bytes=0-1023"), 6_000) != null
+        if (!ok) Log.i(TAG, "multimovies: first segment dead on ${hostOf(url)}")
+        return ok
     }
+
+    private fun firstUri(m3u8: String) = m3u8.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+
+    /** Playlist entries are relative to the playlist's own directory, not the site root. */
+    private fun resolveAgainst(playlist: String, uri: String): String =
+        runCatching { java.net.URI(playlist).resolve(uri).toString() }.getOrDefault(uri)
 
     private fun origin(url: String) = Regex("""^https?://[^/]+""").find(url)?.value ?: url
 

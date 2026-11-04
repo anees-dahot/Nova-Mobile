@@ -80,11 +80,10 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         dialog.setContentView(scrim)
         dialog.window?.apply { setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT) }
-        dialog.setOnDismissListener { poll?.let { main.removeCallbacks(it) }; onChange() }
+        dialog.setOnDismissListener { poll?.let { main.removeCallbacks(it) }; probeJob?.cancel(); onChange() }
         when {
             items.size == 1 && NovaDownloads.completed(ctx, ids.first()) -> problem("Already downloaded", "It's in your Downloads and plays offline.")
-            LocalStore.settings().dlAskQuality -> choose()
-            else -> start(null)
+            else -> choose()   // always: the source list is worth a look (quality pre-picked if remembered)
         }
         dialog.show()
         sheet.translationY = 400f.dp
@@ -125,6 +124,7 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         var quality = s.dlQuality
         var audioAll = s.dlAudioAll
         var remember = false
+        sources()
         val options = listOf(Triple(0, "480p", "Saves space"), Triple(1, "720p", "Standard"), Triple(2, "1080p", "Best picture"))
         body.addView(label("Quality"))
         val rows = mutableListOf<View>()
@@ -170,6 +170,66 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         })
     }
 
+    /** Source the download uses; null = Best (the stream with the most languages, yours first). */
+    private var provider: String? = null
+    /** Source checks stop when the sheet closes (hidden pages are heavy). */
+    private var probeJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Every source that has it, filled in live as they answer: languages and picture quality,
+     * so you can choose where the download comes from. A season uses the pick for every episode.
+     */
+    private fun sources() {
+        body.addView(label(if (items.size > 1) "Source  ·  for all ${items.size} episodes" else "Source"))
+        val list = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        body.addView(list, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8.dp })
+        val rows = mutableListOf<Pair<String?, View>>()
+        val want = LocalStore.settings().audioLang
+        fun paint() = rows.forEach { (name, r) ->
+            val on = name == provider
+            (r.background as GradientDrawable).setStroke(if (on) 2.dp else 1.dp, if (on) Ui.ACCENT else Ui.HAIRLINE)
+            r.findViewById<ImageView>(android.R.id.icon).visibility = if (on) View.VISIBLE else View.INVISIBLE
+        }
+        fun row(name: String?, title: String, sub: String, highlight: Boolean = false): View = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply { cornerRadius = 12f.dp; setColor(Ui.SURFACE2) }
+            setPadding(16.dp, 10.dp, 14.dp, 10.dp)
+            addView(LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(TextView(ctx).apply { text = title; textSize = 15f; setTextColor(Ui.TEXT); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL) })
+                addView(TextView(ctx).apply { text = sub; textSize = 12.5f; setTextColor(if (highlight) Ui.ACCENT else Ui.TEXT2) })
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(ImageView(ctx).apply { id = android.R.id.icon; setImageResource(R.drawable.ic_check); imageTintList = android.content.res.ColorStateList.valueOf(Ui.ACCENT) },
+                LinearLayout.LayoutParams(22.dp, 22.dp))
+            setOnClickListener { provider = name; Ui.tick(it); paint() }
+            alpha = 0f; animate().alpha(1f).setDuration(180).start()
+        }
+        val best = row(null, "Best", "Most languages, ${LangTags.name(want) ?: "yours"} first")
+        rows += null to best
+        list.addView(best, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8.dp })
+        val searching = TextView(ctx).apply { text = "Checking sources…"; textSize = 12.5f; setTextColor(Ui.TEXT3); setPadding(4.dp, 0, 0, 6.dp) }
+        list.addView(searching)
+        paint()
+        var found = 0
+        probeJob = act.lifecycleScope.launch {
+            DownloadStarter.probe(ctx, first).collect { pr ->
+                if (!dialog.isShowing) return@collect
+                found++
+                val names = pr.langs.mapNotNull { LangTags.name(it) }
+                val audio = if (names.isEmpty()) "Audio not labelled" else names.joinToString(" · ")
+                val q = if (pr.height > 0) "  ·  ${pr.height}p" else ""
+                val r = row(pr.provider, pr.provider, audio + q, highlight = want in pr.langs)
+                rows += pr.provider to r
+                // Sources with your language float to the top
+                val at = if (want in pr.langs) 1 else list.childCount - 1
+                list.addView(r, at.coerceAtMost(list.childCount - 1), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8.dp })
+                searching.text = "$found found · still checking…"
+                paint()
+            }
+            searching.text = if (found == 0) "No source answered yet · Best keeps trying when you download" else "$found source${if (found > 1) "s" else ""} found"
+        }
+    }
+
     // ── Step 2: start + live status ───────────────────────────────────────────
 
     private fun start(quality: Int?) {
@@ -177,7 +237,7 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         val need = DownloadStarter.estimateBytes(first.card, q) * items.size
         if (need > freeBytes()) { problem("Not enough space", "About ${DownloadUi.size(ctx, need)} needed, ${DownloadUi.size(ctx, freeBytes())} free. Delete something you've watched, or pick a smaller quality."); return }
         (act as? MainActivity)?.ensureNotificationPermission()
-        items = items.map { it.copy(quality = quality) }
+        items = items.map { it.copy(quality = quality, provider = provider) }
         val added = DownloadStarter.enqueue(ctx, items)
         if (added == 0 && items.size == 1 && NovaDownloads.completed(ctx, ids.first())) {
             problem("Already downloaded", "It's in your Downloads and plays offline."); return

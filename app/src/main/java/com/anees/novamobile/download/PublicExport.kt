@@ -38,6 +38,21 @@ object PublicExport {
     private fun prefs(ctx: Context) = ctx.applicationContext.getSharedPreferences("public_export", Context.MODE_PRIVATE)
     fun exported(ctx: Context, id: String) = prefs(ctx).getBoolean(id, false)
 
+    /** A save the user asked for: audio language to keep, folder (null = Movies/Nova), result callback. */
+    private class Manual(val lang: String?, val tree: Uri?, val onDone: (Boolean, String) -> Unit)
+    private val manual = HashMap<String, Manual>()
+
+    /**
+     * "Save to phone" from Downloads: export now with [lang] as the audio track (an MP4 copy holds one)
+     * into [tree] (a folder the user picked) or Movies/Nova when null. Runs even if already saved.
+     */
+    fun save(ctx: Context, id: String, lang: String?, tree: Uri?, onDone: (Boolean, String) -> Unit) = main.post {
+        manual[id] = Manual(lang, tree, onDone)
+        queue.remove(id)
+        if (id != running) queue.addFirst(id)
+        next(ctx.applicationContext)
+    }
+
     /** Queue one finished download (safe to call many times). */
     fun enqueue(ctx: Context, id: String) = main.post {
         if (exported(ctx, id) || id == running || id in queue) return@post
@@ -108,29 +123,34 @@ object PublicExport {
         val id = queue.removeFirstOrNull() ?: return
         val d = NovaDownloads.get(ctx, id)
         val m = d?.let { DownloadMeta.of(it) }
-        if (d == null || m == null || d.state != Download.STATE_COMPLETED) { next(ctx); return }
+        val opt = manual[id]
+        fun fail(msg: String) { manual.remove(id); opt?.onDone?.invoke(false, msg) }
+        if (d == null || m == null || d.state != Download.STATE_COMPLETED) { fail("Download not finished"); next(ctx); return }
+        // A folder the user picked is written through the system's document access: always via a temp file
+        @Suppress("NAME_SHADOWING") val viaTemp = viaTemp || opt?.tree != null
         if (Build.VERSION.SDK_INT < 29 && ctx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            Log.w(TAG, "no storage permission, $id kept in app only"); next(ctx); return
+            Log.w(TAG, "no storage permission, $id kept in app only"); fail("Storage permission needed"); next(ctx); return
         }
         val (folder, base) = place(m)
         // Not enough room for the copy (twice over through a temp file): skip now, try again next launch
         val need = (d.bytesDownloaded * if (viaTemp) 2.1 else 1.1).toLong()
         val free = runCatching { android.os.StatFs((ctx.getExternalFilesDir(null) ?: ctx.filesDir).absolutePath).availableBytes }.getOrDefault(Long.MAX_VALUE)
-        if (free < need) { Log.w(TAG, "$id: ${free shr 20} MB free, need ${need shr 20} MB, not copied to Movies/Nova"); next(ctx); return }
+        if (free < need) { Log.w(TAG, "$id: ${free shr 20} MB free, need ${need shr 20} MB, not copied to Movies/Nova"); fail("Not enough space: ${need shr 20} MB needed"); next(ctx); return }
         running = id
         val out = if (viaTemp) File(tmpDir(ctx), "export_${id.hashCode()}.mp4")
             else File(publicDir(folder).apply { mkdirs() }, ".$base.nova-part.mp4")   // dot name: hidden from galleries until done
         out.delete()
         val transformer = Transformer.Builder(ctx)
-            .setAssetLoaderFactory(assetLoader(ctx, m))
+            .setAssetLoaderFactory(assetLoader(ctx, m, opt?.lang))
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, result: ExportResult) {
                     Thread {
-                        val ok = runCatching { if (viaTemp) publish(ctx, m, out) else finishDirect(ctx, m, out) }
+                        val ok = runCatching { when { opt?.tree != null -> writeTree(ctx, opt.tree, m, out); viaTemp -> publish(ctx, m, out); else -> finishDirect(ctx, m, out) } }
                             .onFailure { Log.w(TAG, "publish $id failed", it) }.isSuccess
                         if (viaTemp || !ok) out.delete()
                         main.post {
                             if (ok) { prefs(ctx).edit().putBoolean(id, true).apply(); Log.i(TAG, "$id saved to Movies/$folder") }
+                            manual.remove(id)?.onDone?.invoke(ok, if (ok) "Saved ${DownloadNotifier.name(m)}" else "Couldn't save ${DownloadNotifier.name(m)}")
                             running = null; next(ctx)
                         }
                     }.start()
@@ -139,7 +159,7 @@ object PublicExport {
                     Log.w(TAG, "remux $id failed", e)
                     out.delete(); running = null
                     // Shared-folder write refused on this phone: once more through a temp file
-                    if (!viaTemp) { queue.addFirst(id); next(ctx, viaTemp = true) } else next(ctx)
+                    if (!viaTemp) { queue.addFirst(id); next(ctx, viaTemp = true) } else { fail("This stream couldn't be converted to MP4"); next(ctx) }
                 }
             })
             .build()
@@ -191,8 +211,8 @@ object PublicExport {
      * Reads the saved download (its stream keys keep it to the downloaded renditions) and, since
      * an MP4 carries one audio track here, keeps the language from Settings.
      */
-    private fun assetLoader(ctx: Context, m: DownloadMeta): androidx.media3.transformer.AssetLoader.Factory {
-        val lang = DownloadStarter.audioFor(m.card)?.takeIf { it != "orig" }   // the MP4 holds one audio track: your pick for this title, else the stream default
+    private fun assetLoader(ctx: Context, m: DownloadMeta, pick: String? = null): androidx.media3.transformer.AssetLoader.Factory {
+        val lang = (pick ?: DownloadStarter.audioFor(m.card))?.takeIf { it != "orig" }   // the MP4 holds one audio track: your pick for this title, else the stream default
         return androidx.media3.transformer.DefaultAssetLoaderFactory(
             ctx,
             androidx.media3.transformer.DefaultDecoderFactory.Builder(ctx).build(),
@@ -223,6 +243,20 @@ object PublicExport {
             val s = m.season.coerceAtLeast(1)
             "$ROOT/$kind/$title/Season %02d".format(s) to "$title S%02dE%02d".format(s, m.episode)
         }
+    }
+
+    /** Copy into a folder the user picked: <folder>/<Title>/<file>.mp4 plus subtitles, via DocumentsContract. */
+    private fun writeTree(ctx: Context, tree: Uri, m: DownloadMeta, video: File) {
+        val r = ctx.contentResolver
+        val root = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, android.provider.DocumentsContract.getTreeDocumentId(tree))
+        val (_, base) = place(m)
+        val dir = android.provider.DocumentsContract.createDocument(r, root, android.provider.DocumentsContract.Document.MIME_TYPE_DIR, clean(m.card.title)) ?: root
+        fun copy(name: String, mime: String, f: File) {
+            val uri = android.provider.DocumentsContract.createDocument(r, dir, mime, name) ?: error("can't create $name")
+            r.openOutputStream(uri)!!.use { out -> f.inputStream().use { it.copyTo(out, 1 shl 20) } }
+        }
+        copy("$base.mp4", "video/mp4", video)
+        subtitleFiles(m).forEach { (f, name) -> runCatching { copy(name, "text/vtt", f) } }
     }
 
     private fun publish(ctx: Context, m: DownloadMeta, video: File) {

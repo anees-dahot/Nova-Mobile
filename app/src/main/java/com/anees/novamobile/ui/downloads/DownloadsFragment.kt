@@ -358,6 +358,7 @@ class DownloadsFragment : Fragment() {
         ActionSheet.show(ctx, m.card.title, listOf(
             ActionSheet.Item("Play") { PlayerActivity.launch(ctx, m.card, m.season, m.episode) },
             ActionSheet.Item("Go to movie") { (activity as? MainActivity)?.openDetail(m.card) },
+            ActionSheet.Item("Save to phone…") { (activity as? MainActivity)?.let { SaveToPhone.show(it, listOf(d)) } },
             ActionSheet.Item("Delete download") { DownloadUi.delete(ctx, listOf(d)) { main.postDelayed({ load() }, 300) } },
         ), subtitle = DownloadUi.details(m).ifBlank { null })
     }
@@ -366,6 +367,7 @@ class DownloadsFragment : Fragment() {
         val ctx = requireContext()
         ActionSheet.show(ctx, f.card.title, listOf(
             ActionSheet.Item("Open") { (activity as? MainActivity)?.openDownloadsShow(f.card) },
+            ActionSheet.Item(if (f.done.size == 1) "Save to phone…" else "Save all ${f.done.size} to phone…") { (activity as? MainActivity)?.let { SaveToPhone.show(it, idsFor(f.key)) } },
             ActionSheet.Item("Download more episodes") { (activity as? MainActivity)?.openDetail(f.card) },
             ActionSheet.Item(if (f.done.size == 1) "Delete episode" else "Delete all ${f.done.size} episodes") { DownloadUi.delete(ctx, idsFor(f.key)) { main.postDelayed({ load() }, 300) } },
         ))

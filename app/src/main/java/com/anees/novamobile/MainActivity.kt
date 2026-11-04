@@ -271,6 +271,17 @@ class MainActivity : AppCompatActivity() {
 
     fun openCalendar() = showTab(CALENDAR)
 
+    /** System folder picker for "Save to phone"; the permission is kept so the folder works next time. */
+    private var folderCallback: ((android.net.Uri) -> Unit)? = null
+    private val folderPicker = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            runCatching { contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            folderCallback?.invoke(uri)
+        }
+        folderCallback = null
+    }
+    fun pickFolder(onPicked: (android.net.Uri) -> Unit) { folderCallback = onPicked; folderPicker.launch(null) }
+
     private fun showTab(page: Int) {
         if (supportFragmentManager.backStackEntryCount > 0)
             supportFragmentManager.popBackStackImmediate(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE)

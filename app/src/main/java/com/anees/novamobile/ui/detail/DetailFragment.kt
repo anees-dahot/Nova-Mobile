@@ -180,6 +180,7 @@ class DetailFragment : Fragment() {
             d.state == androidx.media3.exoplayer.offline.Download.STATE_COMPLETED -> ActionSheet.show(ctx, "Episode ${ep.episodeNumber}", listOf(
                 ActionSheet.Item("Play downloaded") { PlayerActivity.launch(ctx, card, s, ep.episodeNumber) },
                 ActionSheet.Item("Go to Downloads") { (activity as? com.anees.novamobile.MainActivity)?.openDownloadsShow(card) },
+                ActionSheet.Item("Save to phone…") { (activity as? com.anees.novamobile.MainActivity)?.let { com.anees.novamobile.ui.downloads.SaveToPhone.show(it, listOf(d)) } },
                 ActionSheet.Item("Delete download") { com.anees.novamobile.ui.downloads.DownloadUi.delete(ctx, listOf(d)) { dlTick.postDelayed({ refreshDownloads() }, 300) } },
             ), subtitle = com.anees.novamobile.download.DownloadMeta.of(d)?.let { com.anees.novamobile.ui.downloads.DownloadUi.details(it) }?.ifBlank { null })
             else -> { com.anees.novamobile.ui.downloads.DownloadUi.toggle(ctx, d); refreshDownloads() }

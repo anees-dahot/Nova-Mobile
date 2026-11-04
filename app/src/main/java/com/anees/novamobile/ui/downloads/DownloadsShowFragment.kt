@@ -189,6 +189,7 @@ class DownloadsShowFragment : Fragment() {
         if (e.d.state == Download.STATE_COMPLETED) items += ActionSheet.Item(if (e.watched in 0.02f..0.9f) "Resume" else "Play") { play(e) }
         else items += ActionSheet.Item(if (DownloadUi.paused(e.d)) "Resume download" else "Pause download") { DownloadUi.toggle(ctx, e.d) }
         items += ActionSheet.Item("Go to show") { (activity as? MainActivity)?.openDetail(card) }
+        if (e.d.state == Download.STATE_COMPLETED) items += ActionSheet.Item("Save to phone…") { (activity as? com.anees.novamobile.MainActivity)?.let { SaveToPhone.show(it, listOf(e.d)) } }
         items += ActionSheet.Item(if (e.d.state == Download.STATE_COMPLETED) "Delete download" else "Cancel download") { DownloadUi.delete(ctx, listOf(e.d)) { main.postDelayed({ load() }, 300) } }
         ActionSheet.show(ctx, DownloadUi.name(e.m), items, subtitle = DownloadUi.details(e.m).ifBlank { null })
     }

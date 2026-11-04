@@ -21,6 +21,21 @@ import androidx.media3.exoplayer.hls.playlist.HlsPlaylistParser
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.muxer.BufferInfo
 import androidx.media3.muxer.Mp4Muxer
+import androidx.media3.common.DataReader
+import androidx.media3.common.util.ParsableByteArray
+import androidx.media3.common.util.TimestampAdjuster
+import androidx.media3.extractor.DefaultExtractorInput
+import androidx.media3.extractor.Extractor
+import androidx.media3.extractor.ExtractorInput
+import androidx.media3.extractor.ExtractorOutput
+import androidx.media3.extractor.PositionHolder
+import androidx.media3.extractor.SeekMap
+import androidx.media3.extractor.TrackOutput
+import androidx.media3.extractor.mp4.FragmentedMp4Extractor
+import androidx.media3.extractor.text.SubtitleParser
+import androidx.media3.extractor.ts.AdtsExtractor
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+import androidx.media3.extractor.ts.TsExtractor
 import java.io.ByteArrayInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -100,8 +115,157 @@ object FastExport {
             onProgress(1f); return
         }
         @Suppress("UNCHECKED_CAST") val parts = plan.parts as List<Part>
-        mux(ctx, parts, out, ::progress)
+        val fast = runCatching { Media3Mux(ctx, parts, ::progress).prime() }
+            .onFailure { Log.w(TAG, "fast save: Media3 extractor failed, using MediaExtractor: ${it.message}") }.getOrNull()
+        if (fast != null) fast.writeTo(out) else { done = 0; mux(ctx, parts, out, ::progress) }
         onProgress(1f)
+    }
+
+    /**
+     * Same single pass as [mux] but with Media3's own extractors (TS / fMP4 / ADTS) fed straight from
+     * the cache: no MediaExtractor JNI hops and tiny native reads, which were the slowest part of a save.
+     * [prime] reads each part just far enough to learn its tracks and first timestamp (nothing is
+     * written yet, so a failure there falls back to [mux]); [writeTo] then drains part by part.
+     */
+    private class Media3Mux(ctx: Context, parts: List<Part>, progress: (Long) -> Unit) {
+        private class Pending(val bytes: ByteArray, val timeUs: Long, val flags: Int)
+
+        private inner class Sink(val type: Int, val videoAllowed: Boolean, val lang: String?) : TrackOutput {
+            var format: Format? = null
+            var keep = false
+            var muxId = -1
+            var firstUs = Long.MIN_VALUE
+            val pending = ArrayDeque<Pending>()
+            private var data = ByteArray(1 shl 20)
+            private var len = 0
+
+            override fun format(format: Format) {
+                if (this.format != null) return
+                val mime = format.sampleMimeType
+                var f = format
+                if (lang != null && type == C.TRACK_TYPE_AUDIO) f = f.buildUpon().setLanguage(lang).build()
+                this.format = f
+                keep = (type == C.TRACK_TYPE_AUDIO || (type == C.TRACK_TYPE_VIDEO && videoAllowed)) &&
+                    mime in Mp4Muxer.SUPPORTED_VIDEO_SAMPLE_MIME_TYPES + Mp4Muxer.SUPPORTED_AUDIO_SAMPLE_MIME_TYPES
+                if (!keep && (type == C.TRACK_TYPE_AUDIO || type == C.TRACK_TYPE_VIDEO)) Log.w(TAG, "fast save: skipping unsupported $mime")
+            }
+
+            private fun room(n: Int) { if (len + n > data.size) data = data.copyOf(maxOf(data.size * 2, len + n)) }
+
+            override fun sampleData(input: DataReader, length: Int, allowEndOfInput: Boolean, sampleDataPart: Int): Int {
+                room(length)
+                val n = input.read(data, len, length)
+                if (n == C.RESULT_END_OF_INPUT) { if (allowEndOfInput) return n; throw java.io.EOFException() }
+                len += n; return n
+            }
+
+            override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) {
+                room(length); data.readBytes(this.data, len, length); len += length
+            }
+
+            override fun sampleMetadata(timeUs: Long, flags: Int, size: Int, offset: Int, cryptoData: TrackOutput.CryptoData?) {
+                val start = len - offset - size
+                if (keep && start >= 0 && size > 0) {
+                    if (firstUs == Long.MIN_VALUE) firstUs = timeUs
+                    val f = flags and C.BUFFER_FLAG_KEY_FRAME
+                    if (muxId < 0) pending.addLast(Pending(data.copyOfRange(start, start + size), timeUs, f))
+                    else write(muxId, data, start, size, timeUs, f)
+                }
+                // Bytes after this sample (offset) belong to the next one: keep only those
+                if (offset > 0) System.arraycopy(data, len - offset, data, 0, offset)
+                len = offset
+            }
+        }
+
+        private inner class Src(val part: Part, val cs: CacheSource) : ExtractorOutput {
+            val sinks = HashMap<Int, Sink>()
+            var tracksEnded = false
+            var ended = false
+            private var pos = 0L
+            private val reader = object : DataReader {
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                    if (length == 0) return 0
+                    val n = cs.readAt(pos, buffer, offset, length)
+                    if (n < 0) return C.RESULT_END_OF_INPUT
+                    pos += n; return n
+                }
+            }
+            private fun input(at: Long): ExtractorInput { pos = at; return DefaultExtractorInput(reader, at, cs.size) }
+            private var inp: ExtractorInput = input(0)
+            private val holder = PositionHolder()
+            val extractor: Extractor = listOf<() -> Extractor>(
+                { FragmentedMp4Extractor(SubtitleParser.Factory.UNSUPPORTED, 0) },
+                { TsExtractor(TsExtractor.MODE_SINGLE_PMT, TimestampAdjuster(TimestampAdjuster.MODE_NO_OFFSET), DefaultTsPayloadReaderFactory()) },
+                { AdtsExtractor() },
+            ).firstNotNullOfOrNull { make ->
+                val e = make()
+                val ok = runCatching { e.sniff(input(0)) }.getOrDefault(false)
+                if (ok) e else { e.release(); null }
+            }?.also { inp = input(0); it.init(this) } ?: error("unknown segment format")
+
+            override fun track(id: Int, type: Int): TrackOutput = sinks.getOrPut(id) { Sink(type, part.videoAllowed, part.lang) }
+            override fun endTracks() { tracksEnded = true }
+            override fun seekMap(seekMap: SeekMap) {}
+
+            /** One extractor step; false at end of input. */
+            fun step(): Boolean {
+                if (ended) return false
+                when (extractor.read(inp, holder)) {
+                    Extractor.RESULT_SEEK -> inp = input(holder.position)
+                    Extractor.RESULT_END_OF_INPUT -> ended = true
+                }
+                return !ended
+            }
+
+            /** Tracks known and every kept track has a first sample. */
+            fun primed() = tracksEnded && sinks.values.none { it.format == null && (it.type == C.TRACK_TYPE_AUDIO || it.type == C.TRACK_TYPE_VIDEO) } &&
+                sinks.values.filter { it.keep }.all { it.firstUs != Long.MIN_VALUE }
+        }
+
+        private val srcs = parts.map { Src(it, CacheSource(ctx, it.segs, progress)) }
+        private var muxer: Mp4Muxer? = null
+        private var base = 0L
+        private val buf = ByteBuffer.allocateDirect(8 * 1024 * 1024)
+
+        fun prime(): Media3Mux {
+            try {
+                srcs.forEach { s ->
+                    var steps = 0
+                    while (!s.primed() && s.step()) { if (++steps > 200_000) break }
+                }
+                require(srcs.any { s -> s.sinks.values.any { it.keep && it.type == C.TRACK_TYPE_VIDEO } }) { "no video track" }
+                // Shared clock: TS timestamps don't start at 0
+                base = srcs.flatMap { s -> s.sinks.values.filter { it.keep && it.firstUs != Long.MIN_VALUE }.map { it.firstUs } }.minOrNull() ?: 0L
+            } catch (e: Throwable) { close(); throw e }
+            return this
+        }
+
+        fun writeTo(out: FileOutputStream) {
+            val t0 = System.nanoTime()
+            val m = Mp4Muxer.Builder(out).setSampleCopyingEnabled(true).setSampleBatchingEnabled(true).build()
+            muxer = m
+            try {
+                srcs.forEach { s -> s.sinks.values.filter { it.keep }.forEach { k -> k.muxId = m.addTrack(k.format!!) } }
+                srcs.forEach { s ->
+                    s.sinks.values.forEach { k -> while (k.pending.isNotEmpty()) { val p = k.pending.removeFirst(); write(k.muxId, p.bytes, 0, p.bytes.size, p.timeUs, p.flags) } }
+                    while (s.step()) {}
+                }
+            } finally {
+                val tc = System.nanoTime(); m.close(); writeNs += System.nanoTime() - tc
+                close()
+                Log.i(TAG, "fast save timing (media3): total ${(System.nanoTime() - t0) / 1_000_000} ms · cache read ${srcs.sumOf { it.cs.readNs } / 1_000_000} ms · write ${writeNs / 1_000_000} ms")
+            }
+        }
+
+        private fun write(id: Int, bytes: ByteArray, off: Int, size: Int, timeUs: Long, flags: Int) {
+            val b = if (size <= buf.capacity()) buf.apply { clear() } else ByteBuffer.allocateDirect(size)
+            b.put(bytes, off, size); b.flip()
+            val t = System.nanoTime()
+            try { muxer!!.writeSampleData(id, b, BufferInfo((timeUs - base).coerceAtLeast(0), size, flags)) } finally { writeNs += System.nanoTime() - t }
+        }
+        private var writeNs = 0L
+
+        private fun close() = srcs.forEach { runCatching { it.extractor.release() }; it.cs.close() }
     }
 
     /** Each part read once by one extractor (all its tracks), samples written as they come. */

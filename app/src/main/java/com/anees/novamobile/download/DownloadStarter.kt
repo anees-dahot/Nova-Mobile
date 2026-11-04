@@ -53,7 +53,7 @@ object DownloadStarter {
                     val provider: String? = null)
 
     /** One answering source for the download sheet: real audio languages and best picture height (-1 unknown). */
-    data class Probe(val provider: String, val langs: List<String>, val height: Int)
+    data class Probe(val provider: String, val langs: List<String>, val height: Int, val audioTracks: Int = -1)
 
     /**
      * Asks every source for [item] at once (plain-HTTP resolvers right away, hidden pages a little
@@ -76,9 +76,9 @@ object DownloadStarter {
                 // Per-language streams (CastleTV, MovieBox) each get their own row: "CastleTV#hi"
                 r.withVariants().forEachIndexed { i, v ->
                     launch {
-                        val langs = AudioProbe.langs(v)
-                        val h = runCatching { com.anees.novamobile.ui.player.QualityGate.maxHeightAsync(v) }.getOrDefault(-1)
-                        send(Probe(if (i == 0 || v.audioLang == null) p.name else "${p.name}#${v.audioLang}", langs, h))
+                        // Deep read: first segment / MP4 index, so every row shows its real audio and quality
+                        val info = AudioProbe.info(v, deep = true)
+                        send(Probe(if (i == 0 || v.audioLang == null) p.name else "${p.name}#${v.audioLang}", info.langs, info.height, info.audioTracks))
                     }
                 }
             }

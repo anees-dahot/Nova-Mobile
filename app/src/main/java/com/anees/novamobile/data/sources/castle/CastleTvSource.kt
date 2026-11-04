@@ -42,6 +42,7 @@ object CastleTvSource {
     private val HEADERS = mapOf("User-Agent" to "okhttp/4.9.3", "Accept" to "application/json", "Referer" to BASE)
     private val JSON = "application/json".toMediaType()
     private const val MIN_MATCH = 0.6
+    private val HEIGHT = Regex("(\\d{3,4})[pP]")
 
     private var key: String? = null
     private var keyAt = 0L
@@ -121,7 +122,10 @@ object CastleTvSource {
         val subs = data.optJSONArray("subtitles")?.let { arr ->
             (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.optString("url")?.takeIf { u -> u.startsWith("http") } }
         }.orEmpty().take(4)
-        return WebStreamSniffer.Sniffed(url, emptyMap(), "okhttp/4.9.3", subs)
+        // "HD 720P" / "SD 480P": the best listed is what resolution=3 hands out
+        val height = data.optJSONArray("videos")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it)?.optString("resolutionDescription") } }
+            .orEmpty().plus(data.optString("resolutionDescription")).mapNotNull { HEIGHT.find(it)?.groupValues?.get(1)?.toIntOrNull() }.maxOrNull()
+        return WebStreamSniffer.Sniffed(url, emptyMap(), "okhttp/4.9.3", subs, height = height)
     }
 
     /** Envelope: `{"data":"<cipher>"}` or a bare cipher; AES-CBC, key = IV = first 16 bytes of the security key. */

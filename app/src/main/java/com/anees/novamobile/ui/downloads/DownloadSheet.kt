@@ -210,7 +210,14 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
                 if (!dialog.isShowing) return@collect
                 found++
                 val names = pr.langs.mapNotNull { LangTags.name(it) }
-                val audio = if (names.isEmpty()) "Audio not labelled" else names.joinToString(" · ")
+                val unnamed = (pr.audioTracks - names.size).coerceAtLeast(0)
+                val audio = when {
+                    names.isNotEmpty() && unnamed > 0 -> names.joinToString(" · ") + " +$unnamed more"
+                    names.isNotEmpty() -> names.joinToString(" · ")
+                    pr.audioTracks > 1 -> "${pr.audioTracks} audio tracks (unlabelled)"
+                    pr.audioTracks == 1 -> "1 audio track (language not stated)"
+                    else -> "Audio not readable"
+                }
                 val q = if (pr.height > 0) "  ·  ${pr.height}p" else ""
                 val title = pr.provider.split('#').let { parts -> if (parts.size > 1) "${parts[0]}  ·  ${LangTags.name(parts[1]) ?: parts[1]} dub" else parts[0] }
                 val r = row(pr.provider, title, audio + q, highlight = pr.langs.size >= 2)

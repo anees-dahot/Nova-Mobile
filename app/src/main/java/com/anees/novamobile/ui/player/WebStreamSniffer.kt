@@ -36,6 +36,8 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
          * language menu as their own entries; picking one switches stream at the same second.
          */
         val variants: List<Sniffed>? = null,
+        /** Picture height the source states (CastleTV "HD 720P", MovieBox resolution); null = read the stream. */
+        val height: Int? = null,
     ) {
         /** This stream plus every language variant, each flattened (no nested variants). */
         fun withVariants(): List<Sniffed> = listOf(copy(variants = null)) + variants.orEmpty().map { it.copy(variants = null) }

@@ -43,5 +43,5 @@ object QualityGate {
 
     /** Cheap enough to call from the source search: one small HTTP GET on a dispatcher thread. */
     suspend fun maxHeightAsync(s: WebStreamSniffer.Sniffed): Int =
-        withContext(Dispatchers.IO) { maxHeight(s) }
+        s.height ?: withContext(Dispatchers.IO) { maxHeight(s) }.takeIf { it > 0 } ?: AudioProbe.info(s).height   // shallow: never slows the source search
 }

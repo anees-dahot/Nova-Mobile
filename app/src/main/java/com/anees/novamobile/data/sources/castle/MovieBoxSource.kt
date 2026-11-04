@@ -127,7 +127,8 @@ object MovieBoxSource {
                 (0 until a.length()).mapNotNull { a.optJSONObject(it) }.sortedByDescending { it.optString("lan") == "en" }
                     .mapNotNull { it.optString("url").takeIf { u -> u.startsWith("http") } }
             }.orEmpty().take(4)
-            WebStreamSniffer.Sniffed(best.optString("url"), mapOf("Referer" to PLAY_REFERER), UA, subs)
+            val height = best.optString("resolutions").toIntOrNull() ?: best.optInt("resolution", 0)
+            WebStreamSniffer.Sniffed(best.optString("url"), mapOf("Referer" to PLAY_REFERER), UA, subs, height = height.takeIf { it > 0 })
         }.getOrNull()
     }
 

@@ -51,7 +51,14 @@ data class DownloadMeta(
 ) {
     fun toBytes(): ByteArray = Gson().toJson(this).toByteArray()
     companion object {
-        fun of(d: Download): DownloadMeta? = runCatching { Gson().fromJson(String(d.request.data), DownloadMeta::class.java) }.getOrNull()
+        private val GSON = Gson()
+        /** Parsed metas by id + data hash: download lists re-read every item each second. */
+        private val parsed = android.util.LruCache<String, DownloadMeta>(256)
+        fun of(d: Download): DownloadMeta? {
+            val k = d.request.id + "#" + d.request.data.contentHashCode()
+            parsed.get(k)?.let { return it }
+            return runCatching { GSON.fromJson(String(d.request.data), DownloadMeta::class.java) }.getOrNull()?.also { parsed.put(k, it) }
+        }
         fun id(card: MediaCard, season: Int, episode: Int) = "${card.type}:${card.id}:$season:$episode"
     }
 }
@@ -201,11 +208,17 @@ object NovaDownloads {
                 }
                 isNetwork(e) -> {
                     val wait = when (n) { 1 -> 30_000L; 2 -> 60_000L; 3 -> 300_000L; else -> 900_000L }
-                    main.postDelayed({ dm.addDownload(d.request) }, wait)
+                    main.postDelayed({ retryIfStillFailed(dm, id) }, wait)
                 }
-                n < 3 -> main.postDelayed({ dm.addDownload(d.request) }, 10_000L)
+                n < 3 -> main.postDelayed({ retryIfStillFailed(dm, id) }, 10_000L)
                 else -> DownloadMeta.of(d)?.let { DownloadNotifier.failed(ctx, id, DownloadNotifier.name(it), "The stream stopped working. Retry finds a fresh link.") }
             }
+        }
+
+        /** Deleted (or already retried) while waiting: leave it alone. */
+        private fun retryIfStillFailed(dm: DownloadManager, id: String) {
+            val now = runCatching { dm.downloadIndex.getDownload(id) }.getOrNull() ?: return
+            if (now.state == Download.STATE_FAILED) dm.addDownload(now.request)
         }
 
         private fun isNetwork(e: Throwable?): Boolean = generateSequence(e) { it.cause }.any {

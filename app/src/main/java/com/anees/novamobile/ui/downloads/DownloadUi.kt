@@ -69,10 +69,31 @@ object DownloadUi {
         }
     }
 
-    fun remove(ctx: Context, d: Download) {
+    /** [alsoPhone]: delete the Movies/Nova copy too (otherwise it stays in the phone's gallery). */
+    fun remove(ctx: Context, d: Download, alsoPhone: Boolean = false) {
+        if (alsoPhone) com.anees.novamobile.download.PublicExport.removeCopy(ctx, d)
         NovaDownloads.deleteSubtitles(d)
         DownloadService.sendRemoveDownload(ctx, NovaDownloadService::class.java, d.request.id, false)
     }
+
+    /**
+     * Delete with one question when a copy also sits in the phone's Movies/Nova folder:
+     * Nova only (frees Nova's space, video stays in the gallery) or both. [onCancel] when dismissed.
+     */
+    fun confirmDelete(ctx: Context, targets: List<Download>, onCancel: () -> Unit = {}, onDone: (alsoPhone: Boolean) -> Unit) {
+        val onPhone = targets.count { com.anees.novamobile.download.PublicExport.exported(ctx, it.request.id) }
+        if (onPhone == 0) { onDone(false); return }
+        var chose = false
+        val what = if (targets.size == 1) "This video is" else "$onPhone of these videos are"
+        com.anees.novamobile.ui.common.ActionSheet.show(ctx, "Also delete from your phone?", listOf(
+            com.anees.novamobile.ui.common.ActionSheet.Item("Delete from Nova and phone") { chose = true; onDone(true) },
+            com.anees.novamobile.ui.common.ActionSheet.Item("Delete from Nova only") { chose = true; onDone(false) },
+        ), subtitle = "$what also saved in Movies/Nova on your phone.", onDismiss = { if (!chose) onCancel() })
+    }
+
+    /** confirmDelete, then remove. */
+    fun delete(ctx: Context, targets: List<Download>, onCancel: () -> Unit = {}, onDone: () -> Unit = {}) =
+        confirmDelete(ctx, targets, onCancel) { phone -> targets.forEach { remove(ctx, it, phone) }; onDone() }
 
     fun size(ctx: Context, bytes: Long): String = Formatter.formatShortFileSize(ctx, bytes)
 

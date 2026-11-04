@@ -123,10 +123,9 @@ object StreamExtractor {
 
     /** Providers that worked recently go first; ones that keep failing sink to the end. */
     fun ordered(): List<Provider> {
-        // Wanting a dub (not "Original") puts multi-audio sources first, whatever their score
-        val wantsDub = com.anees.novamobile.data.local.LocalStore.settings().audioLang != "orig"
+        // Multi-audio sources first, whatever their score: the stream with the most languages wins
         return PROVIDERS.sortedWith(
-            compareByDescending<Provider> { wantsDub && it.multiAudio }
+            compareByDescending<Provider> { it.multiAudio }
                 .thenByDescending { com.anees.novamobile.data.local.LocalStore.providerScore(it.name) }
         )
     }

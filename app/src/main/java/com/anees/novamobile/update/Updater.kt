@@ -235,7 +235,8 @@ object Updater {
                                 }
                             } }
                         }
-                        out.takeIf { it.length() > 100_000 }
+                        // Cut-off download: Android would only say "problem parsing the package"
+                        out.takeIf { it.length() > 100_000 && (rel.size <= 0 || it.length() == rel.size) }
                     }.getOrNull()
                 }
                 if (!isActive) return@launch

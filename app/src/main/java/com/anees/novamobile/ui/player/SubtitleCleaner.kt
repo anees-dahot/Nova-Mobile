@@ -63,6 +63,9 @@ object SubtitleCleaner {
     fun saveTo(ctx: Context, url: String, client: OkHttpClient, headers: Map<String, String>, out: File): Boolean =
         runCatching { clean(ctx, url, client, headers).copyTo(out, overwrite = true); out.length() > 20 }.getOrDefault(false)
 
+    /** The cleaned WebVTT file the player reads for [url] (fetched now if it isn't cached yet). Blocking. */
+    fun cleaned(ctx: Context, url: String, client: OkHttpClient, headers: Map<String, String>): File = clean(ctx, url, client, headers)
+
     private fun clean(ctx: Context, url: String, client: OkHttpClient, headers: Map<String, String>): File {
         val dir = File(ctx.cacheDir, "subs").apply { mkdirs() }
         val out = File(dir, "${url.hashCode()}.vtt")

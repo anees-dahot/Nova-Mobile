@@ -84,6 +84,24 @@ object Sync {
     internal val JSON = "application/json".toMediaType()
     internal fun json(o: Any) = o.toString().toRequestBody(JSON)
     internal fun open(activity: Activity, url: String) = activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+
+    /**
+     * Login CSRF guard: a redirect only counts while a login this app started is in flight (10 min),
+     * and its `state` must match when the service echoes it.
+     */
+    internal fun newState(service: String): String {
+        val st = java.util.UUID.randomUUID().toString().replace("-", "")
+        LocalStore.setSyncToken("${service}_state", "$st:${System.currentTimeMillis()}")
+        return st
+    }
+
+    internal fun checkState(service: String, got: String?): Boolean {
+        val saved = LocalStore.syncToken("${service}_state") ?: return false
+        LocalStore.setSyncToken("${service}_state", null)
+        val (st, at) = saved.split(":").let { it[0] to (it.getOrNull(1)?.toLongOrNull() ?: 0L) }
+        if (System.currentTimeMillis() - at > 10 * 60_000) return false
+        return got == null || got == st
+    }
 }
 
 // ── Trakt: device-code login (enter a code at trakt.tv/activate) ──────────────
@@ -167,10 +185,12 @@ object AniListSync : SyncService {
     override fun loggedIn() = LocalStore.syncToken("anilist") != null
     override fun logout() = LocalStore.setSyncToken("anilist", null)
     override fun login(activity: Activity) =
-        Sync.open(activity, "https://anilist.co/api/v2/oauth/authorize?client_id=${BuildConfig.ANILIST_ID}&response_type=token")
+        Sync.open(activity, "https://anilist.co/api/v2/oauth/authorize?client_id=${BuildConfig.ANILIST_ID}&response_type=token&state=${Sync.newState("anilist")}")
 
     fun onRedirect(uri: Uri): Boolean {
-        val token = Uri.parse("x://x?" + (uri.fragment ?: "")).getQueryParameter("access_token") ?: return false
+        val frag = Uri.parse("x://x?" + (uri.fragment ?: ""))
+        val token = frag.getQueryParameter("access_token") ?: return false
+        if (!Sync.checkState("anilist", frag.getQueryParameter("state") ?: uri.getQueryParameter("state"))) return false
         LocalStore.setSyncToken("anilist", token); return true
     }
 
@@ -218,11 +238,12 @@ object MalSync : SyncService {
         val verifier = (1..96).map { "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~".random() }.joinToString("")
         LocalStore.setSyncToken("mal_verifier", verifier)
         Sync.open(activity, "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id=${BuildConfig.MAL_ID}" +
-            "&code_challenge=$verifier&code_challenge_method=plain&redirect_uri=novamobile://mal")
+            "&code_challenge=$verifier&code_challenge_method=plain&redirect_uri=novamobile://mal&state=${Sync.newState("mal")}")
     }
 
     suspend fun onRedirect(uri: Uri): Boolean {
         val code = uri.getQueryParameter("code") ?: return false
+        if (!Sync.checkState("mal", uri.getQueryParameter("state"))) return false
         val body = okhttp3.FormBody.Builder().add("client_id", BuildConfig.MAL_ID).add("grant_type", "authorization_code")
             .add("code", code).add("code_verifier", LocalStore.syncToken("mal_verifier") ?: "").add("redirect_uri", "novamobile://mal").build()
         val (c, b) = Sync.http(Request.Builder().url("https://myanimelist.net/v1/oauth2/token").post(body).build())

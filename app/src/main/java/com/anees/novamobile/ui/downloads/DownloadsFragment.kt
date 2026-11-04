@@ -74,7 +74,9 @@ class DownloadsFragment : Fragment() {
         get() = prefs.getBoolean("dl_card_open", false)
         set(v) { prefs.edit().putBoolean("dl_card_open", v).apply() }
     private val main = Handler(Looper.getMainLooper())
-    private val tick = object : Runnable { override fun run() { load(); main.postDelayed(this, 1000) } }
+    /** Live progress each second while something downloads; idle lists rely on the listener and refresh slowly. */
+    private var anyActive = true
+    private val tick = object : Runnable { override fun run() { load(); main.postDelayed(this, if (anyActive) 1000 else 5000) } }
     private val listener = object : DownloadManager.Listener {
         override fun onDownloadChanged(m: DownloadManager, d: Download, e: Exception?) { main.post { load() } }
         override fun onDownloadRemoved(m: DownloadManager, d: Download) { main.post { load() } }
@@ -193,6 +195,7 @@ class DownloadsFragment : Fragment() {
 
         // Pinned card: everything not finished yet
         val activeCount = active.size + pending.size + unresolved.size
+        anyActive = active.isNotEmpty() || pending.isNotEmpty()
         if (activeCount > 0) {
             val attention = active.count { it.first.state == Download.STATE_FAILED } + unresolved.size
             val running = active.map { it.first }.filter { it.state == Download.STATE_DOWNLOADING && !DownloadUi.paused(it) }
@@ -319,7 +322,7 @@ class DownloadsFragment : Fragment() {
         val targets = selected.flatMap { idsFor(it) }
         val bytes = DownloadUi.size(ctx, targets.sumOf { it.bytesDownloaded })
         ActionSheet.show(ctx, "Delete ${targets.size} download${if (targets.size > 1) "s" else ""}?", listOf(
-            ActionSheet.Item("Delete and free $bytes") { targets.forEach { DownloadUi.remove(ctx, it) }; setEditing(false) },
+            ActionSheet.Item("Delete and free $bytes") { DownloadUi.delete(ctx, targets) { setEditing(false) } },
             ActionSheet.Item("Keep")
         ))
     }
@@ -332,7 +335,7 @@ class DownloadsFragment : Fragment() {
         if (watched.isEmpty()) { (activity as? MainActivity)?.showBanner("Nothing watched to delete"); return }
         val bytes = DownloadUi.size(ctx, watched.sumOf { it.bytesDownloaded })
         ActionSheet.show(ctx, "Delete ${watched.size} watched?", listOf(
-            ActionSheet.Item("Delete and free $bytes") { watched.forEach { DownloadUi.remove(ctx, it) }; main.postDelayed({ load() }, 300) },
+            ActionSheet.Item("Delete and free $bytes") { DownloadUi.delete(ctx, watched) { main.postDelayed({ load() }, 300) } },
             ActionSheet.Item("Keep")
         ))
     }
@@ -353,7 +356,7 @@ class DownloadsFragment : Fragment() {
         ActionSheet.show(ctx, m.card.title, listOf(
             ActionSheet.Item("Play") { PlayerActivity.launch(ctx, m.card, m.season, m.episode) },
             ActionSheet.Item("Go to movie") { (activity as? MainActivity)?.openDetail(m.card) },
-            ActionSheet.Item("Delete download") { DownloadUi.remove(ctx, d); main.postDelayed({ load() }, 300) },
+            ActionSheet.Item("Delete download") { DownloadUi.delete(ctx, listOf(d)) { main.postDelayed({ load() }, 300) } },
         ), subtitle = DownloadUi.details(m).ifBlank { null })
     }
 
@@ -362,7 +365,7 @@ class DownloadsFragment : Fragment() {
         ActionSheet.show(ctx, f.card.title, listOf(
             ActionSheet.Item("Open") { (activity as? MainActivity)?.openDownloadsShow(f.card) },
             ActionSheet.Item("Download more episodes") { (activity as? MainActivity)?.openDetail(f.card) },
-            ActionSheet.Item(if (f.done.size == 1) "Delete episode" else "Delete all ${f.done.size} episodes") { idsFor(f.key).forEach { DownloadUi.remove(ctx, it) }; main.postDelayed({ load() }, 300) },
+            ActionSheet.Item(if (f.done.size == 1) "Delete episode" else "Delete all ${f.done.size} episodes") { DownloadUi.delete(ctx, idsFor(f.key)) { main.postDelayed({ load() }, 300) } },
         ))
     }
 
@@ -378,11 +381,15 @@ class DownloadsFragment : Fragment() {
 
     /** Swipe: hide now, delete after 4s unless Undo is tapped. */
     private fun removeWithUndo(targets: List<Download>, label: String) {
+        DownloadUi.confirmDelete(requireContext(), targets, onCancel = { adapter.notifyDataSetChanged() /* un-swipe the row */ }) { phone -> removeWithUndo(targets, label, phone) }
+    }
+
+    private fun removeWithUndo(targets: List<Download>, label: String, alsoPhone: Boolean) {
         val ids = targets.map { it.request.id }
         pendingRemoval += ids
         load()
         val ctx = requireContext().applicationContext
-        val commit = Runnable { if (pendingRemoval.removeAll(ids.toSet())) targets.forEach { DownloadUi.remove(ctx, it) } }
+        val commit = Runnable { if (pendingRemoval.removeAll(ids.toSet())) targets.forEach { DownloadUi.remove(ctx, it, alsoPhone) } }
         main.postDelayed(commit, 4000)
         (activity as? MainActivity)?.showBanner("Deleted $label", "Undo") { main.removeCallbacks(commit); pendingRemoval -= ids.toSet(); load() }
     }

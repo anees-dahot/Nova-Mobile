@@ -61,8 +61,8 @@ object IndStreamSources {
         val root = rootA.await()?.takeIf { it.optBoolean("ok", false) }
         root?.optString("imdb")?.takeIf { it.startsWith("tt") }?.let { imdbCache[t.tmdbId] = it }
 
-        // The wanted dub, when this title has one
-        val want = DUB_NAMES[LocalStore.settings().audioLang].orEmpty()
+        // Dub variants are separate single-language streams; the original is used (no language setting any more)
+        val want = emptyList<String>()
         val dub = if (want.isEmpty()) null else runCatching {
             val arr = varsA.await()?.optJSONArray("variants") ?: return@runCatching null
             (0 until arr.length()).asSequence().mapNotNull { arr.optJSONObject(it) }.firstOrNull { v ->

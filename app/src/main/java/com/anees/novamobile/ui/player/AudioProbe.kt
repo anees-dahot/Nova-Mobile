@@ -40,7 +40,8 @@ object AudioProbe {
             header("User-Agent", s.userAgent.ifBlank { UA })
             s.headers.forEach { (k, v) -> header(k, v) }
         }.build()
-        RetrofitClient.base.newCall(req).execute().use { r ->
+        // Hard cap: a blocking call ignores coroutine timeouts
+        RetrofitClient.base.newCall(req).apply { timeout().timeout(4, java.util.concurrent.TimeUnit.SECONDS) }.execute().use { r ->
             if (!r.isSuccessful) return emptyList()
             val src = r.body?.source() ?: return emptyList()
             src.request(PEEK_BYTES)
@@ -90,5 +91,5 @@ object AudioProbe {
         "hin" -> "hi"; "jpn" -> "ja"; "eng" -> "en"; "tam" -> "ta"; "tel" -> "te"; "mal" -> "ml"; "ben" -> "bn"; else -> null
     }
 
-    private fun code(tag: String?): String? = tag?.take(2)?.lowercase()?.takeIf { it.length == 2 && it != "un" && it != "mu" }
+    private fun code(tag: String?): String? = LangTags.norm(tag)
 }

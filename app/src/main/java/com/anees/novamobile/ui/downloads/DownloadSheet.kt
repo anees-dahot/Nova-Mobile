@@ -122,7 +122,6 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         body.removeAllViews()
         val s = LocalStore.settings()
         var quality = s.dlQuality
-        var audioAll = s.dlAudioAll
         var remember = false
         sources()
         val options = listOf(Triple(0, "480p", "Saves space"), Triple(1, "720p", "Standard"), Triple(2, "1080p", "Best picture"))
@@ -152,11 +151,6 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         }
         paint()
 
-        val lang = LangTags.name(s.audioLang) ?: "your language"
-        body.addView(label("Audio"))
-        body.addView(switchRow("All audio languages", if (audioAll) "Every dub the source has" else "Only $lang + English (smaller)", audioAll) { on, sub ->
-            audioAll = on; sub.text = if (on) "Every dub the source has" else "Only $lang + English (smaller)"
-        })
         body.addView(switchRow("Remember my choice", "Don't ask next time (change in Settings)", false) { on, _ -> remember = on })
 
         body.addView(TextView(ctx).apply {
@@ -165,7 +159,7 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         })
         body.addView(primary("Download") {
             val cur = LocalStore.settings()
-            LocalStore.saveSettings(cur.copy(dlAudioAll = audioAll, dlQuality = if (remember) quality else cur.dlQuality, dlAskQuality = !remember))
+            LocalStore.saveSettings(cur.copy(dlQuality = if (remember) quality else cur.dlQuality, dlAskQuality = !remember))
             start(quality)
         })
     }
@@ -184,7 +178,7 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         val list = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         body.addView(list, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8.dp })
         val rows = mutableListOf<Pair<String?, View>>()
-        val want = LocalStore.settings().audioLang
+        val counts = mutableListOf<Int>()   // languages per listed source, richest first
         fun paint() = rows.forEach { (name, r) ->
             val on = name == provider
             (r.background as GradientDrawable).setStroke(if (on) 2.dp else 1.dp, if (on) Ui.ACCENT else Ui.HAIRLINE)
@@ -204,7 +198,7 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
             setOnClickListener { provider = name; Ui.tick(it); paint() }
             alpha = 0f; animate().alpha(1f).setDuration(180).start()
         }
-        val best = row(null, "Best", "Most languages, ${LangTags.name(want) ?: "yours"} first")
+        val best = row(null, "Best", "The source with the most audio languages")
         rows += null to best
         list.addView(best, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8.dp })
         val searching = TextView(ctx).apply { text = "Checking sources…"; textSize = 12.5f; setTextColor(Ui.TEXT3); setPadding(4.dp, 0, 0, 6.dp) }
@@ -218,10 +212,11 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
                 val names = pr.langs.mapNotNull { LangTags.name(it) }
                 val audio = if (names.isEmpty()) "Audio not labelled" else names.joinToString(" · ")
                 val q = if (pr.height > 0) "  ·  ${pr.height}p" else ""
-                val r = row(pr.provider, pr.provider, audio + q, highlight = want in pr.langs)
+                val r = row(pr.provider, pr.provider, audio + q, highlight = pr.langs.size >= 2)
                 rows += pr.provider to r
-                // Sources with your language float to the top
-                val at = if (want in pr.langs) 1 else list.childCount - 1
+                // Richest in languages floats to the top
+                val at = 1 + counts.count { it >= pr.langs.size }
+                counts += pr.langs.size
                 list.addView(r, at.coerceAtMost(list.childCount - 1), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = 8.dp })
                 searching.text = "$found found · still checking…"
                 paint()

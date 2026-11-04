@@ -210,7 +210,20 @@ object LangTags {
         return NAMES.entries.firstOrNull { l.startsWith(it.value.lowercase()) || l.contains(it.value.lowercase()) }?.key
     }
 
-    fun name(code: String?): String? = code?.let { NAMES[it.take(2).lowercase()] ?: java.util.Locale(it).displayLanguage.takeIf { n -> n.isNotBlank() && n != it } }
+    /** ISO 639-2 (and bibliographic) → 639-1, e.g. "jpn"/"ger"/"chi" → "ja"/"de"/"zh". */
+    private val ISO3: Map<String, String> by lazy {
+        java.util.Locale.getISOLanguages().associateBy { runCatching { java.util.Locale(it).isO3Language }.getOrDefault("") } +
+            mapOf("ger" to "de", "fre" to "fr", "chi" to "zh", "dut" to "nl", "per" to "fa", "cze" to "cs", "gre" to "el", "rum" to "ro", "slo" to "sk", "may" to "ms", "bur" to "my")
+    }
+
+    /** "hi" / "hin" / "hi-IN" / "jpn" → "hi" / "hi" / "hi" / "ja"; unknown, undetermined or mixed → null. */
+    fun norm(tag: String?): String? {
+        val t = tag?.trim()?.lowercase()?.substringBefore('-')?.substringBefore('_') ?: return null
+        val c = when (t.length) { 2 -> t; 3 -> ISO3[t]; else -> null } ?: return null
+        return c.takeIf { it != "un" && it != "mu" && it != "zx" }
+    }
+
+    fun name(code: String?): String? = code?.let { NAMES[norm(it) ?: it.take(2).lowercase()] ?: java.util.Locale(it).displayLanguage.takeIf { n -> n.isNotBlank() && n != it } }
 
     fun label(card: MediaCard, learned: List<String>?): String? {
         val seen = learned.orEmpty().mapNotNull { name(it) }.distinct()

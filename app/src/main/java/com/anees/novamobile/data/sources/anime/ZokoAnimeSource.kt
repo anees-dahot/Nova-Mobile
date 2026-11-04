@@ -26,8 +26,8 @@ object ZokoAnimeSource {
     suspend fun resolve(t: StreamExtractor.Target): WebStreamSniffer.Sniffed? {
         val mal = t.malId ?: return null
         val ep = t.aniEpisode ?: return null
-        // English audio wanted → dub first; anything else (Hindi isn't offered) → original with subs
-        val order = if (LocalStore.settings().audioLang == "en") listOf("dub", "sub") else listOf("sub", "dub")
+        // Original with subs first, the English dub as the fallback (no language setting any more)
+        val order = listOf("sub", "dub")
         for (kind in order) {
             val cfg = config(mal, ep, kind) ?: continue
             val src = cfg.optString("src").takeIf { it.startsWith("http") } ?: continue

@@ -145,14 +145,16 @@ object DownloadStarter {
         val sources = StreamExtractor.ordered().filter { it.name != item.skipProvider }
         // Your pick from the sheet first; else ask every multi-audio resolver at once and save the stream with the most real languages
         val picked = item.provider?.let { n -> sources.firstOrNull { it.name == n } }
-        val richest = if (picked != null) null else richest(sources, target)
+        val richest = if (picked != null) null else richest(ctx, sources, target)
         val first = picked ?: richest?.first
         for (p in listOfNotNull(first) + sources.filter { it != first }) {
             val host = Prefetcher.host
             if (p.resolver == null && (headless || host == null) && StreamExtractor.cached(p, target) == null) continue
             val sniffed = richest?.takeIf { it.first == p }?.second ?: StreamExtractor.cached(p, target)
-                ?: (if (p.resolver != null) withTimeoutOrNull(p.timeoutMs) { p.resolver.invoke(target) }
-                    else WebStreamSniffer(ctx, host!!).sniff(StreamExtractor.embedUrl(p, target), p.timeoutMs))
+                ?: runCatching {
+                    if (p.resolver != null) withTimeoutOrNull(p.timeoutMs) { p.resolver.invoke(target) }
+                    else WebStreamSniffer(ctx, host!!).sniff(StreamExtractor.embedUrl(p, target), p.timeoutMs)
+                }.onFailure { if (it is CancellationException) throw it; Log.w(TAG, "${p.name} failed: ${it.message}") }.getOrNull()
                 ?: continue
             StreamExtractor.remember(p, target, sniffed)
             rememberHeaders(sniffed)
@@ -167,7 +169,7 @@ object DownloadStarter {
             // Source brought no subtitles: OpenSubtitles (English + yours)
                 .ifEmpty {
                     val dir = File(NovaDownloads.dir, "subs").apply { mkdirs() }
-                    val langs = listOf("en")
+                    val langs = listOfNotNull(LocalStore.subtitleFor("${item.card.type}:${item.card.id}")?.takeIf { it != "off" }, "en").distinct()
                     com.anees.novamobile.ui.player.OpenSubs.await(target, repo, langs, 8_000).take(3).mapIndexedNotNull { i, sub ->
                         val out = File(dir, "${id.hashCode()}_os$i.vtt")
                         withContext(Dispatchers.IO) { SubtitleCleaner.saveTo(ctx, sub.url, RetrofitClient.base, emptyMap(), out) }
@@ -185,19 +187,25 @@ object DownloadStarter {
         return false
     }
 
-    private suspend fun richest(sources: List<StreamExtractor.Provider>, t: StreamExtractor.Target):
+    private suspend fun richest(ctx: Context, sources: List<StreamExtractor.Provider>, t: StreamExtractor.Target):
             Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed>? = coroutineScope {
-        val want = LocalStore.settings().audioLang
-        sources.filter { it.multiAudio && (it.resolver != null || StreamExtractor.cached(it, t) != null) }.map { p ->
+        // Multi-audio pages (VidLux) need the app's hidden WebView; with the app closed only resolvers run
+        val host = Prefetcher.host
+        sources.filter { it.multiAudio && (it.resolver != null || StreamExtractor.cached(it, t) != null || host != null) }.map { p ->
             async {
                 val r = StreamExtractor.cached(p, t)
-                    ?: withTimeoutOrNull(p.timeoutMs) { runCatching { p.resolver!!.invoke(t) }.getOrNull() }
+                    ?: withTimeoutOrNull(p.timeoutMs) { runCatching {
+                        p.resolver?.invoke(t) ?: WebStreamSniffer(ctx, host!!).sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs)
+                    }.getOrNull() }
                 r?.let { Triple(p, it, AudioProbe.langs(it)) }
             }
         }.awaitAll().filterNotNull()
             .also { l -> Log.i(TAG, "download languages: ${l.joinToString { "${it.first.name}=${it.third}" }}") }
-            .maxByOrNull { AudioProbe.score(it.third, want) }?.let { it.first to it.second }
+            .maxByOrNull { it.third.size }?.let { it.first to it.second }
     }
+
+    /** Audio language picked for this title in the player, else the Settings default. */
+    fun audioFor(card: MediaCard): String? = LocalStore.audioFor("${card.type}:${card.id}")
 
     private fun rememberHeaders(s: WebStreamSniffer.Sniffed) {
         LocalStore.setDownloadUserAgent(s.userAgent)
@@ -222,9 +230,8 @@ object DownloadStarter {
         val helper = DownloadHelper.forMediaItem(ctx, item, DefaultRenderersFactory(ctx), factory)
         try {
             withContext(Dispatchers.Main) { prepare(helper) }
-            // Audio: every language, or (Settings → Downloads) only the preferred one + English to save space
-            val want = setOf(settings.audioLang, "en")
-            fun lang(f: androidx.media3.common.Format) = f.language?.take(2)?.takeIf { it != "un" } ?: LangTags.code(f.label)
+            // Audio: every language the stream has
+            fun lang(f: androidx.media3.common.Format) = LangTags.norm(f.language) ?: LangTags.code(f.label)
             var height = 0
             val audioKept = mutableSetOf<String>()
             for (period in 0 until helper.periodCount) {
@@ -241,8 +248,7 @@ object DownloadStarter {
                     if (type != androidx.media3.common.C.TRACK_TYPE_AUDIO && type != androidx.media3.common.C.TRACK_TYPE_TEXT) continue
                     val all = mutableListOf<Pair<DefaultTrackSelector.SelectionOverride, String?>>()
                     for (g in 0 until groups.length) for (t in 0 until groups[g].length) all += DefaultTrackSelector.SelectionOverride(g, t) to lang(groups[g].getFormat(t))
-                    val keep = if (type == androidx.media3.common.C.TRACK_TYPE_AUDIO && !settings.dlAudioAll && settings.audioLang != "orig")
-                        all.filter { it.second in want }.ifEmpty { all } else all
+                    val keep = all   // every audio language and subtitle the stream has
                     if (type == androidx.media3.common.C.TRACK_TYPE_AUDIO) keep.mapNotNullTo(audioKept) { it.second }
                     if (keep.isNotEmpty()) helper.addTrackSelectionForSingleRenderer(period, r, params, keep.map { it.first })
                 }

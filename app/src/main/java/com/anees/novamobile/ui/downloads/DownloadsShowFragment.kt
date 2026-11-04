@@ -189,7 +189,7 @@ class DownloadsShowFragment : Fragment() {
         if (e.d.state == Download.STATE_COMPLETED) items += ActionSheet.Item(if (e.watched in 0.02f..0.9f) "Resume" else "Play") { play(e) }
         else items += ActionSheet.Item(if (DownloadUi.paused(e.d)) "Resume download" else "Pause download") { DownloadUi.toggle(ctx, e.d) }
         items += ActionSheet.Item("Go to show") { (activity as? MainActivity)?.openDetail(card) }
-        items += ActionSheet.Item(if (e.d.state == Download.STATE_COMPLETED) "Delete download" else "Cancel download") { DownloadUi.remove(ctx, e.d); main.postDelayed({ load() }, 300) }
+        items += ActionSheet.Item(if (e.d.state == Download.STATE_COMPLETED) "Delete download" else "Cancel download") { DownloadUi.delete(ctx, listOf(e.d)) { main.postDelayed({ load() }, 300) } }
         ActionSheet.show(ctx, DownloadUi.name(e.m), items, subtitle = DownloadUi.details(e.m).ifBlank { null })
     }
 
@@ -198,7 +198,7 @@ class DownloadsShowFragment : Fragment() {
         val eps = episodes()
         ActionSheet.show(ctx, "Delete all ${eps.size} episodes of ${card.title}?", listOf(
             ActionSheet.Item("Delete and free ${DownloadUi.size(ctx, eps.sumOf { it.d.bytesDownloaded })}") {
-                eps.forEach { DownloadUi.remove(ctx, it.d) }; parentFragmentManager.popBackStack()
+                DownloadUi.delete(ctx, eps.map { it.d }) { if (isAdded) parentFragmentManager.popBackStack() }
             },
             ActionSheet.Item("Keep"),
         ))
@@ -211,10 +211,13 @@ class DownloadsShowFragment : Fragment() {
             override fun onMove(rv: RecyclerView, a: RecyclerView.ViewHolder, b: RecyclerView.ViewHolder) = false
             override fun onSwiped(vh: RecyclerView.ViewHolder, dir: Int) {
                 val e = adapter.currentList.getOrNull(vh.bindingAdapterPosition) ?: return
+                DownloadUi.confirmDelete(requireContext(), listOf(e.d), onCancel = { adapter.notifyItemChanged(vh.bindingAdapterPosition) }) { phone -> swipeRemove(e, phone) }
+            }
+            private fun swipeRemove(e: Ep, phone: Boolean) {
                 pendingRemoval += e.key
                 load()
                 val app = requireContext().applicationContext
-                val commit = Runnable { if (pendingRemoval.remove(e.key)) DownloadUi.remove(app, e.d) }
+                val commit = Runnable { if (pendingRemoval.remove(e.key)) DownloadUi.remove(app, e.d, phone) }
                 main.postDelayed(commit, 4000)
                 (activity as? MainActivity)?.showBanner("Deleted ${DownloadUi.episode(e.m)}", "Undo") { main.removeCallbacks(commit); pendingRemoval -= e.key; load() }
             }

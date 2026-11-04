@@ -45,12 +45,65 @@ object PublicExport {
         next(ctx.applicationContext)
     }
 
-    /** Finished downloads from before this feature, or whose export was interrupted. */
-    fun catchUp(ctx: Context) = NovaDownloads.all(ctx)
-        .filter { it.state == Download.STATE_COMPLETED && !exported(ctx, it.request.id) }
-        .forEach { enqueue(ctx, it.request.id) }
+    /**
+     * Remux target. Not a cache dir: Android purges an app's cache over its quota while the
+     * export still runs (Nov 2026: installd deleted a 177 MB export_….mp4 mid-remux → ENOENT).
+     */
+    private fun tmpDir(ctx: Context) = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "export_tmp").apply { mkdirs() }
 
-    private fun next(ctx: Context) {
+    /** Finished downloads from before this feature, or whose export was interrupted. */
+    fun catchUp(ctx: Context) {
+        if (running == null) tmpDir(ctx).listFiles()?.forEach { it.delete() }   // left by a killed export
+        NovaDownloads.all(ctx)
+            .filter { it.state == Download.STATE_COMPLETED && !exported(ctx, it.request.id) }
+            .forEach { enqueue(ctx, it.request.id) }
+    }
+
+    /**
+     * Deletes the phone copy (video + subtitles in Movies/Nova). Only files this install wrote can be
+     * removed on Android 10+; returns false when nothing could be deleted.
+     */
+    fun removeCopy(ctx: Context, d: Download): Boolean {
+        val id = d.request.id
+        val m = DownloadMeta.of(d) ?: return false
+        queue.remove(id)
+        prefs(ctx).edit().remove(id).apply()
+        val (folder, base) = place(m)
+        var removed = 0
+        if (Build.VERSION.SDK_INT >= 29) {
+            val r = ctx.contentResolver
+            val rel = "${Environment.DIRECTORY_MOVIES}/$folder/"
+            for (coll in listOf(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY))) {
+                runCatching {
+                    r.query(coll, arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME), "${MediaStore.MediaColumns.RELATIVE_PATH}=?", arrayOf(rel), null)?.use { c ->
+                        while (c.moveToNext()) {
+                            val name = c.getString(1) ?: continue
+                            if (name == "$base.mp4" || name.startsWith("$base.")) removed += runCatching { r.delete(android.content.ContentUris.withAppendedId(coll, c.getLong(0)), null, null) }.getOrDefault(0)
+                        }
+                    }
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), folder)
+            dir.listFiles()?.filter { it.name.startsWith("$base.") }?.forEach { if (it.delete()) removed++ }
+        }
+        if (Build.VERSION.SDK_INT >= 30) publicDir(folder).listFiles()?.filter { it.name.startsWith("$base.") || it.name.startsWith(".$base.") }?.forEach { if (it.delete()) removed++ }
+        Log.i(TAG, "removed $removed phone file(s) for $id")
+        return removed > 0
+    }
+
+    /** Movies/<folder> on shared storage (file paths work there for our own files, except on Android 10). */
+    @Suppress("DEPRECATION")
+    private fun publicDir(folder: String) = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), folder)
+
+    /**
+     * Android 11+ and 9-: the remux is written straight into Movies/Nova (hidden name, renamed when done),
+     * so the copy needs the video's size once. Android 10 has no file-path access there: temp file + MediaStore copy.
+     */
+    private val direct get() = Build.VERSION.SDK_INT != 29
+
+    private fun next(ctx: Context, viaTemp: Boolean = !direct) {
         if (running != null) return
         val id = queue.removeFirstOrNull() ?: return
         val d = NovaDownloads.get(ctx, id)
@@ -59,36 +112,87 @@ object PublicExport {
         if (Build.VERSION.SDK_INT < 29 && ctx.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             Log.w(TAG, "no storage permission, $id kept in app only"); next(ctx); return
         }
+        val (folder, base) = place(m)
+        // Not enough room for the copy (twice over through a temp file): skip now, try again next launch
+        val need = (d.bytesDownloaded * if (viaTemp) 2.1 else 1.1).toLong()
+        val free = runCatching { android.os.StatFs((ctx.getExternalFilesDir(null) ?: ctx.filesDir).absolutePath).availableBytes }.getOrDefault(Long.MAX_VALUE)
+        if (free < need) { Log.w(TAG, "$id: ${free shr 20} MB free, need ${need shr 20} MB, not copied to Movies/Nova"); next(ctx); return }
         running = id
-        val tmp = File(ctx.cacheDir, "export_${id.hashCode()}.mp4").apply { delete() }
+        val out = if (viaTemp) File(tmpDir(ctx), "export_${id.hashCode()}.mp4")
+            else File(publicDir(folder).apply { mkdirs() }, ".$base.nova-part.mp4")   // dot name: hidden from galleries until done
+        out.delete()
         val transformer = Transformer.Builder(ctx)
-            .setAssetLoaderFactory(assetLoader(ctx))
+            .setAssetLoaderFactory(assetLoader(ctx, m))
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, result: ExportResult) {
                     Thread {
-                        val ok = runCatching { publish(ctx, m, tmp) }.onFailure { Log.w(TAG, "publish $id failed", it) }.isSuccess
-                        tmp.delete()
+                        val ok = runCatching { if (viaTemp) publish(ctx, m, out) else finishDirect(ctx, m, out) }
+                            .onFailure { Log.w(TAG, "publish $id failed", it) }.isSuccess
+                        if (viaTemp || !ok) out.delete()
                         main.post {
-                            if (ok) prefs(ctx).edit().putBoolean(id, true).apply()
+                            if (ok) { prefs(ctx).edit().putBoolean(id, true).apply(); Log.i(TAG, "$id saved to Movies/$folder") }
                             running = null; next(ctx)
                         }
                     }.start()
                 }
                 override fun onError(composition: Composition, result: ExportResult, e: ExportException) {
                     Log.w(TAG, "remux $id failed", e)
-                    tmp.delete(); running = null; next(ctx)
+                    out.delete(); running = null
+                    // Shared-folder write refused on this phone: once more through a temp file
+                    if (!viaTemp) { queue.addFirst(id); next(ctx, viaTemp = true) } else next(ctx)
                 }
             })
             .build()
-        transformer.start(d.request.toMediaItem(), tmp.absolutePath)
+        transformer.start(d.request.toMediaItem(), out.absolutePath)
+    }
+
+    /** Direct export done: give the video its real name, copy subtitles beside it, let galleries index it. */
+    private fun finishDirect(ctx: Context, m: DownloadMeta, part: File) {
+        val (folder, base) = place(m)
+        val dir = part.parentFile!!
+        val video = File(dir, "$base.mp4")
+        if (video.exists() && !video.delete()) deleteFromMediaStore(ctx, folder, "$base.mp4")
+        if (!part.renameTo(video)) { part.copyTo(video, overwrite = true); part.delete() }
+        val scan = mutableListOf(video.absolutePath)
+        subtitleFiles(m).forEach { (f, name) ->
+            // Android 11+ refuses non-video files in Movies by file path: MediaStore is the second try
+            runCatching { f.copyTo(File(dir, name), overwrite = true); scan += File(dir, name).absolutePath }
+                .recoverCatching { if (Build.VERSION.SDK_INT >= 29) write(ctx, folder, name, if (f.extension == "srt") "application/x-subrip" else "text/vtt", f) else throw it }
+                .onFailure { Log.w(TAG, "subtitle $name not copied: ${it.message}") }
+        }
+        android.media.MediaScannerConnection.scanFile(ctx, scan.toTypedArray(), null, null)
+    }
+
+    private fun deleteFromMediaStore(ctx: Context, folder: String, name: String) {
+        if (Build.VERSION.SDK_INT < 29) return
+        val r = ctx.contentResolver
+        val coll = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        runCatching {
+            r.query(coll, arrayOf(MediaStore.MediaColumns._ID), "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+                arrayOf("${Environment.DIRECTORY_MOVIES}/$folder/", name), null)?.use { c ->
+                while (c.moveToNext()) r.delete(android.content.ContentUris.withAppendedId(coll, c.getLong(0)), null, null)
+            }
+        }
+    }
+
+    /** Subtitle files of a download with the names they get beside the video ("Title S01E02.en.vtt"). */
+    private fun subtitleFiles(m: DownloadMeta): List<Pair<File, String>> {
+        val (_, base) = place(m)
+        val subs = (m.subtitles.orEmpty() + listOfNotNull(m.subtitle)).distinct().map(::File).filter { it.exists() }
+        return subs.mapIndexed { i, f ->
+            val lang = m.subtitleLangs?.getOrNull(m.subtitles.orEmpty().indexOf(f.path))?.takeIf { it.isNotBlank() }
+            val ext = f.extension.ifEmpty { "srt" }
+            val tag = lang ?: if (subs.size > 1) "$i" else null
+            f to (if (tag != null) "$base.$tag.$ext" else "$base.$ext")
+        }
     }
 
     /**
      * Reads the saved download (its stream keys keep it to the downloaded renditions) and, since
      * an MP4 carries one audio track here, keeps the language from Settings.
      */
-    private fun assetLoader(ctx: Context): androidx.media3.transformer.AssetLoader.Factory {
-        val lang = com.anees.novamobile.data.local.LocalStore.settings().audioLang.takeIf { it != "orig" }
+    private fun assetLoader(ctx: Context, m: DownloadMeta): androidx.media3.transformer.AssetLoader.Factory {
+        val lang = DownloadStarter.audioFor(m.card)?.takeIf { it != "orig" }   // the MP4 holds one audio track: your pick for this title, else the stream default
         return androidx.media3.transformer.DefaultAssetLoaderFactory(
             ctx,
             androidx.media3.transformer.DefaultDecoderFactory.Builder(ctx).build(),
@@ -124,12 +228,10 @@ object PublicExport {
     private fun publish(ctx: Context, m: DownloadMeta, video: File) {
         val (folder, base) = place(m)
         write(ctx, folder, "$base.mp4", "video/mp4", video)
-        val subs = (m.subtitles.orEmpty() + listOfNotNull(m.subtitle)).distinct().map(::File).filter { it.exists() }
-        subs.forEachIndexed { i, f ->
-            val lang = m.subtitleLangs?.getOrNull(m.subtitles.orEmpty().indexOf(f.path))?.takeIf { it.isNotBlank() }
-            val ext = f.extension.ifEmpty { "srt" }
-            val tag = lang ?: if (subs.size > 1) "$i" else null
-            write(ctx, folder, if (tag != null) "$base.$tag.$ext" else "$base.$ext", if (ext == "srt") "application/x-subrip" else "text/vtt", f)
+        // Video is safe now: a subtitle that can't be written must not make the whole export run again
+        subtitleFiles(m).forEach { (f, name) ->
+            runCatching { write(ctx, folder, name, if (f.extension == "srt") "application/x-subrip" else "text/vtt", f) }
+                .onFailure { Log.w(TAG, "subtitle $name not copied: ${it.message}") }
         }
     }
 

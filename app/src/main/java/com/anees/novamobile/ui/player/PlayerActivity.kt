@@ -64,7 +64,6 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import okhttp3.Dns
 import java.net.Inet6Address
-import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
@@ -148,6 +147,13 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private var inPip = false
     private var hudHide: Runnable? = null
     private var episodeLine = ""          // "S1 · E3  ·  Episode name", shown under the title with "ends 10:42 PM"
+    private lateinit var subOverlay: androidx.media3.ui.SubtitleView
+    private lateinit var subSync: SubtitleSync
+    /** Audio sync in ms (+ = sound later); kept for the whole session, applied to every new player. */
+    private var audioDelayMs = 0L
+    private var audioDelay: AudioDelay? = null
+    /** Subtitle files of the saved download being played, registered with [subSync] once the player exists. */
+    private var offlineSubFiles: List<Triple<String, String?, java.io.File>> = emptyList()
 
     private var streamJob: Job? = null
     private var tickJob: Job? = null
@@ -168,7 +174,6 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         private const val SETTLE_MS = 1_500L
         private const val UP_NEXT_MS = 10_000L
         private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
-        private val CLOCK = SimpleDateFormat("h:mm a", Locale.getDefault())
 
         fun launch(ctx: Context, card: MediaCard, season: Int = 0, episode: Int = 0) {
             ctx.startActivity(Intent(ctx, PlayerActivity::class.java).apply {
@@ -247,6 +252,10 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setScale(0.6f, 0.6f, 0.6f, 1f) })
             load(card.backdropUrl ?: card.posterUrl) { crossfade(300) }
         }
+        // Draws subtitles while a sync offset is set (see SubtitleSync); sits right above the video
+        subOverlay = androidx.media3.ui.SubtitleView(this).apply { visibility = View.GONE; isClickable = false; isFocusable = false }
+        root.addView(subOverlay, root.indexOfChild(playerView) + 1, FrameLayout.LayoutParams(-1, -1))
+        subSync = SubtitleSync(subOverlay, { playerView.subtitleView }, lifecycleScope)
         styleSubtitles()
         playerView.resizeMode = settings.resizeMode
         playerView.controllerShowTimeoutMs = 3500
@@ -289,6 +298,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         syncedWatched = false
         proxyLastResort = null
         qualityLastResort = null
+        offlineSubFiles = emptyList()
+        subSync.set(0)   // another episode, another subtitle file
         listOf(skipBtn, nextCard, retryBtn, pickSourceBtn, episodesBtn, nextEpBtn).forEach { it.visibility = View.GONE }
         closeDrawer()
         releasePlayer()
@@ -356,7 +367,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 if (proxyOnly(cachedLink)) continue
                 if (!qualityGate(cachedLink)) continue
                 if (!lacksWanted(cachedLink)) { usedCache = true; Log.i(TAG, "instant: cached link for ${p.name}"); play(cachedLink); return }
-                Log.i(TAG, "cached ${p.name} link has no ${wantedLang()}: racing dub sources first")
+                Log.i(TAG, "cached ${p.name} link is single-language: racing multi-audio sources first")
             }
             // A background search for exactly this may already be running (title page / Continue Watching)
             val inFlight = Prefetcher.claim(StreamExtractor.embedUrl(p, t))
@@ -368,7 +379,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                     if (proxyOnly(r)) continue
                     if (!qualityGate(r)) continue
                     if (!lacksWanted(r)) { Log.i(TAG, "instant: joined prefetch for ${p.name}"); usedCache = false; play(r); return }
-                    Log.i(TAG, "prefetched ${p.name} link has no ${wantedLang()}: racing dub sources first")
+                    Log.i(TAG, "prefetched ${p.name} link is single-language: racing multi-audio sources first")
                 }
             }
             // Up to 3 sources per wave, 4s apart: the stagger keeps a low-RAM device from opening
@@ -400,15 +411,19 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     /** Subtitle languages worth fetching: yours, then English. */
     private fun subLangs() = listOfNotNull(LocalStore.subtitleFor(key())?.takeIf { it != "off" }, "en")
 
-    private fun wantedLang() = LocalStore.audioFor(key()) ?: settings.audioLang
+    /** Audio language you picked in the menu for this title (no app-wide setting: the richest stream plays). */
+    private fun wantedLang(): String? = LocalStore.audioFor(key())?.takeIf { it != "orig" }
 
-    /** First search only: a ready link without your language waits for the dub race (the link stays cached). */
+    /**
+     * First search only: a ready link with a single language waits for the multi-audio race
+     * (the link stays cached), unless a recent search found no source with more.
+     */
     private suspend fun lacksWanted(s: WebStreamSniffer.Sniffed): Boolean {
-        val want = wantedLang()
-        if (want == "orig" || raced.isNotEmpty() || providers.none { it.multiAudio && it !in raced }) return false
-        if (LocalStore.noDub(key(), want)) return false   // searched lately and nobody had it
+        if (raced.isNotEmpty() || providers.none { it.multiAudio && it !in raced }) return false
+        if (LocalStore.noDub(key(), "multi")) return false   // searched lately and nobody had more
         val langs = AudioProbe.langs(s)
-        return langs.isNotEmpty() && want !in langs || langs.isEmpty() && want != "en"
+        val want = wantedLang()
+        return langs.size < 2 || (want != null && want !in langs)
     }
 
     /**
@@ -434,9 +449,11 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             if (!f.exists()) return@mapIndexedNotNull null
             val lang = langs?.getOrNull(i)?.takeIf { it.isNotBlank() } ?: if (i == 0) "en" else null
             MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(f)).setMimeType(MimeTypes.TEXT_VTT)
+                .setId("nsub:$i")
                 .setLanguage(lang)
                 .setLabel(lang?.let { Locale(it).displayLanguage } ?: "Subtitles ${i + 1}").build()
         }
+        offlineSubFiles = subs.mapIndexedNotNull { i, c -> c.id?.let { id -> Triple(id, c.label, java.io.File(c.uri.path ?: return@mapIndexedNotNull null)) } }
         offlineItem = d.request.toMediaItem().buildUpon()
             .setSubtitleConfigurations(subs)
             .setMediaMetadata(metadata())
@@ -481,22 +498,23 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             pending--
             if (r == null) { Log.i(TAG, "${p.name} gave nothing"); LocalStore.reportProvider(p.name, false); continue }
             found += p to r
-            val want = wantedLang()
             val now = SystemClock.elapsedRealtime()
-            // Dub pages (VidLux) often answer last: while nobody has your language, wait longer for them;
-            // once one has it, settle quickly
-            if (deadline == 0L) { deadline = now + if (want == "orig") COLLECT_MS else DUB_WAIT_MS; showStatus("Checking languages…") }
-            if (want != "orig" && want in AudioProbe.langs(r)) deadline = minOf(deadline, now + SETTLE_MS)
+            // Multi-audio pages (VidLux) often answer last: while every answer has one language, wait
+            // longer for them; once a stream has several, give the rest a short moment to beat it
+            if (deadline == 0L) { deadline = now + DUB_WAIT_MS; showStatus("Checking languages…") }
+            val langs = AudioProbe.langs(r)
+            val want = wantedLang()
+            if (langs.size >= 2 && (want == null || want in langs)) deadline = minOf(deadline, now + COLLECT_MS)
         }
         jobs.forEach { it.cancel() }
         if (found.isEmpty()) return@coroutineScope null
         found.forEach { (p, r) -> StreamExtractor.remember(p, t, r) }
         val probed = found.map { (p, r) -> async { Triple(p, r, AudioProbe.langs(r)) } }.awaitAll()
         addLangSources(probed)
-        val want = LocalStore.audioFor(key()) ?: settings.audioLang
-        val best = probed.maxByOrNull { AudioProbe.score(it.third, want) }!!
-        // No source had your language: next plays of this title start from the saved link right away
-        if (want != "orig" && want !in best.third) LocalStore.setNoDub(key(), want)
+        // Most languages wins (your pick for this title first, if you made one)
+        val best = probed.maxByOrNull { AudioProbe.score(it.third, wantedLang() ?: "orig") }!!
+        // Nobody had more than one language: next plays of this title start from the saved link right away
+        if (best.third.size < 2) LocalStore.setNoDub(key(), "multi")
         Log.i(TAG, "languages: ${probed.joinToString { "${it.first.name}=${it.third}" }} → ${best.first.name}")
         best.first to best.second
     }
@@ -547,9 +565,9 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private suspend fun searchOne(t: StreamExtractor.Target, p: StreamExtractor.Provider): WebStreamSniffer.Sniffed? {
         StreamExtractor.cached(p, t)?.let { return it }   // already found: answers the race at once
         val resolver = p.resolver
-        if (resolver != null) return withTimeoutOrNull(p.timeoutMs) { resolver.invoke(t) }
+        if (resolver != null) return withTimeoutOrNull(p.timeoutMs) { runCatching { resolver.invoke(t) }.onFailure { if (it is CancellationException) throw it; Log.w(TAG, "${p.name} failed: ${it.message}") }.getOrNull() }
         val sn = WebStreamSniffer(this@PlayerActivity, root).also { sniffers += it }
-        return try { sn.sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs) } finally { sniffers -= sn }
+        return try { sn.sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs) } catch (e: CancellationException) { throw e } catch (e: Exception) { Log.w(TAG, "${p.name} page failed: ${e.message}"); null } finally { sniffers -= sn }
     }
 
     /**
@@ -572,6 +590,14 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     /** Player error / stall: re-sniff once if the link was cached, else move on. */
     private fun fallback(reason: String) {
         Log.w(TAG, "source failed: $reason")
+        // Saved download broken or gone: stream it instead (once), never replay the broken file
+        if (offlineItem != null) {
+            offlineItem = null
+            usedCache = false
+            showStatus("Downloaded copy didn't play · streaming instead")
+            switchSource(0)
+            return
+        }
         // Direct-to-origin refused: remember that server, keep this link as a last resort (its proxy
         // is slow), and move on to the next source first
         val failed = current
@@ -586,11 +612,11 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             if (!usedCache) { LocalStore.reportProvider(p.name, false); providerIndex++ }
             // Another stream found for this episode beats a new search
             langSources.removeAll { it.first == p }
-            val want = LocalStore.audioFor(key()) ?: settings.audioLang
-            langSources.maxByOrNull { AudioProbe.score(it.third, want) }?.let { (np, ns, ls) ->
+            val want = wantedLang()
+            langSources.maxByOrNull { AudioProbe.score(it.third, want ?: "orig") }?.let { (np, ns, ls) ->
                 Log.i(TAG, "trying ${np.name}, already found for this episode")
                 switchTo(np, ns)
-                if (want != "orig" && want !in ls)   // say why the dub is gone instead of switching silently
+                if (want != null && want !in ls)   // say why the language is gone instead of switching silently
                     showStatus("${com.anees.novamobile.data.model.LangTags.name(want) ?: want} source failed · trying ${sourceLabel(np)}")
                 return
             }
@@ -679,12 +705,14 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val subs = own.mapIndexed { i, url ->
             MediaItem.SubtitleConfiguration.Builder(SubtitleCleaner.wrap(url))
                 .setMimeType(MimeTypes.TEXT_VTT)   // the cleaner turns SubRip into WebVTT
+                .setId("nsub:$i")
                 .setLanguage(ownLangs[i])
                 .setLabel(subLabel(url, i))
                 .build()
-        } + extra.map { sub ->
+        } + extra.mapIndexed { i, sub ->
             MediaItem.SubtitleConfiguration.Builder(SubtitleCleaner.wrap(sub.url))
                 .setMimeType(MimeTypes.TEXT_VTT)
+                .setId("nsub:x$i")
                 .setLanguage(sub.lang)
                 .setLabel("${Locale(sub.lang).displayLanguage} · OpenSubtitles")
                 .build()
@@ -715,7 +743,16 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             .apply { LocalStore.lastBandwidth().takeIf { it > 0 }?.let { setInitialBitrateEstimate(it) } }
             .build()
         bandwidthMeter = meter
-        val renderers = androidx.media3.exoplayer.DefaultRenderersFactory(this).setEnableDecoderFallback(true)
+        // Audio sync: a processor in the audio sink shifts the sound against the picture
+        val delay = AudioDelay().also { it.delayMs = audioDelayMs; audioDelay = it }
+        val renderers = object : androidx.media3.exoplayer.DefaultRenderersFactory(this) {
+            override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean) =
+                androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(arrayOf(delay))
+                    .build()
+        }.setEnableDecoderFallback(true)
         val exo = ExoPlayer.Builder(this, renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
             .setLoadControl(loadControl)
@@ -728,6 +765,13 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         player = exo
         audioPicked = false
         playerView.player = exo
+        subSync.attach(exo)
+        if (offlineItem != null) offlineSubFiles.forEach { (id, label, f) -> subSync.register(id, label, { f }) }
+        else {
+            val subHeaders = s.headers + ("User-Agent" to s.userAgent)
+            own.forEachIndexed { i, url -> subSync.register("nsub:$i", subLabel(url, i)) { SubtitleCleaner.cleaned(this, url, client, subHeaders) } }
+            extra.forEachIndexed { i, sub -> subSync.register("nsub:x$i", "${Locale(sub.lang).displayLanguage} · OpenSubtitles") { SubtitleCleaner.cleaned(this, sub.url, client, emptyMap()) } }
+        }
         // Headset buttons, Bluetooth, Android's media controls (also in picture-in-picture)
         session = runCatching { MediaSession.Builder(this, exo).setId("nova-${SystemClock.elapsedRealtimeNanos()}").build() }.getOrNull()
         applyTrackPrefs(exo)
@@ -765,6 +809,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 }
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) = updatePip()
+            override fun onCues(cueGroup: androidx.media3.common.text.CueGroup) = subSync.onCues(cueGroup)
             override fun onVideoSizeChanged(videoSize: VideoSize) { updatePip(); updateQualityLabel() }
             override fun onPlayerError(error: PlaybackException) {
                 (error.cause as? androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException)?.let {
@@ -775,7 +820,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             override fun onTracksChanged(tracks: Tracks) {
                 updateQualityLabel()
                 val audio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
-                fun langOf(f: Format) = f.language?.take(2)?.takeIf { it != "un" } ?: com.anees.novamobile.data.model.LangTags.code(f.label)
+                fun langOf(f: Format) = com.anees.novamobile.data.model.LangTags.norm(f.language) ?: com.anees.novamobile.data.model.LangTags.code(f.label)
                 // Remember real audio languages so cards can be tagged "Hindi · English"
                 val langs = audio.flatMap { g -> (0 until g.length).mapNotNull { langOf(g.getTrackFormat(it)) } }.distinct()
                 if (langs.isNotEmpty()) LocalStore.setAudioLangs(key(), langs)
@@ -783,8 +828,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 // Sources like VidLux name tracks ("Hindi") without a language code, so match by name once
                 if (audioPicked || audio.isEmpty()) return
                 audioPicked = true
-                val want = LocalStore.audioFor(key()) ?: settings.audioLang
-                if (want == "orig") return
+                val want = wantedLang() ?: return   // nothing picked for this title: the stream's default track
                 val selected = audio.firstOrNull { it.isSelected }?.let { g -> (0 until g.length).firstOrNull { g.isTrackSelected(it) }?.let { langOf(g.getTrackFormat(it)) } }
                 if (selected == want) return
                 for (g in audio) for (i in 0 until g.length) {
@@ -811,14 +855,14 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         Log.i(TAG, if (offlineItem != null) "playing saved download" else "playing via ${providers.getOrNull(providerIndex)?.name}, subs=${subs.size}")
     }
 
-    /** Audio language from Settings (or what was picked for this title), subtitles, quality cap, low-CPU mode. */
+    /** Audio language picked for this title (if any), subtitles, quality cap, low-CPU mode. */
     private fun applyTrackPrefs(exo: ExoPlayer) {
-        val lang = LocalStore.audioFor(key()) ?: settings.audioLang
+        val lang = wantedLang()
         val sub = LocalStore.subtitleFor(key())
         val subsOn = if (sub != null) sub != "off" else settings.subtitlesOn
         val cap = settings.maxQuality
         exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-            .apply { if (lang != "orig") setPreferredAudioLanguages(lang, "en") }
+            .apply { if (lang != null) setPreferredAudioLanguages(lang) }
             .setPreferredTextLanguage(sub?.takeIf { it != "off" } ?: "en")
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subsOn)
             .setMaxVideoSize(cap * 16 / 9, cap)   // a 4K stream would stutter a weak device unless allowed
@@ -841,12 +885,12 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     }
 
     private fun styleSubtitles() {
-        playerView.subtitleView?.apply {
+        listOfNotNull(playerView.subtitleView, subOverlay).forEach { it.apply {
             setStyle(CaptionStyleCompat(Color.WHITE, Color.TRANSPARENT, Color.TRANSPARENT,
                 CaptionStyleCompat.EDGE_TYPE_OUTLINE, Color.BLACK, null))
             setFractionalTextSize(when (settings.subtitleSize) { 0 -> 0.045f; 2 -> 0.072f; else -> 0.056f })
             setBottomPaddingFraction(0.08f)
-        }
+        } }
     }
 
     /** Switch the display to a refresh rate that fits the film (e.g. 24Hz) to remove judder. */
@@ -905,7 +949,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             skipBtn.animate().translationY(lift).setDuration(200).start()
             nextCard.animate().translationY(lift).setDuration(200).start()
             // Subtitles move up out of the way of the time bar while controls show
-            playerView.subtitleView?.setBottomPaddingFraction(if (v == View.VISIBLE) 0.2f else 0.08f)
+            listOfNotNull(playerView.subtitleView, subOverlay).forEach { it.setBottomPaddingFraction(if (v == View.VISIBLE) 0.2f else 0.08f) }
             if (v == View.VISIBLE) updateTimes()
         })
     }
@@ -947,7 +991,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             else -> ""
         }
         timeRemaining.text = "-${fmt(remaining)}"
-        val ends = "ends ${CLOCK.format(Date(System.currentTimeMillis() + remaining))}$sleep"
+        val ends = "ends ${android.text.format.DateFormat.getTimeFormat(this).format(Date(System.currentTimeMillis() + remaining))}$sleep"   // follows the phone's 12/24-hour setting
         topSub.text = if (episodeLine.isNotEmpty()) "$episodeLine  ·  $ends" else ends
     }
 
@@ -1155,7 +1199,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             playerView.hideController()
             listOf(hud, skipBtn, nextCard, seekLeft, seekRight, unlockBtn).forEach { it.visibility = View.GONE }
             closeDrawer()
-            playerView.subtitleView?.setFractionalTextSize(0.08f)
+            listOfNotNull(playerView.subtitleView, subOverlay).forEach { it.setFractionalTextSize(0.08f) }
         } else {
             styleSubtitles()
             // PiP window closed with ✕: the activity is already stopped
@@ -1252,11 +1296,16 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         startEpisode(next.first, next.second)
     }
 
+    /** Watched download: auto-delete / queue the next ones, only once the player stops reading the file. */
+    private fun finishOfflineIfWatched() {
+        val p = player ?: return
+        if (offlineItem != null && p.duration > 0 && p.currentPosition > p.duration * 0.95)
+            com.anees.novamobile.download.SmartDownloads.onWatched(this, card, season, episode)
+    }
+
     private fun saveProgress() {
         val p = player ?: return
         if (p.duration <= 0) return
-        if (offlineItem != null && p.currentPosition > p.duration * 0.95)
-            com.anees.novamobile.download.SmartDownloads.onWatched(this, card, season, episode)
         LocalStore.saveProgress(HistoryEntry(card, season, episode, p.currentPosition, p.duration))
         LocalStore.setEpisodeProgress(key(), season, episode, p.currentPosition.toFloat() / p.duration)
         if (!syncedWatched && p.currentPosition > p.duration * 0.9) { syncedWatched = true; com.anees.novamobile.sync.Sync.watched(card, season, episode) }
@@ -1293,14 +1342,14 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 items += ActionSheet.Item(trackName(f, "Track ${i + 1}"), checked = g.isTrackSelected(i)) {
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
-                    (f.language?.take(2)?.takeIf { it != "un" } ?: com.anees.novamobile.data.model.LangTags.code(f.label))
+                    (com.anees.novamobile.data.model.LangTags.norm(f.language) ?: com.anees.novamobile.data.model.LangTags.code(f.label))
                         ?.let { LocalStore.setAudioFor(key(), it) }   // remembered for the next episode
                 }
             }
         }
         // Languages only other found sources have: picking one switches source at the same second
         val have = audio.flatMap { g -> (0 until g.length).mapNotNull { i -> val f = g.getTrackFormat(i)
-            f.language?.take(2)?.takeIf { it != "un" } ?: com.anees.novamobile.data.model.LangTags.code(f.label) } }.toSet()
+            com.anees.novamobile.data.model.LangTags.norm(f.language) ?: com.anees.novamobile.data.model.LangTags.code(f.label) } }.toSet()
         val cur = providers.getOrNull(providerIndex)
         val extra = langSources.filter { it.first != cur }
             .flatMap { (p, s, ls) -> ls.map { Triple(it, p, s) } }
@@ -1327,11 +1376,14 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                     exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                         .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
-                    LocalStore.setSubtitleFor(key(), f.language?.take(2) ?: "en")
+                    LocalStore.setSubtitleFor(key(), com.anees.novamobile.data.model.LangTags.norm(f.language) ?: "en")
                     rememberSubsOn(true)
                 }
             }
         }
+        items += ActionSheet.Item("Sync", header = true)
+        items += ActionSheet.Item("Subtitle timing  ·  ${syncLabel(subSync.offsetMs)}") { syncSheet(subtitles = true) }
+        items += ActionSheet.Item("Audio timing  ·  ${syncLabel(audioDelayMs)}") { syncSheet(subtitles = false) }
         items += ActionSheet.Item("Subtitle size", header = true)
         listOf("Small", "Medium", "Large").forEachIndexed { i, label ->
             items += ActionSheet.Item(label, checked = settings.subtitleSize == i) {
@@ -1341,6 +1393,42 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             }
         }
         ActionSheet.show(this, "Audio & Subtitles", items)
+    }
+
+    private fun syncLabel(ms: Long) = when {
+        ms == 0L -> "in sync"
+        ms > 0 -> "+%.1fs later".format(ms / 1000f)
+        else -> "%.1fs earlier".format(ms / 1000f)
+    }
+
+    /**
+     * Stepper sheet for subtitle or audio timing: each tap moves it and reopens the sheet,
+     * so you can nudge until words match lips. Playback keeps going underneath.
+     */
+    private fun syncSheet(subtitles: Boolean) {
+        val cur = if (subtitles) subSync.offsetMs else audioDelayMs
+        fun apply(ms: Long) {
+            val v = ms.coerceIn(-10_000, 10_000)
+            if (subtitles) subSync.set(v) else { audioDelayMs = v; audioDelay?.delayMs = v }
+            hud(if (subtitles) R.drawable.ic_subtitles else R.drawable.ic_volume,
+                "${if (subtitles) "Subtitles" else "Audio"} ${syncLabel(v)}", null)
+            scheduleHudHide(1200)
+            syncSheet(subtitles)
+        }
+        val steps = listOf(-1000L to "−1s", -250L to "−0.25s", -50L to "−0.05s", 50L to "+0.05s", 250L to "+0.25s", 1000L to "+1s")
+        val what = if (subtitles) "Subtitles" else "Sound"
+        val items = mutableListOf<ActionSheet.Item>()
+        items += ActionSheet.Item("Show earlier", header = true)
+        steps.filter { it.first < 0 }.forEach { (d, l) -> items += ActionSheet.Item("$what $l") { apply(cur + d) } }
+        items += ActionSheet.Item("Show later", header = true)
+        steps.filter { it.first > 0 }.forEach { (d, l) -> items += ActionSheet.Item("$what $l") { apply(cur + d) } }
+        if (cur != 0L) items += ActionSheet.Item("Reset to in sync") { apply(0) }
+        val note = when {
+            subtitles && subSync.laterOnly() -> "This subtitle is inside the stream: it can only move later."
+            subtitles -> "Words appear before the speech? Tap Later. After it? Tap Earlier. Resets on the next episode."
+            else -> "Voices before lips move? Tap Later. After? Tap Earlier. Kept for this session."
+        }
+        ActionSheet.show(this, "${if (subtitles) "Subtitle" else "Audio"} timing  ·  ${syncLabel(cur)}", items, subtitle = note)
     }
 
     private fun qualitySheet() {
@@ -1484,6 +1572,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         SubtitleCleaner.langOf(url)?.let { Locale(it).displayLanguage } ?: if (i == 0) "English" else "Subtitles ${i + 1}"
 
     private fun releasePlayer() {
+        finishOfflineIfWatched()
         bandwidthMeter?.bitrateEstimate?.takeIf { it > 300_000 }?.let { LocalStore.setLastBandwidth(it) }
         session?.release()
         session = null
@@ -1523,6 +1612,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     override fun onDestroy() {
         super.onDestroy()
         runCatching { unregisterReceiver(pipReceiver) }
+        subSync.set(0)
         streamJob?.cancel()
         sniffers.toList().forEach { it.release() }
         Prefetcher.cancel()

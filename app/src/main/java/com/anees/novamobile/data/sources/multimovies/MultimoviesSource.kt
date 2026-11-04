@@ -153,7 +153,13 @@ object MultimoviesSource {
         val jobs = servers.take(10).map { s ->
             async { withTimeoutOrNull(EXTRACT_BUDGET_MS) { runCatching { extractOne(s, pageUrl) }.getOrNull() } }
         }
-        jobs.awaitAll().filterNotNull().minByOrNull { priority(it) }
+        val found = jobs.awaitAll().filterNotNull()
+        if (found.size <= 1) return@coroutineScope found.firstOrNull()
+        // Servers of one page often differ in audio (Hindi-only vs Hindi + English): most languages wins,
+        // the known-good hosts break ties
+        val langs = found.map { f -> async { f to com.anees.novamobile.ui.player.AudioProbe.langs(WebStreamSniffer.Sniffed(f.url, mapOf("Referer" to f.referer), VmHttp.UA, emptyList())).size } }.awaitAll()
+        Log.i(TAG, "multimovies servers: ${langs.joinToString { "${it.first.server}=${it.second}" }}")
+        langs.sortedWith(compareByDescending<Pair<Found, Int>> { it.second }.thenBy { priority(it.first) }).first().first
     }
 
     private fun priority(f: Found): Int = when {

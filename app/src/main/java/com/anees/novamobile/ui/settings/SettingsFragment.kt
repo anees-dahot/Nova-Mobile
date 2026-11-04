@@ -53,11 +53,7 @@ class SettingsFragment : Fragment(), TabPage {
             setOnClickListener { parentFragmentManager.popBackStack() }
         })
         val s = LocalStore.settings()
-        val langs = listOf("hi" to "Hindi", "en" to "English", "ur" to "Urdu", "orig" to "Original")
         header("Playback")
-        row("Audio Language", langs.first { it.first == s.audioLang }.second) {
-            pick("Audio Language", langs.map { it.second }, langs.indexOfFirst { it.first == s.audioLang }) { i -> save(s.copy(audioLang = langs[i].first)) }
-        }
         row("Subtitles", if (s.subtitlesOn) "On" else "Off") { save(s.copy(subtitlesOn = !s.subtitlesOn)) }
         val sizes = listOf("Small", "Medium", "Large")
         row("Subtitle Size", sizes[s.subtitleSize]) { pick("Subtitle Size", sizes, s.subtitleSize) { save(s.copy(subtitleSize = it)) } }
@@ -104,8 +100,6 @@ class SettingsFragment : Fragment(), TabPage {
         row("Wi-Fi Only", if (s.dlWifiOnly) "On" else "Off") { saveDl(s.copy(dlWifiOnly = !s.dlWifiOnly)) }
         row("Downloads at Once", s.dlParallel.toString()) { pick("Downloads at Once", listOf("1", "2", "3"), s.dlParallel - 1) { saveDl(s.copy(dlParallel = it + 1)) } }
         row("Ask Quality Each Time", if (s.dlAskQuality) "On" else "Off") { save(s.copy(dlAskQuality = !s.dlAskQuality)) }
-        row("Audio Languages", if (s.dlAudioAll) "All" else "Preferred + English") { save(s.copy(dlAudioAll = !s.dlAudioAll)) }
-        note("Keeping only your language and English makes multi-audio downloads smaller.")
         row("Smart Downloads", if (s.smartDownloads) "On" else "Off") { save(s.copy(smartDownloads = !s.smartDownloads)) }
         if (s.smartDownloads) row("Keep Next Episodes Ready", s.keepNext.toString()) {
             pick("Keep Next Episodes Ready", listOf("1", "2", "3"), s.keepNext - 1) { save(s.copy(keepNext = it + 1)) }

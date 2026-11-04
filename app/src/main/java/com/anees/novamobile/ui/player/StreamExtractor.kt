@@ -85,6 +85,10 @@ object StreamExtractor {
         Provider("AnimeWorld", { "animeworld://movie/$it" }, { id, s, e -> "animeworld://tv/$id/$s/$e" },
             timeoutMs = 25_000, multiAudio = true,
             resolver = { t -> com.anees.novamobile.data.sources.anime.ToroAnimeSource.animeWorld.resolve(t) }),
+        // One HLS with many dubs (Frieren: Hindi, Tamil, English, Japanese, German, Spanish, French)
+        Provider("AniZone", { "anizone://movie/$it" }, { id, s, e -> "anizone://tv/$id/$s/$e" },
+            timeoutMs = 20_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.anime.AniZoneSource.resolve(t) }),
         // Castle app API: one HLS per dub (Hindi, Tamil, Telugu, English, Japanese…), 720p+
         Provider("CastleTV", { "castletv://movie/$it" }, { id, s, e -> "castletv://tv/$id/$s/$e" },
             timeoutMs = 25_000, multiAudio = true,
@@ -103,8 +107,23 @@ object StreamExtractor {
             resolver = { t -> com.anees.novamobile.data.sources.anime.ZokoAnimeSource.resolve(t) }),
     )
 
-    /** Remote list (sources.json in the GitHub repo) if available, else the built-in one + resolvers. */
-    val PROVIDERS: List<Provider> get() = (remote() ?: BUILT_IN) + RESOLVERS
+    /**
+     * Embed pages added Nov 2026 (from the Nuvio provider lists), always on: unlike [BUILT_IN] they
+     * aren't replaced by sources.json (a remote entry with the same name wins).
+     */
+    val EXTRA_EMBEDS = listOf(
+        // JW Player page by TMDB id; English + Hindi
+        Provider("XPass", { "https://play.xpass.top/e/movie/$it" }, { id, s, e -> "https://play.xpass.top/e/tv/$id/$s/$e" }, 20_000, multiAudio = true),
+        // Token-signed HLS, often several audio languages
+        Provider("VixSrc", { "https://vixsrc.to/movie/$it" }, { id, s, e -> "https://vixsrc.to/tv/$id/$s/$e" }, 20_000, multiAudio = true),
+        Provider("VidRock", { "https://vidrock.net/movie/$it" }, { id, s, e -> "https://vidrock.net/tv/$id/$s/$e" }, 20_000),
+    )
+
+    /** Remote list (sources.json in the GitHub repo) if available, else the built-in one; then extra embeds + resolvers. */
+    val PROVIDERS: List<Provider> get() {
+        val base = remote() ?: BUILT_IN
+        return base + EXTRA_EMBEDS.filter { e -> base.none { it.name == e.name } } + RESOLVERS
+    }
 
     private var remoteCache: Pair<String, List<Provider>>? = null
 

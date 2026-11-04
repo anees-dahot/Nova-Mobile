@@ -26,7 +26,9 @@ object AudioProbe {
     /** Two-letter codes, or empty when the manifest can't tell (single muxed track, mp4, error). */
     suspend fun langs(s: WebStreamSniffer.Sniffed): List<String> {
         synchronized(cache) { cache[s.url] }?.let { return it }
-        val r = withTimeoutOrNull(4_000) { withContext(Dispatchers.IO) { read(s) } } ?: emptyList()
+        val read = withTimeoutOrNull(4_000) { withContext(Dispatchers.IO) { read(s) } } ?: emptyList()
+        // The manifest can't tell (single muxed track): trust the language the source declared
+        val r = read.ifEmpty { listOfNotNull(s.audioLang) }
         synchronized(cache) { cache[s.url] = r }
         return r
     }

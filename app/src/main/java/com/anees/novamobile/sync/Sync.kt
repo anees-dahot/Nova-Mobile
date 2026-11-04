@@ -108,7 +108,7 @@ object Sync {
 object TraktSync : SyncService {
     override val name = "Trakt"
     private const val API = "https://api.trakt.tv"
-    override val configured get() = BuildConfig.TRAKT_ID.isNotEmpty() && BuildConfig.TRAKT_SECRET.isNotEmpty()
+    override val configured get() = BuildConfig.TRAKT_ID.isNotEmpty()   // PKCE-only apps get no secret; device flow works without it
     override fun loggedIn() = LocalStore.syncToken("trakt") != null
     override fun logout() = LocalStore.setSyncToken("trakt", null)
 
@@ -126,7 +126,8 @@ object TraktSync : SyncService {
         while (isActive && System.currentTimeMillis() < deadline) {
             delay(o.optLong("interval", 5) * 1000)
             val (c, b) = Sync.http(req("/oauth/device/token").post(Sync.json(JSONObject()
-                .put("code", o.getString("device_code")).put("client_id", BuildConfig.TRAKT_ID).put("client_secret", BuildConfig.TRAKT_SECRET))).build())
+                .put("code", o.getString("device_code")).put("client_id", BuildConfig.TRAKT_ID)
+                .apply { if (BuildConfig.TRAKT_SECRET.isNotEmpty()) put("client_secret", BuildConfig.TRAKT_SECRET) })).build())
             if (c == 200) { LocalStore.setSyncToken("trakt", JSONObject(b).getString("access_token")); withContext(Dispatchers.Main) { done(true) }; return@launch }
             if (c == 404 || c == 409 || c == 410 || c == 418) break
         }

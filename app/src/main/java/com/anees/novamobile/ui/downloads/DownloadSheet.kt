@@ -212,7 +212,8 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
                 val names = pr.langs.mapNotNull { LangTags.name(it) }
                 val audio = if (names.isEmpty()) "Audio not labelled" else names.joinToString(" · ")
                 val q = if (pr.height > 0) "  ·  ${pr.height}p" else ""
-                val r = row(pr.provider, pr.provider, audio + q, highlight = pr.langs.size >= 2)
+                val title = pr.provider.split('#').let { parts -> if (parts.size > 1) "${parts[0]}  ·  ${LangTags.name(parts[1]) ?: parts[1]} dub" else parts[0] }
+                val r = row(pr.provider, title, audio + q, highlight = pr.langs.size >= 2)
                 rows += pr.provider to r
                 // Richest in languages floats to the top
                 val at = 1 + counts.count { it >= pr.langs.size }

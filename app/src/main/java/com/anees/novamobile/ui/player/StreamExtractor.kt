@@ -22,8 +22,11 @@ object StreamExtractor {
                          * Search-based source (Vegamovies-style): finds the stream over plain HTTP from
                          * title + season/episode, so [movie]/[tv] are only its cache key, not a real page.
                          */
-                        val resolver: (suspend (Target) -> WebStreamSniffer.Sniffed?)? = null) {
-        val isEmbed get() = resolver == null
+                        val resolver: (suspend (Target) -> WebStreamSniffer.Sniffed?)? = null,
+                        /** Site that only lists player pages (Toonstream): finds the page, the WebView sniffs it. */
+                        val page: (suspend (Target) -> String?)? = null) {
+        /** A fixed embed page (prefetchable); page and resolver sources aren't. */
+        val isEmbed get() = resolver == null && page == null
     }
 
     /** What to ask providers for: a TMDB id (movie or tv episode) plus the title, so
@@ -82,6 +85,18 @@ object StreamExtractor {
         Provider("AnimeWorld", { "animeworld://movie/$it" }, { id, s, e -> "animeworld://tv/$id/$s/$e" },
             timeoutMs = 25_000, multiAudio = true,
             resolver = { t -> com.anees.novamobile.data.sources.anime.ToroAnimeSource.animeWorld.resolve(t) }),
+        // Castle app API: one HLS per dub (Hindi, Tamil, Telugu, English, Japanese…), 720p+
+        Provider("CastleTV", { "castletv://movie/$it" }, { id, s, e -> "castletv://tv/$id/$s/$e" },
+            timeoutMs = 25_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.castle.CastleTvSource.resolve(t) }),
+        // Anime/cartoons with every Indian dub in one stream; player pages sniffed by the WebView
+        Provider("Toonstream", { "toonstream://movie/$it" }, { id, s, e -> "toonstream://tv/$id/$s/$e" },
+            timeoutMs = 30_000, multiAudio = true,
+            page = { t -> com.anees.novamobile.data.sources.toon.ToonstreamSource.page(t) }),
+        // MovieBox: original + separate dub entries (lots of Hindi), MP4 mostly 480p: a fallback
+        Provider("MovieBox", { "moviebox://movie/$it" }, { id, s, e -> "moviebox://tv/$id/$s/$e" },
+            timeoutMs = 25_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.castle.MovieBoxSource.resolve(t) }),
         // HiAnime's player: MAL id + episode → 1080p sub/dub HLS, new episodes fast
         Provider("ZokoAnime", { "zokoanime://movie/$it" }, { id, s, e -> "zokoanime://tv/$id/$s/$e" },
             timeoutMs = 15_000,
@@ -147,8 +162,12 @@ object StreamExtractor {
         }
     }
 
-    fun remember(p: Provider, t: Target, s: WebStreamSniffer.Sniffed) {
+    fun remember(p: Provider, t: Target, s0: WebStreamSniffer.Sniffed) {
         val key = embedUrl(p, t)
+        // Playing one language variant: keep the others with it (it becomes the primary)
+        val prev = cache[key]?.second
+        val s = if (s0.variants == null && prev?.variants != null && prev.withVariants().any { it.url == s0.url })
+            s0.copy(variants = prev.withVariants().filter { it.url != s0.url }) else s0
         cache[key] = System.currentTimeMillis() to s
         com.anees.novamobile.data.local.LocalStore.saveStream(key, gson.toJson(s))
     }
@@ -166,6 +185,20 @@ object StreamExtractor {
     fun unwrapProxy(uri: android.net.Uri): android.net.Uri {
         if (uri.path?.contains("robot-proxy") != true) return uri
         return uri.getQueryParameter("url")?.let { android.net.Uri.parse(it) } ?: uri
+    }
+
+    /** Download sheet picks like "CastleTV#hi": the provider name and the language variant wanted. */
+    fun splitPick(pick: String): Pair<String, String?> = pick.substringBefore('#') to pick.substringAfter('#', "").ifBlank { null }
+
+    /** The stream in [lang] among [s] and its variants. */
+    fun variant(s: WebStreamSniffer.Sniffed, lang: String?): WebStreamSniffer.Sniffed? =
+        if (lang == null) s else s.withVariants().firstOrNull { it.audioLang == lang }
+
+    /** The page the WebView sniffs: found by the source's [Provider.page] search, else its fixed embed URL. */
+    suspend fun sniffUrl(p: Provider, t: Target): String? = when {
+        p.resolver != null -> null   // its movie/tv URLs are cache keys, not pages: never load them in the WebView
+        p.page != null -> runCatching { p.page.invoke(t) }.getOrNull()
+        else -> embedUrl(p, t)
     }
 
     fun embedUrl(p: Provider, t: Target) = if (t.isMovie) p.movie(t.tmdbId) else p.tv(t.tmdbId, t.season, t.episode)

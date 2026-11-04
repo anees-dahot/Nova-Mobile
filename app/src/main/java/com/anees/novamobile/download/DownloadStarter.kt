@@ -70,12 +70,17 @@ object DownloadStarter {
             launch {
                 delay(wait)
                 val r = cached ?: withTimeoutOrNull(p.timeoutMs) {
-                    runCatching { p.resolver?.invoke(t) ?: WebStreamSniffer(ctx, host!!).sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs) }.getOrNull()
+                    runCatching { p.resolver?.invoke(t) ?: StreamExtractor.sniffUrl(p, t)?.let { WebStreamSniffer(ctx, host!!).sniff(it, p.timeoutMs) } }.getOrNull()
                 } ?: return@launch
                 StreamExtractor.remember(p, t, r)
-                val langs = AudioProbe.langs(r)
-                val h = runCatching { com.anees.novamobile.ui.player.QualityGate.maxHeightAsync(r) }.getOrDefault(-1)
-                send(Probe(p.name, langs, h))
+                // Per-language streams (CastleTV, MovieBox) each get their own row: "CastleTV#hi"
+                r.withVariants().forEachIndexed { i, v ->
+                    launch {
+                        val langs = AudioProbe.langs(v)
+                        val h = runCatching { com.anees.novamobile.ui.player.QualityGate.maxHeightAsync(v) }.getOrDefault(-1)
+                        send(Probe(if (i == 0 || v.audioLang == null) p.name else "${p.name}#${v.audioLang}", langs, h))
+                    }
+                }
             }
         }
     }
@@ -144,7 +149,8 @@ object DownloadStarter {
         val target = StreamExtractor.resolveTarget(item.card, item.season, item.episode, repo) ?: return false
         val sources = StreamExtractor.ordered().filter { it.name != item.skipProvider }
         // Your pick from the sheet first; else ask every multi-audio resolver at once and save the stream with the most real languages
-        val picked = item.provider?.let { n -> sources.firstOrNull { it.name == n } }
+        val (pickName, pickLang) = item.provider?.let { StreamExtractor.splitPick(it) } ?: (null to null)
+        val picked = pickName?.let { n -> sources.firstOrNull { it.name == n } }
         val richest = if (picked != null) null else richest(ctx, sources, target)
         val first = picked ?: richest?.first
         for (p in listOfNotNull(first) + sources.filter { it != first }) {
@@ -153,17 +159,19 @@ object DownloadStarter {
             val sniffed = richest?.takeIf { it.first == p }?.second ?: StreamExtractor.cached(p, target)
                 ?: runCatching {
                     if (p.resolver != null) withTimeoutOrNull(p.timeoutMs) { p.resolver.invoke(target) }
-                    else WebStreamSniffer(ctx, host!!).sniff(StreamExtractor.embedUrl(p, target), p.timeoutMs)
+                    else StreamExtractor.sniffUrl(p, target)?.let { WebStreamSniffer(ctx, host!!).sniff(it, p.timeoutMs) }
                 }.onFailure { if (it is CancellationException) throw it; Log.w(TAG, "${p.name} failed: ${it.message}") }.getOrNull()
                 ?: continue
             StreamExtractor.remember(p, target, sniffed)
-            rememberHeaders(sniffed)
+            // A language variant picked in the sheet ("CastleTV#hi"), else the stream itself
+            val chosen = (if (p == picked) StreamExtractor.variant(sniffed, pickLang) else null) ?: sniffed
+            rememberHeaders(chosen)
             // Every subtitle the source offers, cleaned of ads
             val saved = withContext(Dispatchers.IO) {
                 val dir = File(NovaDownloads.manager(ctx).let { NovaDownloads.dir }, "subs").apply { mkdirs() }
-                sniffed.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(10).mapIndexedNotNull { i, url ->
+                chosen.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(10).mapIndexedNotNull { i, url ->
                     val out = File(dir, "${id.hashCode()}_$i.vtt")
-                    if (SubtitleCleaner.saveTo(ctx, url, RetrofitClient.base, sniffed.headers, out)) out.absolutePath to (SubtitleCleaner.langOf(url) ?: "") else null
+                    if (SubtitleCleaner.saveTo(ctx, url, RetrofitClient.base, chosen.headers, out)) out.absolutePath to (SubtitleCleaner.langOf(url) ?: "") else null
                 }
             }
             // Source brought no subtitles: OpenSubtitles (English + yours)
@@ -179,7 +187,7 @@ object DownloadStarter {
             val subs = saved.map { it.first }
             val meta = DownloadMeta(item.card, item.season, item.episode, p.name, subs.firstOrNull(), subtitles = subs,
                 subtitleLangs = saved.map { it.second })
-            val request = runCatching { buildRequest(ctx, id, sniffed, meta, item.quality) }.getOrNull() ?: continue
+            val request = runCatching { buildRequest(ctx, id, chosen, meta, item.quality) }.getOrNull() ?: continue
             DownloadService.sendAddDownload(ctx, NovaDownloadService::class.java, request, false)
             Log.i(TAG, "queued $id via ${p.name}")
             return true
@@ -195,7 +203,7 @@ object DownloadStarter {
             async {
                 val r = StreamExtractor.cached(p, t)
                     ?: withTimeoutOrNull(p.timeoutMs) { runCatching {
-                        p.resolver?.invoke(t) ?: WebStreamSniffer(ctx, host!!).sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs)
+                        p.resolver?.invoke(t) ?: StreamExtractor.sniffUrl(p, t)?.let { WebStreamSniffer(ctx, host!!).sniff(it, p.timeoutMs) }
                     }.getOrNull() }
                 r?.let { Triple(p, it, AudioProbe.langs(it)) }
             }

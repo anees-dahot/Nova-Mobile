@@ -509,7 +509,9 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         jobs.forEach { it.cancel() }
         if (found.isEmpty()) return@coroutineScope null
         found.forEach { (p, r) -> StreamExtractor.remember(p, t, r) }
-        val probed = found.map { (p, r) -> async { Triple(p, r, AudioProbe.langs(r)) } }.awaitAll()
+        // Language variants (separate per-language streams) compete as their own entries
+        val probed = found.flatMap { (p, r) -> r.withVariants().map { p to it } }
+            .map { (p, r) -> async { Triple(p, r, AudioProbe.langs(r)) } }.awaitAll()
         addLangSources(probed)
         // Most languages wins (your pick for this title first, if you made one)
         val best = probed.maxByOrNull { AudioProbe.score(it.third, wantedLang() ?: "orig") }!!
@@ -520,7 +522,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     }
 
     private fun addLangSources(list: List<Triple<StreamExtractor.Provider, WebStreamSniffer.Sniffed, List<String>>>) {
-        list.forEach { n -> langSources.removeAll { it.first == n.first }; langSources += n }
+        list.forEach { n -> langSources.removeAll { it.second.url == n.second.url }; langSources += n }
     }
 
     /**
@@ -537,9 +539,9 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                     async {
                         val r = if (p == cur) now else StreamExtractor.cached(p, t)
                             ?: withTimeoutOrNull(p.timeoutMs) { runCatching { p.resolver!!.invoke(t) }.getOrNull() }
-                        r?.let { StreamExtractor.remember(p, t, it); Triple(p, it, AudioProbe.langs(it)) }
+                        r?.let { StreamExtractor.remember(p, t, it); it.withVariants().map { v -> Triple(p, v, AudioProbe.langs(v)) } }
                     }
-                }.awaitAll().filterNotNull()
+                }.awaitAll().filterNotNull().flatten()
             }
             addLangSources(list)
             Log.i(TAG, "languages found: ${langSources.joinToString { "${it.first.name}=${it.third}" }}")
@@ -567,7 +569,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val resolver = p.resolver
         if (resolver != null) return withTimeoutOrNull(p.timeoutMs) { runCatching { resolver.invoke(t) }.onFailure { if (it is CancellationException) throw it; Log.w(TAG, "${p.name} failed: ${it.message}") }.getOrNull() }
         val sn = WebStreamSniffer(this@PlayerActivity, root).also { sniffers += it }
-        return try { sn.sniff(StreamExtractor.embedUrl(p, t), p.timeoutMs) } catch (e: CancellationException) { throw e } catch (e: Exception) { Log.w(TAG, "${p.name} page failed: ${e.message}"); null } finally { sniffers -= sn }
+        return try { StreamExtractor.sniffUrl(p, t)?.let { sn.sniff(it, p.timeoutMs) } } catch (e: CancellationException) { throw e } catch (e: Exception) { Log.w(TAG, "${p.name} page failed: ${e.message}"); null } finally { sniffers -= sn }
     }
 
     /**
@@ -1350,8 +1352,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         // Languages only other found sources have: picking one switches source at the same second
         val have = audio.flatMap { g -> (0 until g.length).mapNotNull { i -> val f = g.getTrackFormat(i)
             com.anees.novamobile.data.model.LangTags.norm(f.language) ?: com.anees.novamobile.data.model.LangTags.code(f.label) } }.toSet()
-        val cur = providers.getOrNull(providerIndex)
-        val extra = langSources.filter { it.first != cur }
+        val extra = langSources.filter { it.second.url != current?.url }
             .flatMap { (p, s, ls) -> ls.map { Triple(it, p, s) } }
             .filter { it.first !in have }.distinctBy { it.first }
         if (extra.isNotEmpty() && audio.sumOf { it.length } == 0) items += ActionSheet.Item("Audio", header = true)

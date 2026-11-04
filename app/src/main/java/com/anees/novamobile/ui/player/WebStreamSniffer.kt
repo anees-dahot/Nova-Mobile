@@ -28,8 +28,18 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
         val url: String,
         val headers: Map<String, String>,
         val userAgent: String,
-        val subtitles: List<String>
-    )
+        val subtitles: List<String>,
+        /** Audio language of a single-language stream when the source says so ("hi"); null = read the manifest. */
+        val audioLang: String? = null,
+        /**
+         * Same episode in other languages as separate streams (CastleTV, MovieBox dubs). They join the
+         * language menu as their own entries; picking one switches stream at the same second.
+         */
+        val variants: List<Sniffed>? = null,
+    ) {
+        /** This stream plus every language variant, each flattened (no nested variants). */
+        fun withVariants(): List<Sniffed> = listOf(copy(variants = null)) + variants.orEmpty().map { it.copy(variants = null) }
+    }
 
     private val main = Handler(Looper.getMainLooper())
     private var webView: WebView? = null

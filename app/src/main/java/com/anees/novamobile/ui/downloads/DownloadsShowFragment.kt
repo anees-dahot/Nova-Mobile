@@ -99,24 +99,35 @@ class DownloadsShowFragment : Fragment() {
         }
         column.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        // Footer: more episodes · delete all
+        // Footer: pill actions — more episodes · save · delete
+        fun pill(label: String, icon: Int, bg: Int, fg: Int) = TextView(ctx).apply {
+            text = label; textSize = 14f; setTextColor(fg); gravity = Gravity.CENTER; maxLines = 1
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setCompoundDrawablesRelativeWithIntrinsicBounds(ctx.getDrawable(icon)?.mutate()?.apply {
+                setTint(fg); setBounds(0, 0, 18.dp, 18.dp) }, null, null, null)
+            compoundDrawablePadding = 8.dp; setPadding(16.dp, 0, 16.dp, 0)
+            background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x33FFFFFF),
+                GradientDrawable().apply { cornerRadius = 24.dp.toFloat(); setColor(bg) }, null)
+        }
         column.addView(LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Ui.SURFACE); setPadding(16.dp, 12.dp, 16.dp, 12.dp)
-            addView(TextView(ctx).apply {
-                text = "More episodes"; textSize = 15f; setTextColor(Ui.ACCENT)
+            background = GradientDrawable().apply { setColor(0xFF0E0E10.toInt()); setStroke(1, 0x14FFFFFF) }
+            setPadding(16.dp, 12.dp, 16.dp, 14.dp)
+            addView(pill("More episodes", R.drawable.ic_download, Ui.SURFACE2, Ui.TEXT).apply {
                 setOnClickListener { (activity as? MainActivity)?.openDetail(card) }
-            })
-            addView(View(ctx), LinearLayout.LayoutParams(0, 1, 1f))
-            saveAll = TextView(ctx).apply {
-                textSize = 15f; setTextColor(Ui.ACCENT); setPadding(0, 0, 20.dp, 0)
+            }, LinearLayout.LayoutParams(0, 48.dp, 1f))
+            saveAll = pill("Save", R.drawable.ic_download, Ui.ACCENT, Ui.TEXT).apply {
+                setCompoundDrawablesRelative(null, null, null, null)
                 setOnClickListener { saveAll() }
             }
-            addView(saveAll)
-            addView(TextView(ctx).apply {
-                text = "Delete all"; textSize = 15f; setTextColor(Ui.DANGER)
+            addView(saveAll, LinearLayout.LayoutParams(0, 48.dp, 1f).apply { marginStart = 10.dp })
+            addView(ImageButton(ctx).apply {
+                setImageResource(R.drawable.ic_delete); setColorFilter(Ui.DANGER); contentDescription = "Delete all"
+                scaleType = android.widget.ImageView.ScaleType.CENTER
+                background = android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x33FF453A),
+                    GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x26FF453A) }, null)
                 setOnClickListener { deleteAll() }
-            })
+            }, LinearLayout.LayoutParams(48.dp, 48.dp).apply { marginStart = 10.dp })
         })
         root.addView(column)
         root.addView(ImageButton(ctx).apply {

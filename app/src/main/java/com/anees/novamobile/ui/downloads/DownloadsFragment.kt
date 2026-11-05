@@ -50,8 +50,8 @@ class DownloadsFragment : Fragment() {
 
     private sealed class Row(val key: String) {
         class Summary(val open: Boolean, val count: Int, val pct: Int, val detail: String, val attention: Int, val running: Boolean, val pausable: Boolean) : Row("summary")
-        class Active(val d: Download, val meta: DownloadMeta?, val last: Boolean) : Row("a:${d.request.id}")
-        class Pending(val item: DownloadStarter.Item, val searching: Boolean, val last: Boolean) : Row("p:${item.card.id}:${item.season}:${item.episode}")
+        class Active(val d: Download, val meta: DownloadMeta?, val last: Boolean, val selected: Boolean = false) : Row("a:${d.request.id}")
+        class Pending(val item: DownloadStarter.Item, val searching: Boolean, val last: Boolean, val selected: Boolean = false) : Row(pKey(item))
         class Header(val title: String) : Row("h:$title")
         class Folder(val card: MediaCard, val done: List<Pair<Download, DownloadMeta>>, val active: Int, val pct: Int, val watched: Int, val selected: Boolean) : Row("f:${card.type}:${card.id}")
         class Movie(val d: Download, val meta: DownloadMeta, val watched: Float, val selected: Boolean) : Row("m:${d.request.id}")
@@ -70,6 +70,18 @@ class DownloadsFragment : Fragment() {
     private val selected = mutableSetOf<String>()          // row keys (folders / movies)
     private val pendingRemoval = mutableSetOf<String>()    // download ids swiped away, waiting out Undo
     private var editing = false
+    /** Bulk mode for the Downloading card: pick running / queued items to pause or cancel together. */
+    private var picking = false
+    private val picked = mutableSetOf<String>()            // Active / Pending row keys
+    private lateinit var pickBar: View
+    private lateinit var pickCount: TextView
+    private lateinit var pickAll: TextView
+    private lateinit var pickPause: Pill
+    private lateinit var pickCancel: Pill
+    private var pickable = emptyList<Row>()                // rows currently selectable in pick mode
+    private val backCb = object : androidx.activity.OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() { if (picking) setPicking(false) else setEditing(false) }
+    }
     private val prefs by lazy { requireContext().getSharedPreferences("nova", 0) }
     private var cardOpen: Boolean
         get() = prefs.getBoolean("dl_card_open", false)
@@ -81,6 +93,11 @@ class DownloadsFragment : Fragment() {
     private val listener = object : DownloadManager.Listener {
         override fun onDownloadChanged(m: DownloadManager, d: Download, e: Exception?) { main.post { load() } }
         override fun onDownloadRemoved(m: DownloadManager, d: Download) { main.post { load() } }
+    }
+
+    override fun onCreate(s: Bundle?) {
+        super.onCreate(s)
+        requireActivity().onBackPressedDispatcher.addCallback(this, backCb)
     }
 
     override fun onCreateView(inflater: LayoutInflater, c: ViewGroup?, s: Bundle?): View {
@@ -144,6 +161,8 @@ class DownloadsFragment : Fragment() {
             addView(deleteSelected)
         }
         root.addView(editBar, LinearLayout.LayoutParams(-1, -2))
+        pickBar = pickBar(ctx)
+        root.addView(pickBar, LinearLayout.LayoutParams(-1, -2))
         attachSwipeToDelete()
         return root
     }
@@ -154,6 +173,57 @@ class DownloadsFragment : Fragment() {
         setBackgroundResource(tv.resourceId)
         setOnClickListener { onClick() }
         layoutParams = LinearLayout.LayoutParams(48.dp, 48.dp)
+    }
+
+    /** Rounded button with a centred icon + label. */
+    private class Pill(ctx: android.content.Context, icon: Int, val fg: Int, bg: Int) : LinearLayout(ctx) {
+        val label = TextView(ctx)
+        val iconView = ImageView(ctx)
+        init {
+            orientation = HORIZONTAL; gravity = Gravity.CENTER
+            background = GradientDrawable().apply { setColor(bg); cornerRadius = 14f.dp }
+            iconView.setImageResource(icon); iconView.imageTintList = android.content.res.ColorStateList.valueOf(fg)
+            addView(iconView, LayoutParams(20.dp, 20.dp).apply { marginEnd = 8.dp })
+            label.textSize = 15f; label.setTextColor(fg); label.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            addView(label)
+            Ui.pressable(this)
+        }
+        fun set(text: String, icon: Int? = null, enabled: Boolean = true) {
+            label.text = text; icon?.let { iconView.setImageResource(it) }
+            isEnabled = enabled; alpha = if (enabled) 1f else 0.4f
+        }
+    }
+
+    /** Bottom bar for pick mode: "3 selected · Select all · Done" over [Pause] [Cancel]. */
+    private fun pickBar(ctx: android.content.Context) = LinearLayout(ctx).apply {
+        orientation = LinearLayout.VERTICAL; visibility = View.GONE
+        background = GradientDrawable().apply {
+            setColor(Ui.SURFACE); val r = 20f.dp; cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
+        }
+        elevation = 12f.dp
+        setPadding(16.dp, 10.dp, 16.dp, 14.dp)
+        addView(LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            pickCount = TextView(ctx).apply { textSize = 16f; setTextColor(Ui.TEXT); typeface = Typeface.create("sans-serif", Typeface.BOLD) }
+            addView(pickCount, LinearLayout.LayoutParams(0, -2, 1f))
+            pickAll = TextView(ctx).apply {
+                textSize = 15f; setTextColor(Ui.ACCENT); setPadding(12.dp, 10.dp, 12.dp, 10.dp)
+                setOnClickListener { Ui.tick(it); toggleAll() }
+            }
+            addView(pickAll)
+            addView(TextView(ctx).apply {
+                text = "Done"; textSize = 15f; setTextColor(Ui.ACCENT); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setPadding(12.dp, 10.dp, 0, 10.dp)
+                setOnClickListener { setPicking(false) }
+            })
+        })
+        addView(LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            pickPause = Pill(ctx, R.drawable.ic_pause, Ui.TEXT, Ui.SURFACE2).apply { setOnClickListener { Ui.tick(it); pauseOrResumePicked() } }
+            pickCancel = Pill(ctx, R.drawable.ic_delete, Ui.DANGER, 0x33FF453A).apply { setOnClickListener { Ui.tick(it); cancelPicked() } }
+            addView(pickPause, LinearLayout.LayoutParams(0, 48.dp, 1f).apply { marginEnd = 10.dp })
+            addView(pickCancel, LinearLayout.LayoutParams(0, 48.dp, 1f))
+        }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = 6.dp })
     }
 
     private fun emptyState(ctx: android.content.Context) = LinearLayout(ctx).apply {
@@ -198,8 +268,8 @@ class DownloadsFragment : Fragment() {
         val all = NovaDownloads.all(ctx).filter { it.state != Download.STATE_REMOVING && it.request.id !in pendingRemoval }
         val withMeta = all.mapNotNull { d -> DownloadMeta.of(d)?.let { d to it } }
         val active = withMeta.filter { it.first.state != Download.STATE_COMPLETED }
-        val pending = LocalStore.pendingDownloads()
-        val unresolved = LocalStore.unresolved()
+        val pending = LocalStore.pendingDownloads().filter { pKey(it) !in pendingRemoval }
+        val unresolved = LocalStore.unresolved().filter { pKey(it) !in pendingRemoval }
         val rows = mutableListOf<Row>()
 
         // Pinned card: everything not finished yet
@@ -223,24 +293,28 @@ class DownloadsFragment : Fragment() {
                 pending.isNotEmpty() && active.isEmpty() -> "Finding sources…"
                 else -> "Waiting…"
             }
-            val open = cardOpen
+            val open = cardOpen || picking
             rows += Row.Summary(open, working, pct, detail, attention, anyRunning,
                 pausable = active.any { it.first.state != Download.STATE_FAILED })
-            if (open) {
-                val items: List<Row> = active.sortedBy { if (it.first.state == Download.STATE_FAILED) 0 else 1 }.map { Row.Active(it.first, it.second, false) } +
-                    unresolved.map { Row.Pending(it, searching = false, last = false) } +
-                    pending.map { Row.Pending(it, searching = true, last = false) }
-                items.forEachIndexed { i, r ->
-                    val last = i == items.lastIndex
-                    rows += when (r) { is Row.Active -> Row.Active(r.d, r.meta, last); is Row.Pending -> Row.Pending(r.item, r.searching, last); else -> r }
-                }
+            val items: List<Row> = active.sortedBy { if (it.first.state == Download.STATE_FAILED) 0 else 1 }.map { Row.Active(it.first, it.second, false) } +
+                unresolved.map { Row.Pending(it, searching = false, last = false) } +
+                pending.map { Row.Pending(it, searching = true, last = false) }
+            picked.retainAll(items.map { it.key }.toSet())
+            pickable = items
+            if (open) items.forEachIndexed { i, r ->
+                val last = i == items.lastIndex
+                val sel = r.key in picked
+                rows += when (r) { is Row.Active -> Row.Active(r.d, r.meta, last, sel); is Row.Pending -> Row.Pending(r.item, r.searching, last, sel); else -> r }
             }
+        } else {
+            pickable = emptyList(); picked.clear()
+            if (picking) main.post { setPicking(false) }
         }
 
-        // Folders (shows) and movies: anything with at least one finished download
+        // Folders (shows) and movies: anything with at least one finished download (hidden while picking, to keep focus)
         val finished = withMeta.filter { it.first.state == Download.STATE_COMPLETED }
-        if (finished.isNotEmpty()) rows += Row.Header("Downloaded")
-        withMeta.groupBy { "${it.second.card.type}:${it.second.card.id}" }.values
+        if (finished.isNotEmpty() && !picking) rows += Row.Header("Downloaded")
+        if (!picking) withMeta.groupBy { "${it.second.card.type}:${it.second.card.id}" }.values
             .filter { g -> g.any { it.first.state == Download.STATE_COMPLETED } }
             .sortedByDescending { g -> g.maxOf { it.second.createdAt } }      // most recent first
             .forEach { g ->
@@ -272,6 +346,107 @@ class DownloadsFragment : Fragment() {
         deleteSelected.alpha = if (selected.isEmpty()) 0.4f else 1f
         saveSelected.text = if (selected.isEmpty()) "Save" else "Save (${selected.size})"
         saveSelected.alpha = if (selected.isEmpty()) 0.4f else 1f
+        if (picking) updatePickBar()
+    }
+
+    private fun pickedDownloads(): List<Download> = pickable.filter { it.key in picked }.mapNotNull { (it as? Row.Active)?.d }
+    private fun pickedPending(): List<DownloadStarter.Item> = pickable.filter { it.key in picked }.mapNotNull { (it as? Row.Pending)?.item }
+
+    /** Pause if anything picked is running; otherwise resume (and retry failed ones). */
+    private fun pickWillPause() = pickedDownloads().any { it.state != Download.STATE_FAILED && !DownloadUi.paused(it) }
+
+    private fun updatePickBar() {
+        val n = picked.size
+        pickCount.text = if (n == 0) "Select downloads" else "$n selected"
+        pickAll.text = if (n == pickable.size && n > 0) "Deselect all" else "Select all"
+        val dls = pickedDownloads()
+        val pause = pickWillPause()
+        pickPause.set(if (pause) "Pause" + (if (dls.isNotEmpty()) " (${dls.size})" else "") else if (dls.any { it.state == Download.STATE_FAILED } && dls.none { DownloadUi.paused(it) }) "Retry (${dls.size})" else "Resume" + (if (dls.isNotEmpty()) " (${dls.size})" else ""),
+            if (pause) R.drawable.ic_pause else R.drawable.ic_play, enabled = dls.isNotEmpty())
+        pickCancel.set(if (n == 0) "Cancel" else "Cancel ($n)", enabled = n > 0)
+    }
+
+    private fun setPicking(on: Boolean, first: String? = null) {
+        if (on && editing) setEditing(false)
+        picking = on
+        picked.clear(); first?.let { picked += it }
+        pickBar.visibility = if (on) View.VISIBLE else View.GONE
+        backCb.isEnabled = on || editing
+        load()
+        adapter.notifyItemRangeChanged(0, adapter.itemCount)
+        if (on) list.scrollToPosition(0)
+    }
+
+    private fun togglePick(key: String) {
+        if (!picked.remove(key)) picked += key
+        load()
+    }
+
+    private fun toggleAll() {
+        if (picked.size == pickable.size) picked.clear() else picked += pickable.map { it.key }
+        load()
+    }
+
+    private fun pauseOrResumePicked() {
+        val ctx = requireContext()
+        val dls = pickedDownloads().ifEmpty { return }
+        if (pickWillPause()) {
+            dls.filter { it.state != Download.STATE_FAILED && !DownloadUi.paused(it) }.forEach {
+                DownloadService.sendSetStopReason(ctx, NovaDownloadService::class.java, it.request.id, 1, false)
+            }
+            (activity as? MainActivity)?.showBanner("Paused ${dls.size} download${if (dls.size > 1) "s" else ""}")
+        } else {
+            NovaDownloads.clearStorageFull(ctx)
+            dls.forEach { DownloadUi.toggle(ctx, it) }   // paused → resume, failed → retry
+            (activity as? MainActivity)?.showBanner("Resumed ${dls.size} download${if (dls.size > 1) "s" else ""}")
+        }
+        main.postDelayed({ load() }, 250)
+    }
+
+    /** Cancel picked items: hide now, delete after 5s unless Undo is tapped. */
+    private fun cancelPicked() {
+        val dls = pickedDownloads()
+        val items = pickedPending()
+        val n = dls.size + items.size
+        if (n == 0) return
+        val ctx = requireContext()
+        val bytes = dls.sumOf { it.bytesDownloaded }
+        ActionSheet.show(ctx, "Cancel $n download${if (n > 1) "s" else ""}?", listOf(
+            ActionSheet.Item("Cancel and delete" + if (bytes > 0) " · frees ${DownloadUi.size(ctx, bytes)}" else "") { commitCancel(dls, items) },
+            ActionSheet.Item("Keep downloading"),
+        ), subtitle = "Partly downloaded files are removed.")
+    }
+
+    private fun commitCancel(dls: List<Download>, items: List<DownloadStarter.Item>) {
+        val keys = dls.map { it.request.id } + items.map { pKey(it) }
+        pendingRemoval += keys
+        setPicking(false)
+        val app = requireContext().applicationContext
+        val itemKeys = items.map { pKey(it) }.toSet()
+        val commit = Runnable {
+            if (!pendingRemoval.removeAll(keys.toSet())) return@Runnable
+            dls.forEach { DownloadUi.remove(app, it) }
+            LocalStore.savePendingDownloads(LocalStore.pendingDownloads().filterNot { pKey(it) in itemKeys })
+            LocalStore.saveUnresolved(LocalStore.unresolved().filterNot { pKey(it) in itemKeys })
+        }
+        main.postDelayed(commit, 5000)   // outlives the 4.5s banner so Undo always works
+        val n = keys.size
+        (activity as? MainActivity)?.showBanner("Cancelled $n download${if (n > 1) "s" else ""}", "Undo") {
+            main.removeCallbacks(commit); pendingRemoval -= keys.toSet(); load()
+        }
+    }
+
+    private fun cancelAll() {
+        val ctx = requireContext()
+        val dls = NovaDownloads.all(ctx).filter { it.state != Download.STATE_COMPLETED && it.state != Download.STATE_REMOVING && it.request.id !in pendingRemoval }
+        val items = (LocalStore.pendingDownloads() + LocalStore.unresolved()).filter { pKey(it) !in pendingRemoval }
+        val n = dls.size + items.size
+        if (n == 0) return
+        val bytes = dls.sumOf { it.bytesDownloaded }
+        ActionSheet.show(ctx, "Cancel all $n download${if (n > 1) "s" else ""}?", listOf(
+            ActionSheet.Item("Cancel all" + if (bytes > 0) " · frees ${DownloadUi.size(ctx, bytes)}" else "") { commitCancel(dls, items) },
+            ActionSheet.Item("Keep downloading"),
+        ), subtitle = "Finished downloads stay. Partly downloaded files are removed.")
     }
 
     private fun isOnline(): Boolean {
@@ -287,9 +462,12 @@ class DownloadsFragment : Fragment() {
         val anyActive = NovaDownloads.all(ctx).any { it.state != Download.STATE_COMPLETED }
         val running = NovaDownloads.all(ctx).any { it.state != Download.STATE_COMPLETED && it.state != Download.STATE_FAILED && !DownloadUi.paused(it) }
         val items = mutableListOf<ActionSheet.Item>()
+        if (anyActive) items += ActionSheet.Item("Select downloads to pause or cancel") { setPicking(true) }
         items += ActionSheet.Item("Select to delete") { setEditing(true) }
         items += ActionSheet.Item("Delete everything watched") { deleteWatched() }
         if (anyActive) items += ActionSheet.Item(if (running) "Pause all downloads" else "Resume all downloads") { togglePauseAll() }
+        if (anyActive || LocalStore.pendingDownloads().isNotEmpty() || LocalStore.unresolved().isNotEmpty())
+            items += ActionSheet.Item("Cancel all downloads") { cancelAll() }
         items += ActionSheet.Item("Smart Downloads", header = true)
         items += ActionSheet.Item(if (s.smartDownloads) "On  ·  keeps ${s.keepNext} next episode${if (s.keepNext > 1) "s" else ""} ready" else "Off", checked = s.smartDownloads) { smartDownloadsSheet() }
         ActionSheet.show(ctx, null, items)
@@ -314,6 +492,7 @@ class DownloadsFragment : Fragment() {
         editing = on
         selected.clear()
         editBar.visibility = if (on) View.VISIBLE else View.GONE
+        backCb.isEnabled = on || picking
         load()
         adapter.notifyItemRangeChanged(0, adapter.itemCount)
     }
@@ -403,7 +582,7 @@ class DownloadsFragment : Fragment() {
         ))
     }
 
-    /** Swipe: hide now, delete after 4s unless Undo is tapped. */
+    /** Swipe: hide now, delete after 5s unless Undo is tapped. */
     private fun removeWithUndo(targets: List<Download>, label: String) {
         DownloadUi.confirmDelete(requireContext(), targets, onCancel = { adapter.notifyDataSetChanged() /* un-swipe the row */ }) { phone -> removeWithUndo(targets, label, phone) }
     }
@@ -414,7 +593,7 @@ class DownloadsFragment : Fragment() {
         load()
         val ctx = requireContext().applicationContext
         val commit = Runnable { if (pendingRemoval.removeAll(ids.toSet())) targets.forEach { DownloadUi.remove(ctx, it, alsoPhone) } }
-        main.postDelayed(commit, 4000)
+        main.postDelayed(commit, 5000)   // outlives the 4.5s banner so Undo always works
         (activity as? MainActivity)?.showBanner("Deleted $label", "Undo") { main.removeCallbacks(commit); pendingRemoval -= ids.toSet(); load() }
     }
 
@@ -449,8 +628,8 @@ class DownloadsFragment : Fragment() {
         override fun areItemsTheSame(a: Row, b: Row) = a.key == b.key
         override fun areContentsTheSame(a: Row, b: Row): Boolean = when {
             a is Row.Summary && b is Row.Summary -> a.open == b.open && a.count == b.count && a.pct == b.pct && a.detail == b.detail && a.attention == b.attention && a.running == b.running && a.pausable == b.pausable
-            a is Row.Active && b is Row.Active -> a.d.state == b.d.state && a.d.bytesDownloaded == b.d.bytesDownloaded && a.d.stopReason == b.d.stopReason && a.last == b.last
-            a is Row.Pending && b is Row.Pending -> a.searching == b.searching && a.last == b.last
+            a is Row.Active && b is Row.Active -> a.d.state == b.d.state && a.d.bytesDownloaded == b.d.bytesDownloaded && a.d.stopReason == b.d.stopReason && a.last == b.last && a.selected == b.selected
+            a is Row.Pending && b is Row.Pending -> a.searching == b.searching && a.last == b.last && a.selected == b.selected
             a is Row.Folder && b is Row.Folder -> a.done.size == b.done.size && a.active == b.active && a.pct == b.pct && a.watched == b.watched && a.selected == b.selected
             a is Row.Movie && b is Row.Movie -> a.watched == b.watched && a.selected == b.selected
             a is Row.Header && b is Row.Header -> true
@@ -525,14 +704,16 @@ class DownloadsFragment : Fragment() {
                     v.findViewById<TextView>(R.id.a_title).text =
                         listOfNotNull(if (row.count > 0) "${row.count} downloading" else null, attention).joinToString("  ·  ")
                     v.findViewById<TextView>(R.id.a_sub).apply { text = row.detail; setTextColor(if (row.count == 0) Ui.DANGER else Ui.TEXT2) }
-                    v.findViewById<ImageButton>(R.id.f_end).visibility = if (row.pausable) View.VISIBLE else View.GONE
+                    v.findViewById<ImageButton>(R.id.f_end).visibility = if (row.pausable && !picking) View.VISIBLE else View.GONE
                     v.findViewById<ImageButton>(R.id.f_end).apply {
                         setImageResource(if (row.running) R.drawable.ic_pause else R.drawable.ic_play)
                         contentDescription = if (row.running) "Pause all" else "Resume all"
                         setOnClickListener { Ui.tick(it); togglePauseAll() }
                     }
                     v.findViewById<ImageView>(R.id.f_check).animate().rotation(if (row.open) 180f else 0f).setDuration(180).start()
-                    v.setOnClickListener { cardOpen = !cardOpen; Ui.tick(v); load() }
+                    v.findViewById<ImageView>(R.id.f_check).visibility = if (picking) View.INVISIBLE else View.VISIBLE
+                    v.setOnClickListener { if (!picking) { cardOpen = !cardOpen; Ui.tick(v); load() } }
+                    v.setOnLongClickListener { if (!picking) { Ui.tick(v); setPicking(true) }; true }
                 }
                 is Row.Active -> bindActive(v, row)
                 is Row.Pending -> bindPending(v, row)
@@ -563,8 +744,9 @@ class DownloadsFragment : Fragment() {
             ring.state = DownloadUi.ring(row.d)
             ring.progress = (row.d.percentDownloaded / 100f).coerceAtLeast(0f)
             ring.setOnClickListener { Ui.tick(it); DownloadUi.toggle(ctx, row.d); load() }
+            if (bindPick(v, row.key, row.selected)) return
             v.setOnClickListener { activeMenu(row.d, m) }
-            v.setOnLongClickListener { activeMenu(row.d, m); true }
+            v.setOnLongClickListener { Ui.tick(v); setPicking(true, row.key); true }
         }
 
         private fun bindPending(v: View, row: Row.Pending) {
@@ -586,15 +768,22 @@ class DownloadsFragment : Fragment() {
                 if (!row.searching) { LocalStore.saveUnresolved(LocalStore.unresolved().filterNot(same)); DownloadStarter.enqueue(ctx, listOf(i)); load() }
             }
             ring.setOnClickListener(retry)
+            if (bindPick(v, row.key, row.selected)) return
             v.setOnClickListener(retry)
-            v.setOnLongClickListener {
-                ActionSheet.show(ctx, i.card.title, listOf(ActionSheet.Item("Remove from Downloads") {
-                    LocalStore.savePendingDownloads(LocalStore.pendingDownloads().filterNot(same))
-                    LocalStore.saveUnresolved(LocalStore.unresolved().filterNot(same))
-                    load()
-                }))
-                true
+            v.setOnLongClickListener { Ui.tick(v); setPicking(true, row.key); true }
+        }
+
+        /** Pick mode: checkbox instead of the ring, tap toggles. Returns true when in pick mode. */
+        private fun bindPick(v: View, key: String, sel: Boolean): Boolean {
+            v.findViewById<CheckBox>(R.id.a_check).apply { visibility = if (picking) View.VISIBLE else View.GONE; isChecked = sel }
+            v.findViewById<View>(R.id.a_ring).visibility = if (picking) View.GONE else View.VISIBLE
+            if (picking && sel) (0xFF23324A).toInt().let { c ->
+                (v.background as? GradientDrawable)?.setColor(c) ?: (v.background as? android.graphics.drawable.ColorDrawable)?.let { it.color = c }
             }
+            if (!picking) return false
+            v.setOnClickListener { Ui.tick(v); togglePick(key) }
+            v.setOnLongClickListener(null)
+            return true
         }
 
         private fun bindCommon(v: View, poster: String?, title: String, sub: String, key: String, isSelected: Boolean) {
@@ -648,3 +837,5 @@ class DownloadsFragment : Fragment() {
         }
     }
 }
+
+private fun pKey(i: DownloadStarter.Item) = "p:${i.card.id}:${i.season}:${i.episode}"

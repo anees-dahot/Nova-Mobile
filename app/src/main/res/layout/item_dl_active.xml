@@ -7,6 +7,10 @@
     android:paddingStart="12dp" android:paddingEnd="6dp" android:paddingTop="8dp" android:paddingBottom="8dp"
     android:background="@color/nova_surface" android:clickable="true"
     android:foreground="?android:attr/selectableItemBackground">
+    <!-- Bulk select mode -->
+    <CheckBox android:id="@+id/a_check" android:layout_width="32dp" android:layout_height="32dp"
+        android:layout_marginEnd="6dp" android:buttonTint="@color/nova_accent" android:clickable="false"
+        android:focusable="false" android:visibility="gone"/>
     <ImageView android:id="@+id/a_poster" android:layout_width="40dp" android:layout_height="60dp"
         android:scaleType="centerCrop" android:background="@drawable/skeleton"/>
     <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"

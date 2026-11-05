@@ -24,6 +24,7 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import com.anees.novamobile.data.model.LangTags
+import com.anees.novamobile.data.local.LocalStore
 import com.anees.novamobile.data.model.MediaType
 import java.io.File
 import java.io.FileOutputStream
@@ -502,30 +503,44 @@ object PublicExport {
     // ── Naming and publishing ──────────────────────────────────────────────────
 
     /** Subtitles saved with the download (sidecar files) plus the stream's own subtitle tracks. */
+    /**
+     * Saved as .srt (VLC, MX Player and Samsung Video load .srt sitting next to the video; many skip
+     * .vtt). The preferred language is "<video name>.srt" so players pick it up on their own; the
+     * others are "<video name>.<lang>.srt". Broken tracks (karaoke syllables, empty) are left out.
+     * Returned files named "streamsub_*" are temporary and deleted by the caller after copying.
+     */
     private fun subtitleFiles(ctx: Context, m: DownloadMeta): List<Pair<File, String>> {
         val (_, base) = place(m)
-        val out = mutableListOf<Pair<File, String>>()
-        val names = mutableSetOf<String>()
-        fun add(f: File, lang: String?, many: Boolean, i: Int) {
-            if (!f.exists() || f.length() == 0L) return
-            val ext = f.extension.ifEmpty { "srt" }
-            val tag = lang?.takeIf { it.isNotBlank() } ?: if (many) "track$i" else null
-            var name = if (tag != null) "$base.$tag.$ext" else "$base.$ext"
-            var n = 2
-            while (!names.add(name)) name = "$base.${tag ?: "sub"}.${n++}.$ext"
-            out += f to name
-        }
+        val found = mutableListOf<Pair<File, String?>>()
         val paths = m.subtitles.orEmpty()
-        paths.forEachIndexed { i, path -> add(File(path), m.subtitleLangs?.getOrNull(i), paths.size > 1, i) }
-        m.subtitle?.takeIf { it !in paths }?.let { add(File(it), m.subtitleLangs?.getOrNull(paths.size), false, paths.size) }
+        paths.forEachIndexed { i, path -> found += File(path) to m.subtitleLangs?.getOrNull(i) }
+        m.subtitle?.takeIf { it !in paths }?.let { found += File(it) to m.subtitleLangs?.getOrNull(paths.size) }
         // Subtitles that came inside the stream itself (HLS text tracks): written out from the download cache
         val d = NovaDownloads.get(ctx, DownloadMeta.id(m.card, m.season, m.episode))
-        if (d != null) {
-            val stream = FastExport.streamSubtitles(ctx, d, tmpDir(ctx))
-            stream.forEachIndexed { i, (f, lang) -> add(f, lang, true, out.size + i) }
+        val streamFiles = if (d != null) FastExport.streamSubtitles(ctx, d, tmpDir(ctx)) else emptyList()
+        found += streamFiles
+
+        val tmp = tmpDir(ctx)
+        val good = found.filter { (f, _) -> f.exists() && f.length() > 0 }.mapIndexedNotNull { i, (f, lang) ->
+            val srt = runCatching { SubText.toSrt(f.readText()) }.getOrNull()
+            if (srt == null) { Log.w(TAG, "subtitle ${f.name} (${lang ?: "?"}) skipped: unreadable or broken"); return@mapIndexedNotNull null }
+            val out = File(tmp, "streamsub_srt_${m.card.id}_$i.srt").apply { writeText(srt) }
+            out to (LangTags.norm(lang) ?: lang?.takeIf { it.isNotBlank() })
         }
-        Log.i(TAG, "subtitles to save: ${out.joinToString { it.second }}")
-        return out
+        streamFiles.forEach { it.first.delete() }
+
+        // Preferred language → the untagged name players load automatically
+        val wanted = listOfNotNull(LocalStore.subtitleFor("${m.card.type}:${m.card.id}")?.takeIf { it != "off" }?.let { LangTags.norm(it) ?: it }, "en")
+        val primary = wanted.firstNotNullOfOrNull { w -> good.indexOfFirst { it.second == w }.takeIf { it >= 0 } } ?: 0
+        val names = mutableSetOf<String>()
+        val result = good.mapIndexed { i, (f, lang) ->
+            var name = if (i == primary) "$base.srt" else "$base.${lang ?: "track$i"}.srt"
+            var n = 2
+            while (!names.add(name)) name = "$base.${lang ?: "sub"}.${n++}.srt"
+            f to name
+        }
+        Log.i(TAG, "subtitles to save: ${result.joinToString { it.second }}")
+        return result
     }
 
     /**

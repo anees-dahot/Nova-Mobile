@@ -222,7 +222,7 @@ object DownloadStarter {
         uri.getQueryParameter("url")?.let { Uri.parse(it).host }?.let { LocalStore.setHostHeaders(it, s.headers) }
     }
 
-    /** Video at the chosen quality; audio in the preferred language plus English, so multi-audio survives offline. */
+    /** One video track at the chosen quality (no bitrate bloat); one audio track per language; all subtitles. */
     private suspend fun buildRequest(ctx: Context, id: String, s: WebStreamSniffer.Sniffed, meta0: DownloadMeta, quality: Int?): DownloadRequest {
         var meta = meta0
         val settings = LocalStore.settings()
@@ -233,33 +233,53 @@ object DownloadStarter {
         val item = MediaItem.Builder().setUri(s.url).setCustomCacheKey(null)
             .apply { if (s.url.lowercase().contains("m3u8")) setMimeType(MimeTypes.APPLICATION_M3U8) }.build()
         val (w, h) = when (quality ?: settings.dlQuality) { 0 -> 854 to 480; 2 -> 1920 to 1080; else -> 1280 to 720 }
-        val params = DownloadHelper.getDefaultTrackSelectorParameters(ctx).buildUpon()
-            .setMaxVideoSize(w, h).setForceHighestSupportedBitrate(true).build()
+        val params = DownloadHelper.getDefaultTrackSelectorParameters(ctx).buildUpon().setMaxVideoSize(w, h).build()
         val helper = DownloadHelper.forMediaItem(ctx, item, DefaultRenderersFactory(ctx), factory)
         try {
             withContext(Dispatchers.Main) { prepare(helper) }
-            // Audio: every language the stream has
             fun lang(f: androidx.media3.common.Format) = LangTags.norm(f.language) ?: LangTags.code(f.label)
+            fun rate(f: androidx.media3.common.Format) = f.bitrate.takeIf { it > 0 } ?: f.peakBitrate.takeIf { it > 0 } ?: Int.MAX_VALUE
             var height = 0
             val audioKept = mutableSetOf<String>()
             for (period in 0 until helper.periodCount) {
                 helper.clearTrackSelections(period)
-                helper.addTrackSelection(period, params)   // video at the chosen quality
                 val info = helper.getMappedTrackInfo(period)
+                var videoPicked = false
                 for (r in 0 until info.rendererCount) {
                     val type = info.getRendererType(r)
                     val groups = info.getTrackGroups(r)
-                    if (type == androidx.media3.common.C.TRACK_TYPE_VIDEO) {
-                        for (g in 0 until groups.length) for (t in 0 until groups[g].length)
-                            groups[g].getFormat(t).height.takeIf { it in 1..h }?.let { if (it > height) height = it }
+                    val all = mutableListOf<Pair<DefaultTrackSelector.SelectionOverride, androidx.media3.common.Format>>()
+                    for (g in 0 until groups.length) for (t in 0 until groups[g].length) all += DefaultTrackSelector.SelectionOverride(g, t) to groups[g].getFormat(t)
+                    when (type) {
+                        // Video: ONE track, tallest within the chosen quality, smallest bitrate at that height
+                        androidx.media3.common.C.TRACK_TYPE_VIDEO -> {
+                            val fit = all.filter { it.second.height in 1..h }
+                            val top = fit.maxOfOrNull { it.second.height } ?: continue
+                            val pick = fit.filter { it.second.height == top }.minBy { rate(it.second) }
+                            height = maxOf(height, top)
+                            helper.addTrackSelectionForSingleRenderer(period, r, params, listOf(pick.first))
+                            Log.i(TAG, "video: ${pick.second.height}p ${rate(pick.second)} of ${all.size} tracks")
+                            videoPicked = true
+                        }
+                        // Audio: every language, but only ONE track per language (AAC, smallest sane bitrate)
+                        androidx.media3.common.C.TRACK_TYPE_AUDIO -> {
+                            val keep = all.groupBy { lang(it.second) ?: "#${it.first.groupIndex}" }.values.map { same ->
+                                same.minWith(compareBy<Pair<DefaultTrackSelector.SelectionOverride, androidx.media3.common.Format>>(
+                                    { it.second.sampleMimeType != MimeTypes.AUDIO_AAC },
+                                    { rate(it.second) < 96_000 },
+                                    { rate(it.second) }))
+                            }
+                            keep.mapNotNullTo(audioKept) { lang(it.second) }
+                            Log.i(TAG, "audio: ${keep.joinToString { "${lang(it.second)} ${it.second.sampleMimeType} ${rate(it.second)}" }} of ${all.size} tracks")
+                            if (keep.isNotEmpty()) helper.addTrackSelectionForSingleRenderer(period, r, params, keep.map { it.first })
+                        }
+                        // Subtitles: all (tiny)
+                        androidx.media3.common.C.TRACK_TYPE_TEXT ->
+                            if (all.isNotEmpty()) helper.addTrackSelectionForSingleRenderer(period, r, params, all.map { it.first })
                     }
-                    if (type != androidx.media3.common.C.TRACK_TYPE_AUDIO && type != androidx.media3.common.C.TRACK_TYPE_TEXT) continue
-                    val all = mutableListOf<Pair<DefaultTrackSelector.SelectionOverride, String?>>()
-                    for (g in 0 until groups.length) for (t in 0 until groups[g].length) all += DefaultTrackSelector.SelectionOverride(g, t) to lang(groups[g].getFormat(t))
-                    val keep = all   // every audio language and subtitle the stream has
-                    if (type == androidx.media3.common.C.TRACK_TYPE_AUDIO) keep.mapNotNullTo(audioKept) { it.second }
-                    if (keep.isNotEmpty()) helper.addTrackSelectionForSingleRenderer(period, r, params, keep.map { it.first })
                 }
+                // No height info: let the selector pick one fixed video track
+                if (!videoPicked) helper.addTrackSelection(period, params.buildUpon().setForceHighestSupportedBitrate(true).build())
             }
             meta = meta.copy(quality = height.takeIf { it > 0 }, audioLangs = audioKept.toList().takeIf { it.isNotEmpty() })
             return helper.getDownloadRequest(id, meta.toBytes())

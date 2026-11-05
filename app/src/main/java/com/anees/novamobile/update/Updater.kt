@@ -56,7 +56,7 @@ import java.io.File
 object Updater {
     private const val LATEST = "https://api.github.com/repos/anees-dahot/Nova-Mobile/releases/latest"
     /** Automatic checks (app opened / brought back) at most this often; Settings → Check for Updates always checks. */
-    private const val CHECK_EVERY_MS = 30 * 60 * 1000L
+    private const val CHECK_EVERY_MS = 3 * 60 * 1000L   // GitHub allows 60 unauthenticated calls an hour
     private const val CHANNEL = "nova_updates"
     private const val NOTE_ID = 7500
     private var sheetOpen = false
@@ -65,10 +65,14 @@ object Updater {
 
     fun check(activity: Activity, scope: LifecycleCoroutineScope, manual: Boolean = false, autoStart: Boolean = false) {
         if (sheetOpen) return
-        if (!manual && System.currentTimeMillis() - LocalStore.lastUpdateCheck() < CHECK_EVERY_MS) return
+        // Throttled, unless the background check already found a newer version: then show it right away
+        val known = activity.getSharedPreferences("updater", Context.MODE_PRIVATE).getString("notified", null)
+        val knownNewer = known != null && isNewer(known, BuildConfig.VERSION_NAME)
+        if (!manual && !knownNewer && System.currentTimeMillis() - LocalStore.lastUpdateCheck() < CHECK_EVERY_MS) return
         scope.launch {
             val rel = withContext(Dispatchers.IO) { latest() }
-            if (rel != null) LocalStore.setLastUpdateCheck(System.currentTimeMillis())
+            // Only an "up to date" answer starts the quiet period; a newer version keeps being offered
+            if (rel != null && !isNewer(rel.version, BuildConfig.VERSION_NAME)) LocalStore.setLastUpdateCheck(System.currentTimeMillis())
             if (activity.isFinishing) return@launch
             when {
                 rel == null -> if (manual) toast(activity, "Couldn't reach GitHub")
@@ -99,7 +103,6 @@ object Updater {
     fun checkInBackground(ctx: Context) {
         LocalStore.init(ctx)
         val rel = latest() ?: return
-        LocalStore.setLastUpdateCheck(System.currentTimeMillis())
         if (!isNewer(rel.version, BuildConfig.VERSION_NAME) || LocalStore.skippedUpdate() == rel.version) return
         val prefs = ctx.getSharedPreferences("updater", Context.MODE_PRIVATE)
         if (prefs.getString("notified", null) == rel.version) return

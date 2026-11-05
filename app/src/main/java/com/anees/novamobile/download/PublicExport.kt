@@ -318,8 +318,10 @@ object PublicExport {
             .setAssetLoaderFactory(assetLoader(ctx, job.meta, lang, video = false, audio = true))
             .addListener(object : Transformer.Listener {
                 override fun onCompleted(composition: Composition, result: ExportResult) {
-                    if (file.length() > 1_000) job.audios += lang to file
-                    else { file.delete(); job.failedExtras++ }
+                    // Never merge a fallback track that the selector couldn't match: it would be a
+                    // duplicate of another language under the wrong tag.
+                    if (file.length() > 1_000 && audioLanguage(file) == LangTags.norm(lang)) job.audios += lang to file
+                    else { Log.w(TAG, "audio $lang of ${job.req.id} came out as the default track"); file.delete(); job.failedExtras++ }
                     main.post { nextExtra(ctx, job) }
                 }
 
@@ -499,27 +501,30 @@ object PublicExport {
 
     // ── Naming and publishing ──────────────────────────────────────────────────
 
-    private fun subtitleFiles(m: DownloadMeta): List<Pair<File, String>> {
+    /** Subtitles saved with the download (sidecar files) plus the stream's own subtitle tracks. */
+    private fun subtitleFiles(ctx: Context, m: DownloadMeta): List<Pair<File, String>> {
         val (_, base) = place(m)
-        val paths = m.subtitles.orEmpty()
         val out = mutableListOf<Pair<File, String>>()
-        paths.forEachIndexed { i, path ->
-            val f = File(path)
-            if (!f.exists()) return@forEachIndexed
-            val lang = m.subtitleLangs?.getOrNull(i)?.takeIf { it.isNotBlank() }
+        val names = mutableSetOf<String>()
+        fun add(f: File, lang: String?, many: Boolean, i: Int) {
+            if (!f.exists() || f.length() == 0L) return
             val ext = f.extension.ifEmpty { "srt" }
-            val tag = lang ?: if (paths.size > 1) "track$i" else null
-            out += f to (if (tag != null) "$base.$tag.$ext" else "$base.$ext")
+            val tag = lang?.takeIf { it.isNotBlank() } ?: if (many) "track$i" else null
+            var name = if (tag != null) "$base.$tag.$ext" else "$base.$ext"
+            var n = 2
+            while (!names.add(name)) name = "$base.${tag ?: "sub"}.${n++}.$ext"
+            out += f to name
         }
-        val single = m.subtitle?.takeIf { it !in paths }
-        if (single != null) {
-            val f = File(single)
-            if (f.exists()) {
-                val ext = f.extension.ifEmpty { "srt" }
-                val tag = m.subtitleLangs?.getOrNull(paths.size)?.takeIf { it.isNotBlank() }
-                out += f to (if (tag != null) "$base.$tag.$ext" else "$base.$ext")
-            }
+        val paths = m.subtitles.orEmpty()
+        paths.forEachIndexed { i, path -> add(File(path), m.subtitleLangs?.getOrNull(i), paths.size > 1, i) }
+        m.subtitle?.takeIf { it !in paths }?.let { add(File(it), m.subtitleLangs?.getOrNull(paths.size), false, paths.size) }
+        // Subtitles that came inside the stream itself (HLS text tracks): written out from the download cache
+        val d = NovaDownloads.get(ctx, DownloadMeta.id(m.card, m.season, m.episode))
+        if (d != null) {
+            val stream = FastExport.streamSubtitles(ctx, d, tmpDir(ctx))
+            stream.forEachIndexed { i, (f, lang) -> add(f, lang, true, out.size + i) }
         }
+        Log.i(TAG, "subtitles to save: ${out.joinToString { it.second }}")
         return out
     }
 
@@ -530,6 +535,12 @@ object PublicExport {
      */
     private fun assetLoader(ctx: Context, m: DownloadMeta, pick: String?, video: Boolean, audio: Boolean): androidx.media3.transformer.AssetLoader.Factory {
         val lang = pick ?: DownloadStarter.audioFor(m.card)?.takeIf { it != "orig" }
+        // Sources tag audio tracks inconsistently ("en" vs "eng"), and the selector only matches
+        // the strings it is given. Offer both spellings so every language can actually be picked.
+        val langPrefs = lang?.let { l ->
+            val n = LangTags.norm(l) ?: l
+            listOfNotNull(n, iso3(n)).distinct()
+        }.orEmpty()
         return androidx.media3.transformer.DefaultAssetLoaderFactory(
             ctx,
             androidx.media3.transformer.DefaultDecoderFactory.Builder(ctx).build(),
@@ -544,7 +555,7 @@ object PublicExport {
                     .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_VIDEO, !video)
                     .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, !audio)
                     .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_TEXT, true)
-                    .apply { if (audio && lang != null) setPreferredAudioLanguages(LangTags.norm(lang) ?: lang) })
+                    .apply { if (audio && langPrefs.isNotEmpty()) setPreferredAudioLanguages(*langPrefs.toTypedArray()) })
             }
         }
     }
@@ -609,8 +620,10 @@ object PublicExport {
             } catch (e: Exception) { runCatching { DocumentsContract.deleteDocument(r, uri) }; throw e }
         }
         copy("$base.mp4", "video/mp4", video, produce)
-        subtitleFiles(m).forEach { (f, name) ->
+        subtitleFiles(ctx, m).forEach { (f, name) ->
             runCatching { copy(name, if (f.extension == "srt") "application/x-subrip" else "text/vtt", f) }
+                .onFailure { Log.w(TAG, "subtitle $name not copied: ${it.message}") }
+            if (f.name.startsWith("streamsub_")) f.delete()
         }
     }
 
@@ -618,9 +631,10 @@ object PublicExport {
         val (folder, base) = place(m)
         write(ctx, folder, "$base.mp4", "video/mp4", video, produce)
         // Video is safe now: a subtitle that can't be written must not make the whole export run again
-        subtitleFiles(m).forEach { (f, name) ->
+        subtitleFiles(ctx, m).forEach { (f, name) ->
             runCatching { write(ctx, folder, name, if (f.extension == "srt") "application/x-subrip" else "text/vtt", f) }
                 .onFailure { Log.w(TAG, "subtitle $name not copied: ${it.message}") }
+            if (f.name.startsWith("streamsub_")) f.delete()
         }
     }
 

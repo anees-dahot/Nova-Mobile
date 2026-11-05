@@ -204,7 +204,8 @@ object GenreNames {
 object LangTags {
     private val NAMES = mapOf("hi" to "Hindi", "en" to "English", "ur" to "Urdu", "ja" to "Japanese", "ko" to "Korean",
         "ta" to "Tamil", "te" to "Telugu", "ml" to "Malayalam", "kn" to "Kannada", "bn" to "Bengali", "pa" to "Punjabi",
-        "zh" to "Chinese", "es" to "Spanish", "fr" to "French", "de" to "German", "it" to "Italian", "tr" to "Turkish", "ar" to "Arabic")
+        "zh" to "Chinese", "es" to "Spanish", "fr" to "French", "de" to "German", "it" to "Italian", "tr" to "Turkish",
+        "ar" to "Arabic", "pt" to "Portuguese", "ru" to "Russian", "id" to "Indonesian", "ms" to "Malay")
 
     /** "Hindi" / "Hindi Dubbed" / "English, Japanese" → "hi" / "hi" / "en" (sources often name tracks without a code). */
     fun code(label: String?): String? {

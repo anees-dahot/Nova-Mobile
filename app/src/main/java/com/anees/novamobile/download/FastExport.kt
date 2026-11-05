@@ -37,6 +37,7 @@ import androidx.media3.extractor.ts.AdtsExtractor
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
 import androidx.media3.extractor.ts.TsExtractor
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 
@@ -56,7 +57,7 @@ object FastExport {
     private const val TAG = "PublicExport"
 
     private class Seg(val uri: Uri, val offset: Long, val length: Long)
-    private class Part(val segs: List<Seg>, val lang: String?, val videoAllowed: Boolean)
+    private class Part(val segs: List<Seg>, val lang: String?, val videoAllowed: Boolean, val audioAllowed: Boolean)
     class Plan internal constructor(internal val parts: List<Any>?, internal val progressive: Uri?, val bytes: Long)
 
     fun plan(ctx: Context, d: Download): Plan? = runCatching {
@@ -77,11 +78,23 @@ object FastExport {
             lists += variants.maxByOrNull { it.format.height }!!.url to null
             val audios = keys.filter { it.groupIndex == HlsMultivariantPlaylist.GROUP_INDEX_AUDIO }.mapNotNull { parsed.audios.getOrNull(it.streamIndex) }
                 .ifEmpty { if (keys.isEmpty()) parsed.audios else emptyList() }
-            audios.filter { it.url != null }.distinctBy { it.url }.forEach { a ->
-                lists += a.url!! to (a.format.language ?: com.anees.novamobile.data.model.LangTags.code(a.name))
+            // One audio rendition per language. Downloads made before renditions were grouped kept
+            // every audio track, so the same language could appear twice (e.g. two English mixes).
+            val wanted = DownloadMeta.of(d)?.audioLangs.orEmpty()
+                .mapNotNull { com.anees.novamobile.data.model.LangTags.norm(it) }.toSet()
+            val seen = mutableSetOf<String>()
+            audios.filter { it.url != null }.forEach { a ->
+                val tag = com.anees.novamobile.data.model.LangTags
+                val code = tag.norm(a.format.language) ?: tag.code(a.name)
+                if (wanted.isNotEmpty() && (code == null || code !in wanted)) return@forEach
+                if (code != null && !seen.add(code)) return@forEach
+                lists += a.url!! to code
             }
         } else lists += uri to null
 
+        // A video variant can carry its own muxed audio. When the stream also has separate audio
+        // renditions, that audio is a duplicate (often the default language twice), so drop it.
+        val splitAudio = lists.size > 1
         val parts = lists.mapIndexed { i, (u, lang) ->
             val m = HlsPlaylistParser().parse(actualUri(ctx, u), ByteArrayInputStream(read(ctx, u))) as HlsMediaPlaylist
             if (m.segments.any { it.fullSegmentEncryptionKeyUri != null || it.encryptionIV != null }) { Log.i(TAG, "fast save: encrypted, using Transformer"); return null }
@@ -95,12 +108,49 @@ object FastExport {
                 segs += Seg(su, s.byteRangeOffset, length(ctx, su, s.byteRangeOffset, s.byteRangeLength))
             }
             if (segs.any { it.length <= 0 }) { Log.i(TAG, "fast save: piece missing from cache"); return null }
-            Part(segs, lang, videoAllowed = i == 0)
+            Part(segs, lang, videoAllowed = i == 0, audioAllowed = i > 0 || !splitAudio)
         }
         Plan(parts, null, parts.sumOf { p -> p.segs.sumOf { it.length } })
     }.onFailure { Log.w(TAG, "fast save not possible: ${it.message}") }.getOrNull()
 
     /** One pass into [out] (a seekable file: MediaStore / folder entry opened "rw"). */
+    /**
+     * The stream's own subtitle tracks (HLS WebVTT renditions kept by the download), joined into one
+     * .vtt per track and written to [dir]. Returns file to language code. Empty for non-HLS downloads.
+     */
+    fun streamSubtitles(ctx: Context, d: Download, dir: File): List<Pair<File, String?>> = runCatching {
+        val uri = d.request.uri
+        val head = String(read(ctx, uri, 4096), Charsets.UTF_8)
+        if (!head.contains("#EXTM3U")) return emptyList()
+        val parsed = HlsPlaylistParser().parse(actualUri(ctx, uri), ByteArrayInputStream(read(ctx, uri)))
+        if (parsed !is HlsMultivariantPlaylist) return emptyList()
+        val keys = d.request.streamKeys
+        val subs = keys.filter { it.groupIndex == HlsMultivariantPlaylist.GROUP_INDEX_SUBTITLE }.mapNotNull { parsed.subtitles.getOrNull(it.streamIndex) }
+            .ifEmpty { if (keys.isEmpty()) parsed.subtitles else emptyList() }
+        subs.filter { it.url != null }.distinctBy { it.url }.mapIndexedNotNull { i, r ->
+            runCatching {
+                val lang = com.anees.novamobile.data.model.LangTags.norm(r.format.language) ?: com.anees.novamobile.data.model.LangTags.code(r.name ?: r.format.label)
+                val body = read(ctx, r.url!!)
+                val text = String(body, Charsets.UTF_8)
+                val vtt = StringBuilder()
+                if (text.trimStart().startsWith("#EXTM3U")) {
+                    // Segmented track: join every piece, keeping one WEBVTT header
+                    val m = HlsPlaylistParser().parse(actualUri(ctx, r.url!!), ByteArrayInputStream(body)) as HlsMediaPlaylist
+                    vtt.append("WEBVTT\n\n")
+                    m.segments.forEach { seg ->
+                        val piece = String(read(ctx, Uri.parse(UriUtil.resolve(m.baseUri, seg.url))), Charsets.UTF_8).replace("\r\n", "\n")
+                        val cues = piece.substringAfter("\n\n", "").takeIf { piece.trimStart().startsWith("WEBVTT") } ?: piece
+                        vtt.append(cues.trim()).append("\n\n")
+                    }
+                } else vtt.append(text)
+                if (!vtt.contains("-->")) return@runCatching null
+                val f = File(dir, "streamsub_${d.request.id.hashCode()}_$i.vtt")
+                f.writeText(vtt.toString())
+                f to lang
+            }.onFailure { Log.w(TAG, "subtitle track ${r.name} not in cache: ${it.message}") }.getOrNull()
+        }
+    }.onFailure { Log.w(TAG, "stream subtitles not read: ${it.message}") }.getOrDefault(emptyList())
+
     fun write(ctx: Context, plan: Plan, out: FileOutputStream, onProgress: (Float) -> Unit) {
         val total = plan.bytes.coerceAtLeast(1)
         var done = 0L
@@ -130,7 +180,7 @@ object FastExport {
     private class Media3Mux(ctx: Context, parts: List<Part>, progress: (Long) -> Unit) {
         private class Pending(val bytes: ByteArray, val timeUs: Long, val flags: Int)
 
-        private inner class Sink(val type: Int, val videoAllowed: Boolean, val lang: String?) : TrackOutput {
+        private inner class Sink(val type: Int, val videoAllowed: Boolean, val audioAllowed: Boolean, val lang: String?) : TrackOutput {
             var format: Format? = null
             var keep = false
             var muxId = -1
@@ -145,7 +195,7 @@ object FastExport {
                 var f = format
                 if (lang != null && type == C.TRACK_TYPE_AUDIO) f = f.buildUpon().setLanguage(lang).build()
                 this.format = f
-                keep = (type == C.TRACK_TYPE_AUDIO || (type == C.TRACK_TYPE_VIDEO && videoAllowed)) &&
+                keep = ((type == C.TRACK_TYPE_AUDIO && audioAllowed) || (type == C.TRACK_TYPE_VIDEO && videoAllowed)) &&
                     mime in Mp4Muxer.SUPPORTED_VIDEO_SAMPLE_MIME_TYPES + Mp4Muxer.SUPPORTED_AUDIO_SAMPLE_MIME_TYPES
                 if (!keep && (type == C.TRACK_TYPE_AUDIO || type == C.TRACK_TYPE_VIDEO)) Log.w(TAG, "fast save: skipping unsupported $mime")
             }
@@ -203,7 +253,7 @@ object FastExport {
                 if (ok) e else { e.release(); null }
             }?.also { inp = input(0); it.init(this) } ?: error("unknown segment format")
 
-            override fun track(id: Int, type: Int): TrackOutput = sinks.getOrPut(id) { Sink(type, part.videoAllowed, part.lang) }
+            override fun track(id: Int, type: Int): TrackOutput = sinks.getOrPut(id) { Sink(type, part.videoAllowed, part.audioAllowed, part.lang) }
             override fun endTracks() { tracksEnded = true }
             override fun seekMap(seekMap: SeekMap) {}
 
@@ -278,7 +328,8 @@ object FastExport {
             for (t in 0 until ex.trackCount) {
                 val mf = ex.getTrackFormat(t)
                 val mime = mf.getString(MediaFormat.KEY_MIME) ?: continue
-                if (!(mime.startsWith("audio/") || (p.videoAllowed && mime.startsWith("video/")))) continue
+                val isAudio = mime.startsWith("audio/")
+                if (!((isAudio && p.audioAllowed) || (p.videoAllowed && mime.startsWith("video/")))) continue
                 var fmt = MediaFormatUtil.createFormatFromMediaFormat(mf)
                 if (p.lang != null && mime.startsWith("audio/")) fmt = fmt.buildUpon().setLanguage(p.lang).build()
                 if (fmt.sampleMimeType !in Mp4Muxer.SUPPORTED_VIDEO_SAMPLE_MIME_TYPES + Mp4Muxer.SUPPORTED_AUDIO_SAMPLE_MIME_TYPES) {

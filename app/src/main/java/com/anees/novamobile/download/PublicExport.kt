@@ -504,13 +504,10 @@ object PublicExport {
 
     /** Subtitles saved with the download (sidecar files) plus the stream's own subtitle tracks. */
     /**
-     * Saved as .srt (VLC, MX Player and Samsung Video load .srt sitting next to the video; many skip
-     * .vtt). The preferred language is "<video name>.srt" so players pick it up on their own; the
-     * others are "<video name>.<lang>.srt". Broken tracks (karaoke syllables, empty) are left out.
-     * Returned files named "streamsub_*" are temporary and deleted by the caller after copying.
+     * Subtitles saved with the download (sidecar files) plus the stream's own subtitle tracks, as cues,
+     * preferred language first (it becomes the MP4's default track). Broken tracks are left out.
      */
-    private fun subtitleFiles(ctx: Context, m: DownloadMeta): List<Pair<File, String>> {
-        val (_, base) = place(m)
+    private fun subtitleTracks(ctx: Context, m: DownloadMeta): List<Mp4Subs.Track> {
         val found = mutableListOf<Pair<File, String?>>()
         val paths = m.subtitles.orEmpty()
         paths.forEachIndexed { i, path -> found += File(path) to m.subtitleLangs?.getOrNull(i) }
@@ -519,28 +516,37 @@ object PublicExport {
         val d = NovaDownloads.get(ctx, DownloadMeta.id(m.card, m.season, m.episode))
         val streamFiles = if (d != null) FastExport.streamSubtitles(ctx, d, tmpDir(ctx)) else emptyList()
         found += streamFiles
-
-        val tmp = tmpDir(ctx)
-        val good = found.filter { (f, _) -> f.exists() && f.length() > 0 }.mapIndexedNotNull { i, (f, lang) ->
-            val srt = runCatching { SubText.toSrt(f.readText()) }.getOrNull()
-            if (srt == null) { Log.w(TAG, "subtitle ${f.name} (${lang ?: "?"}) skipped: unreadable or broken"); return@mapIndexedNotNull null }
-            val out = File(tmp, "streamsub_srt_${m.card.id}_$i.srt").apply { writeText(srt) }
-            out to (LangTags.norm(lang) ?: lang?.takeIf { it.isNotBlank() })
+        val good = found.filter { (f, _) -> f.exists() && f.length() > 0 }.mapNotNull { (f, lang) ->
+            val cues = runCatching { SubText.cues(f.readText()) }.getOrNull()
+            if (cues == null) { Log.w(TAG, "subtitle ${f.name} (${lang ?: "?"}) skipped: unreadable or broken"); null }
+            else Mp4Subs.Track(LangTags.norm(lang) ?: lang?.takeIf { it.isNotBlank() }, cues)
         }
         streamFiles.forEach { it.first.delete() }
-
-        // Preferred language → the untagged name players load automatically
         val wanted = listOfNotNull(LocalStore.subtitleFor("${m.card.type}:${m.card.id}")?.takeIf { it != "off" }?.let { LangTags.norm(it) ?: it }, "en")
-        val primary = wanted.firstNotNullOfOrNull { w -> good.indexOfFirst { it.second == w }.takeIf { it >= 0 } } ?: 0
+        val primary = wanted.firstNotNullOfOrNull { w -> good.indexOfFirst { it.lang == w }.takeIf { it >= 0 } } ?: 0
+        val ordered = if (good.isEmpty()) good else listOf(good[primary]) + good.filterIndexed { i, _ -> i != primary }
+        Log.i(TAG, "subtitles to embed: ${ordered.joinToString { "${it.lang ?: "?"} (${it.cues.size})" }}")
+        return ordered
+    }
+
+    /** Puts the subtitle tracks inside the saved MP4. False (logged) when that didn't work. */
+    private fun embedSubs(fd: java.io.FileDescriptor, subs: List<Mp4Subs.Track>): Boolean {
+        if (subs.isEmpty()) return true
+        return runCatching { Mp4Subs.embed(fd, subs) }
+            .onSuccess { Log.i(TAG, "embedded ${subs.size} subtitle track(s) in the MP4") }
+            .onFailure { Log.w(TAG, "couldn't embed subtitles, saving .srt files instead", it) }
+            .isSuccess
+    }
+
+    /** Fallback when embedding failed: "<name>.srt" for the preferred language, "<name>.<lang>.srt" for others. */
+    private fun sidecars(ctx: Context, base: String, subs: List<Mp4Subs.Track>): List<Pair<File, String>> {
         val names = mutableSetOf<String>()
-        val result = good.mapIndexed { i, (f, lang) ->
-            var name = if (i == primary) "$base.srt" else "$base.${lang ?: "track$i"}.srt"
+        return subs.mapIndexed { i, t ->
+            var name = if (i == 0) "$base.srt" else "$base.${t.lang ?: "track$i"}.srt"
             var n = 2
-            while (!names.add(name)) name = "$base.${lang ?: "sub"}.${n++}.srt"
-            f to name
+            while (!names.add(name)) name = "$base.${t.lang ?: "sub"}.${n++}.srt"
+            File(tmpDir(ctx), "streamsub_srt_$i.srt").apply { writeText(SubText.toSrt(t.cues)) } to name
         }
-        Log.i(TAG, "subtitles to save: ${result.joinToString { it.second }}")
-        return result
     }
 
     /**
@@ -626,34 +632,65 @@ object PublicExport {
                 }
             }
         }
-        fun copy(name: String, mime: String, f: File?, produce: ((FileOutputStream) -> Unit)? = null) {
+        fun copy(name: String, mime: String, f: File?, produce: ((FileOutputStream) -> Unit)? = null, after: ((java.io.FileDescriptor) -> Unit)? = null) {
             replace(name)
             val uri = DocumentsContract.createDocument(r, dir, mime, name) ?: error("can't create $name")
             try {
                 if (produce != null) r.openFileDescriptor(uri, "rw")!!.use { pfd -> FileOutputStream(pfd.fileDescriptor).use(produce) }
                 else r.openOutputStream(uri)!!.use { out -> f!!.inputStream().use { it.copyTo(out, 1 shl 20) } }
+                after?.let { a -> r.openFileDescriptor(uri, "rw")!!.use { a(it.fileDescriptor) } }
             } catch (e: Exception) { runCatching { DocumentsContract.deleteDocument(r, uri) }; throw e }
         }
-        copy("$base.mp4", "video/mp4", video, produce)
-        subtitleFiles(ctx, m).forEach { (f, name) ->
-            runCatching { copy(name, if (f.extension == "srt") "application/x-subrip" else "text/vtt", f) }
-                .onFailure { Log.w(TAG, "subtitle $name not copied: ${it.message}") }
-            if (f.name.startsWith("streamsub_")) f.delete()
+        val subs = subtitleTracks(ctx, m)
+        var embedded = true
+        copy("$base.mp4", "video/mp4", video, produce) { fd -> embedded = embedSubs(fd, subs) }
+        // Subtitle files from earlier saves would sit beside the video and be loaded on top of the embedded ones
+        listOf("$base.srt", "$base.vtt").forEach { replace(it) }
+        subs.mapNotNull { it.lang }.distinct().forEach { l -> replace("$base.$l.srt"); replace("$base.$l.vtt") }
+        if (!embedded) sidecars(ctx, base, subs).forEach { (f, name) ->
+            runCatching { copy(name, "application/x-subrip", f) }.onFailure { Log.w(TAG, "subtitle $name not copied: ${it.message}") }
+            f.delete()
         }
     }
 
     private fun publish(ctx: Context, m: DownloadMeta, video: File?, produce: ((FileOutputStream) -> Unit)? = null) {
         val (folder, base) = place(m)
-        write(ctx, folder, "$base.mp4", "video/mp4", video, produce)
+        val subs = subtitleTracks(ctx, m)
+        var embedded = true
+        write(ctx, folder, "$base.mp4", "video/mp4", video, produce) { fd -> embedded = embedSubs(fd, subs) }
+        removeOldSubtitleFiles(ctx, folder, base)
         // Video is safe now: a subtitle that can't be written must not make the whole export run again
-        subtitleFiles(ctx, m).forEach { (f, name) ->
-            runCatching { write(ctx, folder, name, if (f.extension == "srt") "application/x-subrip" else "text/vtt", f) }
+        if (!embedded) sidecars(ctx, base, subs).forEach { (f, name) ->
+            runCatching { write(ctx, folder, name, "application/x-subrip", f) }
                 .onFailure { Log.w(TAG, "subtitle $name not copied: ${it.message}") }
-            if (f.name.startsWith("streamsub_")) f.delete()
+            f.delete()
         }
     }
 
-    private fun write(ctx: Context, folder: String, name: String, mime: String, src: File?, produce: ((FileOutputStream) -> Unit)? = null) {
+    /** Our own .srt / .vtt files from earlier saves of this video (players would load them over the embedded ones). */
+    private fun removeOldSubtitleFiles(ctx: Context, folder: String, base: String) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val r = ctx.contentResolver
+            val coll = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val rel = "${Environment.DIRECTORY_MOVIES}/$folder/"
+            runCatching {
+                r.query(coll, arrayOf(MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME),
+                    "${MediaStore.MediaColumns.RELATIVE_PATH}=?", arrayOf(rel), null)?.use { c ->
+                    while (c.moveToNext()) {
+                        val n = c.getString(1) ?: continue
+                        if (n.startsWith("$base.") && (n.endsWith(".srt") || n.endsWith(".vtt")))
+                            runCatching { r.delete(android.content.ContentUris.withAppendedId(coll, c.getLong(0)), null, null) }
+                    }
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), folder).listFiles()
+                ?.filter { it.name.startsWith("$base.") && (it.extension == "srt" || it.extension == "vtt") }?.forEach { it.delete() }
+        }
+    }
+
+    private fun write(ctx: Context, folder: String, name: String, mime: String, src: File?, produce: ((FileOutputStream) -> Unit)? = null, after: ((java.io.FileDescriptor) -> Unit)? = null) {
         if (Build.VERSION.SDK_INT >= 29) {
             val r = ctx.contentResolver
             val coll: Uri = if (mime.startsWith("video")) MediaStore.Video.Media.EXTERNAL_CONTENT_URI
@@ -672,6 +709,7 @@ object PublicExport {
             try {
                 if (produce != null) r.openFileDescriptor(uri, "rw")!!.use { pfd -> FileOutputStream(pfd.fileDescriptor).use(produce) }
                 else r.openOutputStream(uri)!!.use { out -> src!!.inputStream().use { it.copyTo(out, 1 shl 20) } }
+                after?.let { a -> r.openFileDescriptor(uri, "rw")!!.use { a(it.fileDescriptor) } }
                 r.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
             } catch (e: Exception) { r.delete(uri, null, null); throw e }
         } else {
@@ -679,6 +717,7 @@ object PublicExport {
             val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), folder).apply { mkdirs() }
             val out = File(dir, name)
             if (produce != null) FileOutputStream(out).use(produce) else src!!.copyTo(out, overwrite = true)
+            after?.let { a -> java.io.RandomAccessFile(out, "rw").use { a(it.fd) } }
             android.media.MediaScannerConnection.scanFile(ctx, arrayOf(out.absolutePath), null, null)
         }
     }

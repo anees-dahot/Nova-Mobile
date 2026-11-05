@@ -468,6 +468,9 @@ class DownloadsFragment : Fragment() {
         if (anyActive) items += ActionSheet.Item(if (running) "Pause all downloads" else "Resume all downloads") { togglePauseAll() }
         if (anyActive || LocalStore.pendingDownloads().isNotEmpty() || LocalStore.unresolved().isNotEmpty())
             items += ActionSheet.Item("Cancel all downloads") { cancelAll() }
+        items += ActionSheet.Item("Phone to phone", header = true)
+        items += ActionSheet.Item("Send to another phone") { (activity as? androidx.appcompat.app.AppCompatActivity)?.let { com.anees.novamobile.transfer.BeamUi.send(it) } }
+        items += ActionSheet.Item("Receive from another phone") { (activity as? androidx.appcompat.app.AppCompatActivity)?.let { com.anees.novamobile.transfer.BeamUi.receive(it) } }
         items += ActionSheet.Item("Smart Downloads", header = true)
         items += ActionSheet.Item(if (s.smartDownloads) "On  ·  keeps ${s.keepNext} next episode${if (s.keepNext > 1) "s" else ""} ready" else "Off", checked = s.smartDownloads) { smartDownloadsSheet() }
         ActionSheet.show(ctx, null, items)

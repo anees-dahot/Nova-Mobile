@@ -9,6 +9,13 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- Phone-to-phone transfer over Wi-Fi Direct -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
     <queries>
         <intent><action android:name="android.speech.RecognizerIntent" /></intent>
         <package android:name="org.smarttube.stable" />
@@ -84,6 +91,11 @@
         <!-- Save to phone keeps going with the app closed -->
         <service
             android:name=".download.ExportService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <!-- Phone-to-phone transfer keeps going with the screen off -->
+        <service
+            android:name=".transfer.BeamService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
         <!-- Retry / delete actions from download notifications -->

@@ -117,9 +117,10 @@ object NovaDownloads {
             .connectionPool(okhttp3.ConnectionPool(SEGMENT_THREADS, 5, java.util.concurrent.TimeUnit.MINUTES))
             .build()
         val http = OkHttpDataSource.Factory(client).setUserAgent(LocalStore.downloadUserAgent())
-        upstream = ResolvingDataSource.Factory(
+        // Phone-to-phone transfer: while one runs, pieces come from the other phone first
+        upstream = com.anees.novamobile.transfer.BeamLink.route(ResolvingDataSource.Factory(
             DataSource.Factory { PngStripDataSource(DefaultDataSource.Factory(app, http).createDataSource()) }
-        ) { spec -> resolve(spec) }
+        ) { spec -> resolve(spec) }, KEYS)
         val cacheFactory = CacheDataSource.Factory().setCache(cache).setUpstreamDataSourceFactory(upstream).setCacheKeyFactory(KEYS)
 
         val s = LocalStore.settings()

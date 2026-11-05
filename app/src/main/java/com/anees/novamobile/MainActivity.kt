@@ -122,6 +122,8 @@ class MainActivity : AppCompatActivity() {
         com.anees.novamobile.download.NovaDownloads.manager(this)
         handler.postDelayed({ com.anees.novamobile.download.DownloadStarter.resume(this) }, 3000)
         if (intent?.getStringExtra("open") == "downloads") handler.post { openDownloads() }
+        if (intent?.getStringExtra("open") == "beam_send") handler.postDelayed({ openDownloads(); com.anees.novamobile.transfer.BeamUi.send(this) }, 600)
+        if (BuildConfig.DEBUG) intent?.getStringExtra("beam_invite")?.let { inv -> handler.postDelayed({ openDownloads(); com.anees.novamobile.transfer.BeamUi.receiveText(this, inv) }, 600) }
         openShowFromIntent(intent)
         intent?.data?.let { com.anees.novamobile.sync.Sync.handleRedirect(this, it) }
         handler.postDelayed({ com.anees.novamobile.sync.Sync.syncNow(this) }, 6000)
@@ -225,6 +227,9 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         if (intent.getStringExtra("open") == "update") handler.postDelayed(updateFromNote, 300)
         if (intent.getStringExtra("open") == "downloads") openDownloads()
+        if (intent.getStringExtra("open") == "beam_send") { openDownloads(); com.anees.novamobile.transfer.BeamUi.send(this) }
+        // Debug builds: start a receive from an invite passed over adb (emulators have no camera to scan with)
+        if (BuildConfig.DEBUG) intent.getStringExtra("beam_invite")?.let { openDownloads(); com.anees.novamobile.transfer.BeamUi.receiveText(this, it) }
         openShowFromIntent(intent)
         handlePlayIntent(intent)
         intent.data?.let { if (com.anees.novamobile.sync.Sync.handleRedirect(this, it)) android.widget.Toast.makeText(this, "Account connected", android.widget.Toast.LENGTH_SHORT).show() }

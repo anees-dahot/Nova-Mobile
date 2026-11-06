@@ -57,6 +57,13 @@ object MovieBoxSource {
             val n = norm(clean)
             if (n != want && !(want.length >= 4 && n.startsWith(want) && n.length - want.length <= 3)) return@mapNotNull null
             val tag = BRACKET.findAll(raw).map { it.groupValues[1] }.firstOrNull { s -> s.any { it.isLetter() } && s.none { it.isDigit() } }
+            // Same title, different show ("One Piece" anime 1999 vs Netflix live action 2023): check kind and year
+            val isAnime = o.optString("genre").contains("Anime", true) || o.optString("countryName") == "Japan"
+            if (t.anime != isAnime) return@mapNotNull null
+            val y = o.optString("releaseDate").take(4).toIntOrNull()
+            val dubTag = tag?.let { LangTags.code(it) } != null
+            // A dub can come out years later; the original must match the year (±1)
+            if (t.year != null && y != null && (y < t.year - 1 || (!dubTag && y > t.year + 1))) return@mapNotNull null
             val seasonEnd = SEASONS.find(raw)?.let { m -> m.groupValues[2].toIntOrNull() ?: m.groupValues[1].toIntOrNull() } ?: 0
             Subject(id, o.optString("detailPath"), tag?.let { LangTags.code(it) }, seasonEnd)
         }.filter { t.isMovie || it.seasonEnd == 0 || it.seasonEnd >= t.season }
@@ -128,7 +135,13 @@ object MovieBoxSource {
                     .mapNotNull { it.optString("url").takeIf { u -> u.startsWith("http") } }
             }.orEmpty().take(4)
             val height = best.optString("resolutions").toIntOrNull() ?: best.optInt("resolution", 0)
-            WebStreamSniffer.Sniffed(best.optString("url"), mapOf("Referer" to PLAY_REFERER), UA, subs, height = height.takeIf { it > 0 })
+            // Like the MovieBox app: every quality is its own MP4 with a known size
+            val options = all.mapNotNull { o ->
+                val h = o.optString("resolutions").toIntOrNull() ?: o.optInt("resolution", 0)
+                if (h <= 0) null else WebStreamSniffer.Sniffed.Option(o.optString("url"), h, o.optString("size").toLongOrNull()?.takeIf { it > 0 })
+            }.groupBy { it.height }.map { (_, same) -> same.firstOrNull { it.bytes != null } ?: same.first() }.sortedBy { it.height }
+            WebStreamSniffer.Sniffed(best.optString("url"), mapOf("Referer" to PLAY_REFERER), UA, subs, height = height.takeIf { it > 0 },
+                options = options.takeIf { it.size > 1 })
         }.getOrNull()
     }
 

@@ -52,7 +52,9 @@ object CastleTvSource {
         val title = t.title?.trim()?.takeIf { it.isNotBlank() } ?: return null
         val sec = securityKey() ?: return null
         val rows = search(sec, title)
-        val best = rows.map { it to matchScore(title, it.second, null, null) }.maxByOrNull { it.second }
+        // Same title, different year = different show (anime vs live-action remake): skip when the API says so
+        val best = rows.filter { r -> val y = synchronized(rowYears) { rowYears[r.first] }; t.year == null || y == null || kotlin.math.abs(y - t.year) <= 1 }
+            .map { it to matchScore(title, it.second, null, null) }.maxByOrNull { it.second }
         if (best == null || best.second < MIN_MATCH) { Log.i(TAG, "castletv: no match for \"$title\""); return null }
         var movieId = best.first.first
         var det = details(sec, movieId) ?: return null
@@ -94,6 +96,9 @@ object CastleTvSource {
         fresh
     }
 
+    /** Release year of a search row when the API states one (field names vary). */
+    private val rowYears = HashMap<String, Int>()
+
     private suspend fun search(sec: String, keyword: String): List<Pair<String, String>> {
         val q = URLEncoder.encode(keyword, "UTF-8")
         val text = get("$BASE/film-api/v1.1.0/movie/searchByKeyword?$QUERY&keyword=$q&mode=1&packageName=$PKG&page=1&size=30") ?: return emptyList()
@@ -101,6 +106,9 @@ object CastleTvSource {
         return (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }.mapNotNull { r ->
             val id = r.opt("id")?.toString()?.takeIf { it.isNotBlank() && it != "null" } ?: return@mapNotNull null
             val name = r.optString("title").ifBlank { r.optString("name") }.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            listOf("year", "releaseYear", "publishTime", "releaseTime", "releaseDate", "pubDate").firstNotNullOfOrNull { k ->
+                r.optString(k).takeIf { it.length >= 4 }?.let { v -> Regex("""(19|20)\d{2}""").find(v)?.value?.toIntOrNull() }
+            }?.let { synchronized(rowYears) { rowYears[id] = it } }
             id to name
         }
     }

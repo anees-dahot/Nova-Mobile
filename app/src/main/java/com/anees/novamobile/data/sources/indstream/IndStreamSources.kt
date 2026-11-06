@@ -78,7 +78,12 @@ object IndStreamSources {
 
         val url = bestMp4(chosen) ?: return@coroutineScope null
         Log.i(TAG, "netmirror: ${chosen.optString("title")}${if (dub != null) " (dub)" else ""}")
-        WebStreamSniffer.Sniffed(url, mapOf("Referer" to NM_PLAY_REFERER), UA, captions(chosen))
+        val arr = chosen.optJSONArray("streams")
+        val options = (0 until (arr?.length() ?: 0)).mapNotNull { arr?.optJSONObject(it) }
+            .mapNotNull { o -> o.optString("url").takeIf { it.startsWith("http") }?.let { WebStreamSniffer.Sniffed.Option(it, o.optInt("resolution", 0), o.optLong("size", 0).takeIf { s -> s > 0 }) } }
+            .filter { it.height > 0 }.distinctBy { it.height }.sortedBy { it.height }
+        WebStreamSniffer.Sniffed(url, mapOf("Referer" to NM_PLAY_REFERER), UA, captions(chosen),
+            height = options.firstOrNull { it.url == url }?.height, options = options.takeIf { it.size > 1 })
     }
 
     /** Highest resolution at or under the Max Quality setting; the lone `mp4` field otherwise. */

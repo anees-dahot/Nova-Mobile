@@ -207,7 +207,7 @@ class DetailFragment : Fragment() {
                 ActionSheet.show(requireContext(), "Download episodes", ranges.map { (a, b) ->
                     ActionSheet.Item("Episodes $a–$b") { download((a..b).map { com.anees.novamobile.download.DownloadStarter.Item(card, 1, it) }) }
                 } + ActionSheet.Item("All $total episodes") { download((1..total).map { com.anees.novamobile.download.DownloadStarter.Item(card, 1, it) }) })
-            } else download(currentEpisodes.map { com.anees.novamobile.download.DownloadStarter.Item(card, it.seasonNumber, it.episodeNumber) })
+            } else download(currentEpisodes.map { com.anees.novamobile.download.DownloadStarter.Item(card, it.seasonNumber, it.episodeNumber, title = it.name.ifBlank { null }, minutes = it.runtime) })
         }
     }
 
@@ -217,7 +217,7 @@ class DetailFragment : Fragment() {
         ActionSheet.show(requireContext(), "Episode ${ep.episodeNumber}", listOf(
             ActionSheet.Item("Play") { PlayerActivity.launch(requireContext(), card, s, ep.episodeNumber) },
             ActionSheet.Item("Download Episode") { download(listOf(com.anees.novamobile.download.DownloadStarter.Item(card, s, ep.episodeNumber))) },
-            ActionSheet.Item("Download From Here (${rest.size})") { download(rest.map { com.anees.novamobile.download.DownloadStarter.Item(card, s, it.episodeNumber) }) }
+            ActionSheet.Item("Download From Here (${rest.size})") { download(rest.map { com.anees.novamobile.download.DownloadStarter.Item(card, s, it.episodeNumber, title = it.name.ifBlank { null }, minutes = it.runtime) }) }
         ))
     }
 
@@ -294,8 +294,12 @@ class DetailFragment : Fragment() {
 
     private fun showEpisodes(view: View, eps: List<Episode>) {
         currentEpisodes = eps
-        val est = android.text.format.Formatter.formatShortFileSize(requireContext(),
-            com.anees.novamobile.download.DownloadStarter.estimateBytes(card, LocalStore.settings().dlQuality) * eps.size)
+        // Real episode runtimes, and only what isn't downloaded yet
+        val q = LocalStore.settings().dlQuality
+        val left = eps.filter { dlState(if (card.type == MediaType.ANIME) 1 else it.seasonNumber, it.episodeNumber) != "✓" }
+        val est = android.text.format.Formatter.formatShortFileSize(requireContext(), left.sumOf { ep ->
+            ep.runtime?.takeIf { it > 0 }?.let { com.anees.novamobile.download.DownloadStarter.estimateMinutes(it, q) }
+                ?: com.anees.novamobile.download.DownloadStarter.estimateBytes(card, q) })
         view.findViewById<TextView>(R.id.download_season).text =
             if (card.type == MediaType.ANIME) "Download Episodes…" else "Download Season ${eps.firstOrNull()?.seasonNumber ?: season}  ·  ~$est"
         val list = view.findViewById<RecyclerView>(R.id.episode_list)
@@ -307,7 +311,11 @@ class DetailFragment : Fragment() {
             updatePlayLabel()
             PlayerActivity.launch(requireContext(), card, season, episode)
         }
-
+        // Anime: filler / mixed / recap badges and real episode titles (animefillerlist.com, cached)
+        if (com.anees.novamobile.data.sources.anime.FillerInfo.applies(card)) viewLifecycleOwner.lifecycleScope.launch {
+            val f = com.anees.novamobile.data.sources.anime.FillerInfo.forShow(card)
+            if (f.eps.isNotEmpty()) (list.adapter as? EpisodeAdapter)?.let { a -> a.filler = f; a.notifyDataSetChanged() }
+        }
     }
 
     private suspend fun showRelated(view: View) {
@@ -326,6 +334,7 @@ class DetailFragment : Fragment() {
     private inner class EpisodeAdapter(val eps: List<Episode>, val onClick: (Episode) -> Unit) :
         RecyclerView.Adapter<EpisodeAdapter.VH>() {
         private val progress get() = LocalStore.episodeProgress("${card.type}:${card.id}")
+        var filler: com.anees.novamobile.data.sources.anime.FillerInfo.Show? = com.anees.novamobile.data.sources.anime.FillerInfo.cached(card)
 
         inner class VH(v: View) : RecyclerView.ViewHolder(v) {
             val frame: FrameLayout = v.findViewById(R.id.ep_frame)
@@ -381,7 +390,9 @@ class DetailFragment : Fragment() {
             h.status.visibility = if (parts.isEmpty()) View.GONE else View.VISIBLE
             h.status.text = parts.joinToString("   ")
             h.status.setTextColor(if (watched) 0xFF30D158.toInt() else 0xCCFFFFFF.toInt())
-            h.badge.visibility = View.GONE
+            val f = filler?.at(if (card.type == MediaType.ANIME) 1 else ep.seasonNumber, ep.episodeNumber)
+            if (card.type == MediaType.ANIME && f?.title != null) h.title.text = "${ep.episodeNumber}. ${f.title}"
+            com.anees.novamobile.ui.common.FillerBadge.apply(h.badge, f?.kind)
             h.dim.visibility = if (watched) View.VISIBLE else View.GONE
             h.title.alpha = if (watched) 0.6f else 1f
             // Release date: "Nov 10, 2026" once out, "Coming Nov 10" before (shown in the status line)

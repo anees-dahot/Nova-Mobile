@@ -50,8 +50,15 @@ class DownloadsFragment : Fragment() {
 
     private sealed class Row(val key: String) {
         class Summary(val open: Boolean, val count: Int, val pct: Int, val detail: String, val attention: Int, val running: Boolean, val pausable: Boolean) : Row("summary")
-        class Active(val d: Download, val meta: DownloadMeta?, val last: Boolean, val selected: Boolean = false) : Row("a:${d.request.id}")
-        class Pending(val item: DownloadStarter.Item, val searching: Boolean, val last: Boolean, val selected: Boolean = false) : Row(pKey(item))
+        class Active(val d: Download, val meta: DownloadMeta?, val last: Boolean, val selected: Boolean = false) : Row("a:${d.request.id}") {
+            /** Snapshot taken now: running downloads share a live progress object, so d vs d always looked unchanged (UI lagged seconds) */
+            val bytes = d.bytesDownloaded
+            val speedText = DlStats.speed(d) / 20_000   // speed shown changes → rebind
+        }
+        class Pending(val item: DownloadStarter.Item, val searching: Boolean, val last: Boolean, val selected: Boolean = false,
+                      val now: Boolean = DownloadStarter.resolving(item)) : Row(pKey(item))
+        /** Downloaded section: type filter chips + sort. */
+        class Filters(val filter: String, val sort: String, val counts: Map<String, Int>) : Row("filters")
         class Header(val title: String) : Row("h:$title")
         class Folder(val card: MediaCard, val done: List<Pair<Download, DownloadMeta>>, val active: Int, val pct: Int, val watched: Int, val selected: Boolean) : Row("f:${card.type}:${card.id}")
         class Movie(val d: Download, val meta: DownloadMeta, val watched: Float, val selected: Boolean) : Row("m:${d.request.id}")
@@ -89,7 +96,7 @@ class DownloadsFragment : Fragment() {
     private val main = Handler(Looper.getMainLooper())
     /** Live progress each second while something downloads; idle lists rely on the listener and refresh slowly. */
     private var anyActive = true
-    private val tick = object : Runnable { override fun run() { load(); main.postDelayed(this, if (anyActive) 1000 else 5000) } }
+    private val tick = object : Runnable { override fun run() { load(); main.postDelayed(this, if (anyActive) 750 else 5000) } }
     private val listener = object : DownloadManager.Listener {
         override fun onDownloadChanged(m: DownloadManager, d: Download, e: Exception?) { main.post { load() } }
         override fun onDownloadRemoved(m: DownloadManager, d: Download) { main.post { load() } }
@@ -291,9 +298,10 @@ class DownloadsFragment : Fragment() {
                 !anyRunning && active.isNotEmpty() -> "Paused · $pct%"
                 speed > 0 -> listOf("$pct%", "${DlStats.size(ctx, speed)}/s", if (left > 0) DlStats.eta(left / speed) else "").filter { it.isNotEmpty() }.joinToString(" · ")
                 pending.isNotEmpty() && active.isEmpty() -> "Finding sources…"
-                else -> "Waiting…"
+                !isOnline() -> "Waiting for network · resumes by itself"
+                else -> "Starting…"
             }
-            val open = cardOpen || picking
+            val open = true   // every unfinished download always visible (no collapsed card)
             rows += Row.Summary(open, working, pct, detail, attention, anyRunning,
                 pausable = active.any { it.first.state != Download.STATE_FAILED })
             val items: List<Row> = active.sortedBy { if (it.first.state == Download.STATE_FAILED) 0 else 1 }.map { Row.Active(it.first, it.second, false) } +
@@ -314,9 +322,19 @@ class DownloadsFragment : Fragment() {
         // Folders (shows) and movies: anything with at least one finished download (hidden while picking, to keep focus)
         val finished = withMeta.filter { it.first.state == Download.STATE_COMPLETED }
         if (finished.isNotEmpty() && !picking) rows += Row.Header("Downloaded")
-        if (!picking) withMeta.groupBy { "${it.second.card.type}:${it.second.card.id}" }.values
+        val groups = withMeta.groupBy { "${it.second.card.type}:${it.second.card.id}" }.values
             .filter { g -> g.any { it.first.state == Download.STATE_COMPLETED } }
-            .sortedByDescending { g -> g.maxOf { it.second.createdAt } }      // most recent first
+        fun kind(g: List<Pair<Download, DownloadMeta>>) = when (g.first().second.card.type) { MediaType.MOVIE -> "Movies"; MediaType.ANIME -> "Anime"; else -> "Shows" }
+        val counts = groups.groupingBy { kind(it) }.eachCount()
+        if (!picking && groups.size >= 3) rows += Row.Filters(dlFilter, dlSort, counts)
+        if (dlFilter != "All" && counts[dlFilter] == null) dlFilter = "All"
+        if (!picking) groups
+            .filter { dlFilter == "All" || kind(it) == dlFilter }
+            .let { l -> when (dlSort) {
+                "Name" -> l.sortedBy { it.first().second.card.title.lowercase() }
+                "Size" -> l.sortedByDescending { g -> g.sumOf { it.first.bytesDownloaded } }
+                else -> l.sortedByDescending { g -> g.maxOf { it.second.createdAt } }      // most recent first
+            } }
             .forEach { g ->
                 val meta = g.first().second
                 val done = g.filter { it.first.state == Download.STATE_COMPLETED }
@@ -348,6 +366,9 @@ class DownloadsFragment : Fragment() {
         saveSelected.alpha = if (selected.isEmpty()) 0.4f else 1f
         if (picking) updatePickBar()
     }
+
+    private var dlFilter = "All"
+    private var dlSort = "Recent"
 
     private fun pickedDownloads(): List<Download> = pickable.filter { it.key in picked }.mapNotNull { (it as? Row.Active)?.d }
     private fun pickedPending(): List<DownloadStarter.Item> = pickable.filter { it.key in picked }.mapNotNull { (it as? Row.Pending)?.item }
@@ -462,6 +483,8 @@ class DownloadsFragment : Fragment() {
         val anyActive = NovaDownloads.all(ctx).any { it.state != Download.STATE_COMPLETED }
         val running = NovaDownloads.all(ctx).any { it.state != Download.STATE_COMPLETED && it.state != Download.STATE_FAILED && !DownloadUi.paused(it) }
         val items = mutableListOf<ActionSheet.Item>()
+        val failed = NovaDownloads.all(ctx).count { it.state == Download.STATE_FAILED } + LocalStore.unresolved().size
+        if (failed > 0) items += ActionSheet.Item("Retry all that failed ($failed)") { DownloadStarter.retryAllFailed(ctx); main.postDelayed({ load() }, 300) }
         if (anyActive) items += ActionSheet.Item("Select downloads to pause or cancel") { setPicking(true) }
         items += ActionSheet.Item("Select to delete") { setEditing(true) }
         items += ActionSheet.Item("Delete everything watched") { deleteWatched() }
@@ -561,6 +584,7 @@ class DownloadsFragment : Fragment() {
             ActionSheet.Item("Play") { PlayerActivity.launch(ctx, m.card, m.season, m.episode) },
             ActionSheet.Item("Go to movie") { (activity as? MainActivity)?.openDetail(m.card) },
             ActionSheet.Item("Save to phone…") { (activity as? MainActivity)?.let { SaveToPhone.show(it, listOf(d)) } },
+            ActionSheet.Item("Change quality…") { (activity as? MainActivity)?.let { DownloadUi.changeQuality(it, d, m) { load() } } },
             ActionSheet.Item("Delete download") { DownloadUi.delete(ctx, listOf(d)) { main.postDelayed({ load() }, 300) } },
         ), subtitle = DownloadUi.details(m).ifBlank { null })
     }
@@ -578,8 +602,15 @@ class DownloadsFragment : Fragment() {
     private fun activeMenu(d: Download, m: DownloadMeta?) {
         val ctx = requireContext()
         ActionSheet.show(ctx, m?.let { DownloadUi.name(it) }, listOfNotNull(
+            if (m != null && DownloadUi.watchable(d)) ActionSheet.Item("Watch now (while downloading)") { PlayerActivity.launch(ctx, m.card, m.season, m.episode) } else null,
             if (d.state == Download.STATE_FAILED) ActionSheet.Item("Retry") { NovaDownloads.retry(ctx, d) }
             else ActionSheet.Item(if (DownloadUi.paused(d)) "Resume" else "Pause") { DownloadUi.toggle(ctx, d) },
+            m?.let { ActionSheet.Item("Try another source") {
+                // Slow or broken source: drop this one and let every other source race (same quality)
+                DownloadUi.remove(ctx, d)
+                DownloadStarter.enqueue(ctx, listOf(DownloadStarter.Item(it.card, it.season, it.episode, refreshOf = d.request.id, skipProvider = it.provider, height = it.quality)))
+                main.postDelayed({ load() }, 300)
+            } },
             m?.let { ActionSheet.Item("Go to ${if (it.card.type == MediaType.MOVIE) "movie" else "show"}") { (activity as? MainActivity)?.openDetail(it.card) } },
             ActionSheet.Item("Cancel download") { DownloadUi.remove(ctx, d); main.postDelayed({ load() }, 300) },
         ))
@@ -631,8 +662,9 @@ class DownloadsFragment : Fragment() {
         override fun areItemsTheSame(a: Row, b: Row) = a.key == b.key
         override fun areContentsTheSame(a: Row, b: Row): Boolean = when {
             a is Row.Summary && b is Row.Summary -> a.open == b.open && a.count == b.count && a.pct == b.pct && a.detail == b.detail && a.attention == b.attention && a.running == b.running && a.pausable == b.pausable
-            a is Row.Active && b is Row.Active -> a.d.state == b.d.state && a.d.bytesDownloaded == b.d.bytesDownloaded && a.d.stopReason == b.d.stopReason && a.last == b.last && a.selected == b.selected
-            a is Row.Pending && b is Row.Pending -> a.searching == b.searching && a.last == b.last && a.selected == b.selected
+            a is Row.Active && b is Row.Active -> a.d.state == b.d.state && a.bytes == b.bytes && a.speedText == b.speedText && a.d.stopReason == b.d.stopReason && a.last == b.last && a.selected == b.selected
+            a is Row.Pending && b is Row.Pending -> a.searching == b.searching && a.now == b.now && a.last == b.last && a.selected == b.selected
+            a is Row.Filters && b is Row.Filters -> a.filter == b.filter && a.sort == b.sort && a.counts == b.counts
             a is Row.Folder && b is Row.Folder -> a.done.size == b.done.size && a.active == b.active && a.pct == b.pct && a.watched == b.watched && a.selected == b.selected
             a is Row.Movie && b is Row.Movie -> a.watched == b.watched && a.selected == b.selected
             a is Row.Header && b is Row.Header -> true
@@ -642,7 +674,7 @@ class DownloadsFragment : Fragment() {
 
     private inner class Adapter : ListAdapter<Row, RecyclerView.ViewHolder>(Diff) {
         override fun getItemViewType(p: Int) = when (getItem(p)) {
-            is Row.Summary -> 0; is Row.Active, is Row.Pending -> 1; is Row.Header -> 2; else -> 3
+            is Row.Summary -> 0; is Row.Active, is Row.Pending -> 1; is Row.Header -> 2; is Row.Filters -> 4; else -> 3
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, type: Int): RecyclerView.ViewHolder {
@@ -657,6 +689,11 @@ class DownloadsFragment : Fragment() {
                     textSize = 20f; setTextColor(Ui.TEXT); typeface = Typeface.create("sans-serif", Typeface.BOLD); letterSpacing = -0.01f
                     setPadding(16.dp, 20.dp, 16.dp, 4.dp)
                     layoutParams = RecyclerView.LayoutParams(-1, -2)
+                }
+                4 -> HorizontalScrollView(ctx).apply {
+                    isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(12.dp, 4.dp, 12.dp, 8.dp)
+                    layoutParams = RecyclerView.LayoutParams(-1, -2)
+                    addView(LinearLayout(ctx).apply { id = R.id.f_title; orientation = LinearLayout.HORIZONTAL })
                 }
                 else -> inflater.inflate(R.layout.item_dl_folder, parent, false).also { f ->
                     f.findViewById<View>(R.id.f_frame).apply { outlineProvider = rounded(8f.dp); clipToOutline = true }
@@ -681,10 +718,12 @@ class DownloadsFragment : Fragment() {
                 addView(TextView(ctx).apply { id = R.id.a_title; textSize = 15f; setTextColor(Ui.TEXT); typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL) })
                 addView(TextView(ctx).apply { id = R.id.a_sub; textSize = 13f; setTextColor(Ui.TEXT2); maxLines = 1; fontFeatureSettings = "tnum" })
             }, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(ImageButton(ctx).apply {
-                id = R.id.f_end; background = null; contentDescription = "Pause all"
-                imageTintList = android.content.res.ColorStateList.valueOf(Ui.TEXT)
-            }, LinearLayout.LayoutParams(44.dp, 44.dp))
+            addView(TextView(ctx).apply {
+                id = R.id.f_end; textSize = 13f; setTextColor(Ui.TEXT); gravity = Gravity.CENTER
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setPadding(14.dp, 0, 14.dp, 0)
+                background = GradientDrawable().apply { cornerRadius = 16f.dp; setColor(Ui.SURFACE2) }
+            }, LinearLayout.LayoutParams(-2, 34.dp).apply { marginEnd = 6.dp })
             addView(ImageView(ctx).apply { id = R.id.f_check; setImageResource(R.drawable.ic_expand); imageTintList = android.content.res.ColorStateList.valueOf(Ui.TEXT3) },
                 LinearLayout.LayoutParams(24.dp, 24.dp).apply { marginEnd = 6.dp })
         }
@@ -693,44 +732,40 @@ class DownloadsFragment : Fragment() {
             val v = h.itemView
             when (val row = getItem(p)) {
                 is Row.Summary -> {
-                    val last = !row.open
-                    v.background = GradientDrawable().apply {
-                        setColor(Ui.SURFACE)
-                        val r = 14f.dp
-                        cornerRadii = if (last) floatArrayOf(r, r, r, r, r, r, r, r) else floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f)
-                    }
+                    v.background = null   // section header: "Downloading · 3" + overall progress, Pause all
                     val attention = if (row.attention > 0) "${row.attention} need${if (row.attention == 1) "s" else ""} attention" else null
                     v.findViewById<ProgressRing>(R.id.a_ring).apply {
                         state = when { row.count == 0 -> ProgressRing.State.FAILED; row.running -> ProgressRing.State.DOWNLOADING; else -> ProgressRing.State.PAUSED }
                         progress = row.pct / 100f
                     }
-                    v.findViewById<TextView>(R.id.a_title).text =
-                        listOfNotNull(if (row.count > 0) "${row.count} downloading" else null, attention).joinToString("  ·  ")
+                    v.findViewById<TextView>(R.id.a_title).apply {
+                        text = listOfNotNull(if (row.count > 0) "Downloading  ·  ${row.count}" else "Downloads", attention).joinToString("  ·  ")
+                        textSize = 18f; typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    }
                     v.findViewById<TextView>(R.id.a_sub).apply { text = row.detail; setTextColor(if (row.count == 0) Ui.DANGER else Ui.TEXT2) }
-                    v.findViewById<ImageButton>(R.id.f_end).visibility = if (row.pausable && !picking) View.VISIBLE else View.GONE
-                    v.findViewById<ImageButton>(R.id.f_end).apply {
-                        setImageResource(if (row.running) R.drawable.ic_pause else R.drawable.ic_play)
-                        contentDescription = if (row.running) "Pause all" else "Resume all"
+                    v.findViewById<TextView>(R.id.f_end).visibility = if (row.pausable && !picking) View.VISIBLE else View.GONE
+                    v.findViewById<TextView>(R.id.f_end).apply {
+                        text = if (row.running) "Pause all" else "Resume all"
+                        contentDescription = text
                         setOnClickListener { Ui.tick(it); togglePauseAll() }
                     }
-                    v.findViewById<ImageView>(R.id.f_check).animate().rotation(if (row.open) 180f else 0f).setDuration(180).start()
-                    v.findViewById<ImageView>(R.id.f_check).visibility = if (picking) View.INVISIBLE else View.VISIBLE
-                    v.setOnClickListener { if (!picking) { cardOpen = !cardOpen; Ui.tick(v); load() } }
+                    v.findViewById<ImageView>(R.id.f_check).visibility = View.GONE
+                    v.setOnClickListener(null)
                     v.setOnLongClickListener { if (!picking) { Ui.tick(v); setPicking(true) }; true }
                 }
                 is Row.Active -> bindActive(v, row)
                 is Row.Pending -> bindPending(v, row)
                 is Row.Header -> (v as TextView).text = row.title
+                is Row.Filters -> bindFilters(v, row)
                 is Row.Folder -> bindFolder(v, row)
                 is Row.Movie -> bindMovie(v, row)
             }
         }
 
+        /** Each unfinished download is its own rounded card. */
         private fun cardBottom(v: View, last: Boolean) {
-            v.background = if (last) GradientDrawable().apply {
-                setColor(Ui.SURFACE); val r = 14f.dp; cornerRadii = floatArrayOf(0f, 0f, 0f, 0f, r, r, r, r)
-            } else android.graphics.drawable.ColorDrawable(Ui.SURFACE)
-            (v.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = if (last) 4.dp else 0
+            v.background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadius = 14f.dp }
+            (v.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = if (last) 12.dp else 8.dp
         }
 
         private fun bindActive(v: View, row: Row.Active) {
@@ -739,6 +774,19 @@ class DownloadsFragment : Fragment() {
             cardBottom(v, row.last)
             v.findViewById<ImageView>(R.id.a_poster).load(m?.card?.posterUrl ?: m?.card?.backdropUrl) { crossfade(false) }
             v.findViewById<TextView>(R.id.a_title).text = m?.let { DownloadUi.name(it) } ?: "Video"
+            v.findViewById<TextView>(R.id.a_tags).apply { text = DownloadUi.tags(row.d, m); visibility = if (text.isNullOrEmpty()) View.GONE else View.VISIBLE }
+            v.findViewById<ProgressBar>(R.id.a_bar).apply {
+                val pct = row.d.percentDownloaded
+                val known = pct >= 0f
+                isIndeterminate = !known && row.d.state == Download.STATE_DOWNLOADING && !DownloadUi.paused(row.d)
+                if (known) progress = (pct * 10).toInt()
+                progressTintList = android.content.res.ColorStateList.valueOf(when {
+                    row.d.state == Download.STATE_FAILED -> Ui.DANGER
+                    DownloadUi.paused(row.d) -> Ui.TEXT3
+                    else -> Ui.ACCENT
+                })
+                visibility = View.VISIBLE
+            }
             v.findViewById<TextView>(R.id.a_sub).apply {
                 text = DownloadUi.status(ctx, row.d)
                 setTextColor(if (row.d.state == Download.STATE_FAILED) Ui.DANGER else Ui.TEXT2)
@@ -752,6 +800,22 @@ class DownloadsFragment : Fragment() {
             v.setOnLongClickListener { Ui.tick(v); setPicking(true, row.key); true }
         }
 
+        private fun bindFilters(v: View, row: Row.Filters) {
+            val ctx = v.context
+            val box = v.findViewById<LinearLayout>(R.id.f_title)
+            box.removeAllViews()
+            fun chip(text: String, on: Boolean, click: () -> Unit) = box.addView(TextView(ctx).apply {
+                this.text = text; textSize = 13f; setPadding(14.dp, 7.dp, 14.dp, 7.dp)
+                setTextColor(if (on) Color.BLACK else Ui.TEXT)
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                background = GradientDrawable().apply { cornerRadius = 16f.dp; setColor(if (on) Color.WHITE else Ui.SURFACE2) }
+                setOnClickListener { Ui.tick(it); click(); load() }
+            }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = 8.dp })
+            chip("All  ${row.counts.values.sum()}", row.filter == "All") { dlFilter = "All" }
+            listOf("Movies", "Shows", "Anime").forEach { k -> row.counts[k]?.let { n -> chip("$k  $n", row.filter == k) { dlFilter = k } } }
+            chip("↕ ${row.sort}", false) { dlSort = when (dlSort) { "Recent" -> "Name"; "Name" -> "Size"; else -> "Recent" } }
+        }
+
         private fun bindPending(v: View, row: Row.Pending) {
             val ctx = requireContext()
             val i = row.item
@@ -759,8 +823,13 @@ class DownloadsFragment : Fragment() {
             v.findViewById<ImageView>(R.id.a_poster).load(i.card.posterUrl ?: i.card.backdropUrl) { crossfade(false) }
             v.findViewById<TextView>(R.id.a_title).text = if (i.card.type == MediaType.MOVIE) i.card.title
                 else "${i.card.title} · ${if (i.card.type == MediaType.ANIME) "Episode ${i.episode}" else "S${i.season} · E${i.episode}"}"
+            v.findViewById<TextView>(R.id.a_tags).apply {
+                text = listOfNotNull(i.height?.let { "${it}p" }, i.provider?.substringBefore('#')).joinToString("  ·  ").uppercase()
+                visibility = if (text.isNullOrEmpty()) View.GONE else View.VISIBLE
+            }
+            v.findViewById<ProgressBar>(R.id.a_bar).apply { isIndeterminate = row.searching && row.now; if (!isIndeterminate) progress = 0; visibility = View.VISIBLE }
             v.findViewById<TextView>(R.id.a_sub).apply {
-                text = if (row.searching) "Finding a source…" else "No source had it · tap to retry"
+                text = when { !row.searching -> "No source had it right now · tap to retry"; row.now -> "Finding the best source…"; else -> "In line · finds a source next" }
                 setTextColor(if (row.searching) Ui.TEXT2 else Ui.DANGER)
             }
             val ring = v.findViewById<ProgressRing>(R.id.a_ring)

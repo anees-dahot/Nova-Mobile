@@ -32,6 +32,8 @@ class NovaDownloadService : DownloadService(
         val blocked = when {
             notMetRequirements and Requirements.NETWORK_UNMETERED != 0 -> "Waiting for Wi-Fi"
             notMetRequirements and Requirements.NETWORK != 0 -> "Waiting for a connection"
+            notMetRequirements and Requirements.DEVICE_CHARGING != 0 -> "Waiting for the charger"
+            notMetRequirements and Requirements.DEVICE_STORAGE_NOT_LOW != 0 -> "Phone storage is low — free up space"
             NovaDownloads.storageFull -> "Storage full — free up space"
             else -> null
         }

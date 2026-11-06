@@ -25,7 +25,9 @@ import java.util.concurrent.TimeUnit
 object AudioProbe {
 
     /** [audioTracks]/[height]: -1 = couldn't tell. [langs]: two-letter codes of labelled audio tracks. */
-    data class Info(val langs: List<String>, val audioTracks: Int, val height: Int) {
+    data class Info(val langs: List<String>, val audioTracks: Int, val height: Int,
+                    /** Every picture height offered (HLS master variants); empty = only [height]. */
+                    val heights: List<Int> = emptyList()) {
         companion object { val UNKNOWN = Info(emptyList(), -1, -1) }
     }
 
@@ -102,18 +104,19 @@ object AudioProbe {
     private fun hlsMaster(head: String, s: WebStreamSniffer.Sniffed, deep: Boolean): Info {
         val renditions = HLS_AUDIO.findAll(head).map { it.value }.toList()
         val langs = renditions.mapNotNull { code(attr(it, "LANGUAGE")) ?: LangTags.code(attr(it, "NAME")) }.distinct()
-        val height = RES.findAll(head).mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull() ?: -1
+        val all = RES.findAll(head).mapNotNull { it.groupValues[1].toIntOrNull() }.filter { it > 0 }.distinct().sorted().toList()
+        val height = all.maxOrNull() ?: -1
         // Track count: one per language plus each unlabelled rendition (two Spanish variants count once)
         val tracks = (langs.size + renditions.count { (code(attr(it, "LANGUAGE")) ?: LangTags.code(attr(it, "NAME"))) == null }).takeIf { renditions.isNotEmpty() } ?: -1
-        if (renditions.isNotEmpty() && height > 0 || !deep) return Info(langs, tracks, height)
+        if (renditions.isNotEmpty() && height > 0 || !deep) return Info(langs, tracks, height, all)
         // Audio muxed into each variant (or no RESOLUTION): read a variant's first segment
         val variant = head.lineSequence().map { it.trim() }.dropWhile { !it.startsWith("#EXT-X-STREAM-INF") }
             .drop(1).firstOrNull { it.isNotEmpty() && !it.startsWith("#") }?.let { resolve(s.url, it) }
-            ?: return Info(langs, renditions.size.takeIf { it > 0 } ?: -1, height)
+            ?: return Info(langs, renditions.size.takeIf { it > 0 } ?: -1, height, all)
         val media = fetch(variant, s, PEEK_BYTES)?.let { String(it, Charsets.UTF_8) }
         val seg = media?.let { hlsMedia(it, variant, s) } ?: Info.UNKNOWN
-        return if (renditions.isNotEmpty()) Info(langs, tracks, height.takeIf { it > 0 } ?: seg.height)
-            else Info(seg.langs, seg.audioTracks, height.takeIf { it > 0 } ?: seg.height)
+        return if (renditions.isNotEmpty()) Info(langs, tracks, height.takeIf { it > 0 } ?: seg.height, all)
+            else Info(seg.langs, seg.audioTracks, height.takeIf { it > 0 } ?: seg.height, all)
     }
 
     /** Single-quality playlist: tracks of its first segment (fMP4: init segment + first fragment). */

@@ -38,7 +38,14 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
         val variants: List<Sniffed>? = null,
         /** Picture height the source states (CastleTV "HD 720P", MovieBox resolution); null = read the stream. */
         val height: Int? = null,
+        /**
+         * Every file the source offers for this stream, one per quality (MovieBox / NetMirror MP4s),
+         * so the download sheet can list real qualities with sizes; null = only [url].
+         */
+        val options: List<Option>? = null,
     ) {
+        /** One downloadable file: its own url, picture height and (if the source says) size. */
+        data class Option(val url: String, val height: Int, val bytes: Long? = null)
         /** This stream plus every language variant, each flattened (no nested variants). */
         fun withVariants(): List<Sniffed> = listOf(copy(variants = null)) + variants.orEmpty().map { it.copy(variants = null) }
     }

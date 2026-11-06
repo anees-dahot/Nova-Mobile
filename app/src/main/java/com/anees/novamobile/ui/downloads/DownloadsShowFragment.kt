@@ -45,7 +45,11 @@ class DownloadsShowFragment : Fragment() {
         fun of(card: MediaCard) = DownloadsShowFragment().apply { arguments = Bundle().apply { putString("card", Gson().toJson(card)) } }
     }
 
-    private class Ep(val d: Download, val m: DownloadMeta, val watched: Float) { val key get() = d.request.id }
+    private class Ep(val d: Download, val m: DownloadMeta, val watched: Float) {
+        val key get() = d.request.id
+        /** Snapshot: a running Download's progress object is live, so comparing d to itself would always say "unchanged". */
+        val bytes = d.bytesDownloaded
+    }
 
     private lateinit var card: MediaCard
     private lateinit var list: RecyclerView
@@ -198,7 +202,8 @@ class DownloadsShowFragment : Fragment() {
     }
 
     private fun play(e: Ep) {
-        if (e.d.state == Download.STATE_COMPLETED) PlayerActivity.launch(requireContext(), e.m.card, e.m.season, e.m.episode)
+        // Finished, or far enough along to watch while it downloads (pause/resume stays on the ring button)
+        if (e.d.state == Download.STATE_COMPLETED || DownloadUi.watchable(e.d)) PlayerActivity.launch(requireContext(), e.m.card, e.m.season, e.m.episode)
         else DownloadUi.toggle(requireContext(), e.d)
     }
 
@@ -206,10 +211,14 @@ class DownloadsShowFragment : Fragment() {
         val ctx = requireContext()
         val items = mutableListOf<ActionSheet.Item>()
         if (e.d.state == Download.STATE_COMPLETED) items += ActionSheet.Item(if (e.watched in 0.02f..0.9f) "Resume" else "Play") { play(e) }
-        else items += ActionSheet.Item(if (DownloadUi.paused(e.d)) "Resume download" else "Pause download") { DownloadUi.toggle(ctx, e.d) }
+        else {
+            if (DownloadUi.watchable(e.d)) items += ActionSheet.Item("Watch now (while downloading)") { PlayerActivity.launch(ctx, e.m.card, e.m.season, e.m.episode) }
+            items += ActionSheet.Item(if (DownloadUi.paused(e.d)) "Resume download" else "Pause download") { DownloadUi.toggle(ctx, e.d) }
+        }
         items += ActionSheet.Item("Go to show") { (activity as? MainActivity)?.openDetail(card) }
         if (e.d.state == Download.STATE_COMPLETED) {
             items += ActionSheet.Item("Save to phone…") { (activity as? MainActivity)?.let { SaveToPhone.show(it, listOf(e.d)) } }
+            items += ActionSheet.Item("Change quality…") { (activity as? MainActivity)?.let { DownloadUi.changeQuality(it, e.d, e.m) { load() } } }
             val done = episodes().filter { it.d.state == Download.STATE_COMPLETED }
             if (done.size > 1) items += ActionSheet.Item("Save all ${done.size} episodes to phone…") {
                 (activity as? MainActivity)?.let { SaveToPhone.show(it, done.map { ep -> ep.d }) }
@@ -265,7 +274,7 @@ class DownloadsShowFragment : Fragment() {
 
     private object Diff : DiffUtil.ItemCallback<Ep>() {
         override fun areItemsTheSame(a: Ep, b: Ep) = a.key == b.key
-        override fun areContentsTheSame(a: Ep, b: Ep) = a.d.state == b.d.state && a.d.bytesDownloaded == b.d.bytesDownloaded &&
+        override fun areContentsTheSame(a: Ep, b: Ep) = a.d.state == b.d.state && a.bytes == b.bytes &&
             a.d.stopReason == b.d.stopReason && a.watched == b.watched
     }
 
@@ -290,6 +299,7 @@ class DownloadsShowFragment : Fragment() {
             v.findViewById<TextView>(R.id.dl_title).text = ep?.name?.takeIf { it.isNotBlank() }?.let { "${e.m.episode}. $it" } ?: "Episode ${e.m.episode}"
             v.findViewById<TextView>(R.id.dl_sub).apply {
                 text = if (done) listOfNotNull(DownloadUi.size(ctx, e.d.bytesDownloaded), e.m.quality?.let { "${it}p" },
+                    com.anees.novamobile.ui.common.FillerBadge.text(com.anees.novamobile.data.sources.anime.FillerInfo.cached(e.m.card)?.at(e.m.season, e.m.episode)?.kind)?.lowercase()?.replaceFirstChar { it.uppercase() },
                     when { e.watched >= 0.9f -> "Watched"; e.watched > 0.02f -> "${(e.watched * 100).toInt()}% watched"; else -> null }).joinToString("  ·  ")
                     else DownloadUi.status(ctx, e.d)
                 setTextColor(if (e.d.state == Download.STATE_FAILED) Ui.DANGER else Ui.TEXT2)

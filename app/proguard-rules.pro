@@ -5,6 +5,8 @@
 -keep class com.anees.novamobile.download.DownloadStarter$Item { *; }
 -keep class com.anees.novamobile.data.api.TmdbSearchResult { *; }
 -keep class com.anees.novamobile.ui.player.WebStreamSniffer$Sniffed { *; }
+# Per-quality files of a stream (cached to disk with Gson, like Sniffed)
+-keep class com.anees.novamobile.ui.player.WebStreamSniffer$Sniffed$Option { *; }
 -keep class com.anees.novamobile.data.local.Settings { *; }
 -keep,allowobfuscation,allowshrinking class com.google.gson.reflect.TypeToken
 -keep,allowobfuscation,allowshrinking class * extends com.google.gson.reflect.TypeToken

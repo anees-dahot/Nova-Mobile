@@ -60,6 +60,7 @@ class SettingsFragment : Fragment(), TabPage {
         val boosts = listOf("Off", "+6 dB", "+10 dB", "+15 dB")
         row("Volume Boost", boosts[s.volumeBoost]) { pick("Volume Boost", boosts, s.volumeBoost) { save(s.copy(volumeBoost = it)) } }
         row("Autoplay Next Episode", if (s.autoplayNext) "On" else "Off") { save(s.copy(autoplayNext = !s.autoplayNext)) }
+        row("Skip Anime Filler", if (s.skipFiller) "On · next episode jumps over filler & recaps" else "Off") { save(s.copy(skipFiller = !s.skipFiller)) }
         row("Swipe Gestures", if (s.gestures) "On" else "Off") { save(s.copy(gestures = !s.gestures)) }
         note("Swipe the left side for brightness, the right side for volume, sideways to seek. Hold for 2×, pinch to fill the screen.")
         row("Picture-in-Picture", if (s.autoPip) "Automatic" else "Button only") { save(s.copy(autoPip = !s.autoPip)) }
@@ -97,6 +98,12 @@ class SettingsFragment : Fragment(), TabPage {
         val qualities = listOf("480p (smaller)", "720p", "1080p (best)")
         row("Download Quality", qualities[s.dlQuality].substringBefore(" ")) { pick("Download Quality", qualities, s.dlQuality) { saveDl(s.copy(dlQuality = it)) } }
         row("Wi-Fi Only", if (s.dlWifiOnly) "On" else "Off") { saveDl(s.copy(dlWifiOnly = !s.dlWifiOnly)) }
+        row("Only While Charging", if (s.dlOnlyCharging) "On · great for overnight downloads" else "Off") { saveDl(s.copy(dlOnlyCharging = !s.dlOnlyCharging)) }
+        val limits = listOf(0, 512, 1024, 2048, 5120)
+        fun limitName(k: Int) = when { k == 0 -> "Unlimited"; k < 1024 -> "$k KB/s"; else -> "${k / 1024} MB/s" }
+        row("Download Speed Limit", limitName(s.dlSpeedLimitKb)) {
+            pick("Download Speed Limit", limits.map { limitName(it) }, limits.indexOf(s.dlSpeedLimitKb).coerceAtLeast(0)) { i -> save(s.copy(dlSpeedLimitKb = limits[i])) }
+        }
         row("Downloads at Once", s.dlParallel.toString()) { pick("Downloads at Once", listOf("1", "2", "3"), s.dlParallel - 1) { saveDl(s.copy(dlParallel = it + 1)) } }
         row("Ask Quality Each Time", if (s.dlAskQuality) "On" else "Off") { save(s.copy(dlAskQuality = !s.dlAskQuality)) }
         row("Auto-save to Gallery", if (s.autoSaveGallery) "On" else "Off") {

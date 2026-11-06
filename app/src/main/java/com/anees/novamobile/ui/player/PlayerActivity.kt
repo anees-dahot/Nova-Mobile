@@ -146,6 +146,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private var locked = false
     private var inPip = false
     private var hudHide: Runnable? = null
+    private var filler: com.anees.novamobile.data.sources.anime.FillerInfo.Show? = null
     private var episodeLine = ""          // "S1 · E3  ·  Episode name", shown under the title with "ends 10:42 PM"
     private lateinit var gestures: PlayerGestures
     private lateinit var subOverlay: androidx.media3.ui.SubtitleView
@@ -332,6 +333,11 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         // Downloaded? Play the saved copy: no search, works offline
         val dl = com.anees.novamobile.download.NovaDownloads.get(this, com.anees.novamobile.download.DownloadMeta.id(card, s, e))
         if (dl?.state == androidx.media3.exoplayer.offline.Download.STATE_COMPLETED) { playOffline(dl); return }
+        // Still downloading (MovieBox-style "watch while downloading"): play the same file from what's saved,
+        // fetching the rest as needed — starts instantly, no source search. A dead link falls back to streaming.
+        if (dl != null && dl.state != androidx.media3.exoplayer.offline.Download.STATE_FAILED && dl.bytesDownloaded > 8L * 1024 * 1024 && online()) {
+            Log.i(TAG, "watching while downloading (${dl.percentDownloaded.toInt()}%)"); playOffline(dl); return
+        }
         streamJob = lifecycleScope.launch {
             showStatus("Finding ${title()}…")
             // Family-safe check runs alongside the stream search instead of before it
@@ -444,7 +450,16 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     }
 
     /** Saved download: same player and track rules, data from the download store, subtitles from disk. */
+    private fun online(): Boolean {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return true
+        return cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    }
+
+    /** Watching while it still downloads (label says so; the rest streams in). */
+    private var offlinePartial = false
+
     private fun playOffline(d: androidx.media3.exoplayer.offline.Download) {
+        offlinePartial = d.state != androidx.media3.exoplayer.offline.Download.STATE_COMPLETED
         val meta = com.anees.novamobile.download.DownloadMeta.of(d)
         val paths = meta?.subtitles ?: listOfNotNull(meta?.subtitle)
         val langs = meta?.subtitleLangs
@@ -672,6 +687,23 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             }
             MediaType.ANIME -> if (!t.isMovie && (card.episodes == null || episode < card.episodes!!)) 1 to episode + 1 else null
             else -> null
+        }
+        // Anime filler knowledge: this episode's real title + kind; "Skip Anime Filler" makes Next jump to the next story episode
+        if (com.anees.novamobile.data.sources.anime.FillerInfo.applies(card) && !t.isMovie) {
+            val f = com.anees.novamobile.data.sources.anime.FillerInfo.forShow(card, t.malId)
+            filler = f
+            f.at(season, episode)?.let { e ->
+                episodeLine = listOfNotNull("E$episode", e.title, com.anees.novamobile.ui.common.FillerBadge.text(e.kind)?.lowercase()?.replaceFirstChar { it.uppercase() }).joinToString("  ·  ")
+                updateTimes()
+                if (e.kind.skippable) android.widget.Toast.makeText(this@PlayerActivity, "${e.kind.label} episode" +
+                    (if (e.kind == com.anees.novamobile.data.sources.anime.FillerInfo.Kind.FILLER) " · not part of the manga story" else ""), android.widget.Toast.LENGTH_LONG).show()
+            }
+            val last = if (card.type == MediaType.ANIME) card.episodes ?: Int.MAX_VALUE else seasonEpisodes.size
+            nextEpisode?.let { (ns, ne) ->
+                var n = ne
+                if (settings.skipFiller) while (n < last && f.at(ns, n)?.kind?.skippable == true) n++
+                nextEpisode = ns to n
+            }
         }
         val hasEpisodes = (card.type == MediaType.SERIES && seasonEpisodes.isNotEmpty()) || (card.type == MediaType.ANIME && !t.isMovie)
         episodesBtn.visibility = if (hasEpisodes) View.VISIBLE else View.GONE
@@ -1011,7 +1043,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val h = p.videoSize.height.takeIf { it > 0 }
         val manual = p.trackSelectionParameters.overrides.keys.any { it.type == C.TRACK_TYPE_VIDEO }
         qualityBtn.text = when {
-            offlineItem != null -> if (h != null) "Downloaded · ${h}p" else "Downloaded"
+            offlineItem != null -> (if (offlinePartial) "Downloading" else "Downloaded") + (h?.let { " · ${it}p" } ?: "")
             h == null -> "Auto"
             manual -> "${h}p"
             else -> "Auto · ${h}p"
@@ -1077,7 +1109,10 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val ep = if (next.first == season) seasonEpisodes.firstOrNull { it.episodeNumber == next.second } else null
         findViewById<TextView>(R.id.next_title).text = buildString {
             append(if (card.type == MediaType.ANIME) "Episode ${next.second}" else "S${next.first} · E${next.second}")
-            ep?.name?.takeIf { it.isNotBlank() }?.let { append("  ·  $it") }
+            val f = filler?.at(next.first, next.second)
+            (f?.title ?: ep?.name)?.takeIf { it.isNotBlank() }?.let { append("  ·  $it") }
+            com.anees.novamobile.ui.common.FillerBadge.text(f?.kind)?.let { append("  ·  $it") }
+            if (next.first == season && next.second > episode + 1) append("  (skipped ${next.second - episode - 1} filler)")
         }
         findViewById<ImageView>(R.id.next_still).load(ep?.stillPath?.let { "https://image.tmdb.org/t/p/w300$it" } ?: card.backdropUrl)
         nextDeadline = if (countdown) SystemClock.elapsedRealtime() + UP_NEXT_MS else 0

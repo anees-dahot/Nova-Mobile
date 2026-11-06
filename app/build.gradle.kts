@@ -16,8 +16,8 @@ android {
         applicationId = "com.anees.novamobile"
         minSdk = 26
         targetSdk = 34
-        versionCode = 15
-        versionName = "1.3.11"
+        versionCode = 16
+        versionName = "1.3.12"
         buildConfigField("String", "TRAKT_ID", "\"${localProps.getProperty("trakt.clientId", "")}\"")
         buildConfigField("String", "TRAKT_SECRET", "\"${localProps.getProperty("trakt.clientSecret", "")}\"")
         buildConfigField("String", "ANILIST_ID", "\"${localProps.getProperty("anilist.clientId", "")}\"")

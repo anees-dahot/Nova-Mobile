@@ -57,9 +57,9 @@ object DlStats {
         val sp = speed(d)
         return listOfNotNull(
             "${d.percentDownloaded.toInt().coerceIn(0, 100)}%",
-            progress(ctx, d),
+            progress(ctx, d).replace(" of ", " / "),
             if (sp > 0) "${size(ctx, sp)}/s" else null,
-            eta(etaSeconds(d)).ifEmpty { null }
+            etaSeconds(d).takeIf { it >= 0 }?.let { e -> if (e < 60) "<1m" else if (e < 3600) "${(e + 30) / 60}m" else "${e / 3600}h ${(e % 3600) / 60}m" }
         ).joinToString("  ·  ")
     }
 }

@@ -42,13 +42,51 @@ object DownloadUi {
     /** One line, never wraps: what's happening right now. */
     fun status(ctx: Context, d: Download): String = when {
         d.state == Download.STATE_COMPLETED -> Formatter.formatShortFileSize(ctx, d.bytesDownloaded)
+        !online(ctx) && !paused(d) -> "Waiting for network · resumes by itself"
+        !paused(d) && d.state == Download.STATE_QUEUED && notMet(ctx, androidx.media3.exoplayer.scheduler.Requirements.DEVICE_CHARGING) -> "Waiting for the charger"
+        !paused(d) && d.state == Download.STATE_QUEUED && notMet(ctx, androidx.media3.exoplayer.scheduler.Requirements.NETWORK_UNMETERED) -> "Waiting for Wi-Fi"
+        !paused(d) && d.state == Download.STATE_QUEUED && notMet(ctx, androidx.media3.exoplayer.scheduler.Requirements.DEVICE_STORAGE_NOT_LOW) -> "Phone storage low · free up space"
         d.state == Download.STATE_FAILED -> "Failed · tap to retry"
         paused(d) -> "Paused · ${DlStats.progress(ctx, d)}"
         NovaDownloads.storageFull -> "Storage full"
         d.state == Download.STATE_DOWNLOADING -> DlStats.line(ctx, d)
-        d.state == Download.STATE_RESTARTING -> "Restarting…"
-        else -> "Waiting…"
+        d.state == Download.STATE_RESTARTING -> "Reconnecting…"
+        d.state == Download.STATE_QUEUED && d.bytesDownloaded > 0 -> "Queued · ${DlStats.progress(ctx, d)}"
+        else -> "In line · starts when a slot frees up"
     }
+
+    private fun notMet(ctx: Context, flag: Int) = runCatching { NovaDownloads.manager(ctx).notMetRequirements and flag != 0 }.getOrDefault(false)
+
+    private fun online(ctx: Context): Boolean {
+        val cm = ctx.getSystemService(android.net.ConnectivityManager::class.java) ?: return true
+        return cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    }
+
+    /** Enough saved to start watching while the rest downloads (the player fetches what's missing). */
+    fun watchable(d: Download) = d.state != Download.STATE_FAILED && d.bytesDownloaded > 8L * 1024 * 1024
+
+    /** Re-download in another quality/source: the old copy goes, the download sheet opens for a fresh pick. */
+    fun changeQuality(act: androidx.appcompat.app.AppCompatActivity, d: Download, m: DownloadMeta, onChange: () -> Unit) {
+        android.app.AlertDialog.Builder(act)
+            .setTitle("Change quality?")
+            .setMessage("The current copy (${m.quality?.let { "${it}p, " } ?: ""}${size(act, d.bytesDownloaded)}) is deleted, then you pick the new source and quality.")
+            .setPositiveButton("Continue") { _, _ ->
+                remove(act, d)
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    DownloadSheet.show(act, listOf(com.anees.novamobile.download.DownloadStarter.Item(m.card, m.season, m.episode)), onChange)
+                }, 500)
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    /** "MP4  ·  720P  ·  MOVIEBOX  ·  HINDI": what this download really is. */
+    fun tags(d: Download, m: DownloadMeta?): String = listOfNotNull(
+        if (com.anees.novamobile.download.DownloadStarter.isProgressive(d.request.uri.toString())) "MP4" else "HLS",
+        m?.quality?.let { "${it}p" },
+        m?.provider?.substringBefore('#'),
+        m?.let { com.anees.novamobile.data.sources.anime.FillerInfo.cached(it.card)?.at(it.season, it.episode)?.kind }?.let { com.anees.novamobile.ui.common.FillerBadge.text(it) },
+        m?.audioLangs?.takeIf { it.isNotEmpty() }?.let { l -> l.take(3).mapNotNull { com.anees.novamobile.data.model.LangTags.name(it) }.joinToString(", ").ifEmpty { null } },
+    ).joinToString("  ·  ").uppercase()
 
     /** "720p · Hindi, English · 2 subtitles" */
     fun details(m: DownloadMeta): String = listOfNotNull(

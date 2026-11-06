@@ -14,6 +14,9 @@ data class Settings(
     val subtitlesOn: Boolean = false,
     val subtitleSize: Int = 1,             // 0 small, 1 medium, 2 large
     val autoplayNext: Boolean = true,
+    val skipFiller: Boolean = false,
+    val dlSpeedLimitKb: Int = 0,
+    val dlOnlyCharging: Boolean = false,   // download only while plugged in (overnight downloading)           // 0 = unlimited; caps all download traffic (KB/s)       // anime: Next episode / autoplay jump over filler and recap episodes
     val lowCpuMode: Boolean = false,       // tunneled playback
     val matchFrameRate: Boolean = false,
     val volumeBoost: Int = 0,              // 0 off, 1 +6dB, 2 +10dB, 3 +15dB

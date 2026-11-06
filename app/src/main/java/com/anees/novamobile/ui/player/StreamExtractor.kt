@@ -35,7 +35,9 @@ object StreamExtractor {
                       val malId: Int? = null, val title: String? = null, val year: Int? = null,
                       val imdbId: String? = null,
                       /** Anime: episode number within the AniList/MAL entry (season/episode are TVDB's). */
-                      val aniEpisode: Int? = null)
+                      val aniEpisode: Int? = null,
+                      /** Japanese animation (anime entry or a Japanese-language show): title-search sources must not match live action. */
+                      val anime: Boolean = false)
 
     /** Built-in list, used until (or if) the remote sources.json from GitHub loads. */
     val BUILT_IN = listOf(
@@ -177,8 +179,21 @@ object StreamExtractor {
         cache[key]?.let { (at, s) -> if (System.currentTimeMillis() - at < TTL) return s }
         return com.anees.novamobile.data.local.LocalStore.stream(key)?.let { (at, json) ->
             if (System.currentTimeMillis() - at >= TTL) null
-            else runCatching { gson.fromJson(json, WebStreamSniffer.Sniffed::class.java) }.getOrNull()?.also { cache[key] = at to it }
+            else runCatching { gson.fromJson(json, WebStreamSniffer.Sniffed::class.java) }.getOrNull()?.let { sane(it) }?.also { cache[key] = at to it }
         }
+    }
+
+    /**
+     * Gson ignores Kotlin null-safety: an entry written by another app version can come back with null
+     * fields. Drop broken entries / options instead of crashing later.
+     */
+    @Suppress("SENSELESS_COMPARISON", "USELESS_CAST")
+    private fun sane(s: WebStreamSniffer.Sniffed): WebStreamSniffer.Sniffed? {
+        if ((s.url as String?) == null || (s.headers as Map<*, *>?) == null || (s.userAgent as String?) == null || (s.subtitles as List<*>?) == null) return null
+        return s.copy(
+            options = s.options?.filter { (it as WebStreamSniffer.Sniffed.Option?) != null && (it.url as String?) != null && it.height > 0 }?.takeIf { it.isNotEmpty() },
+            variants = s.variants?.mapNotNull { v -> (v as WebStreamSniffer.Sniffed?)?.let { sane(it) } }?.takeIf { it.isNotEmpty() },
+        )
     }
 
     fun remember(p: Provider, t: Target, s0: WebStreamSniffer.Sniffed) {
@@ -223,7 +238,10 @@ object StreamExtractor {
     fun embedUrl(p: Provider, t: Target) = if (t.isMovie) p.movie(t.tmdbId) else p.tv(t.tmdbId, t.season, t.episode)
 
     /** Movies/series map 1:1; anime goes AniList → TMDB via ani.zip (season/episode from TVDB numbering). */
-    suspend fun resolveTarget(card: MediaCard, season: Int, episode: Int, repo: MediaRepository): Target? = when (card.type) {
+    suspend fun resolveTarget(card: MediaCard, season: Int, episode: Int, repo: MediaRepository): Target? =
+        resolveTarget0(card, season, episode, repo)?.copy(anime = card.type == MediaType.ANIME || card.lang == "ja")
+
+    private suspend fun resolveTarget0(card: MediaCard, season: Int, episode: Int, repo: MediaRepository): Target? = when (card.type) {
         MediaType.MOVIE -> Target(card.tmdbId ?: card.id, true, 0, 0, title = card.title, year = card.year.toIntOrNull(), imdbId = card.imdbId)
         MediaType.SERIES -> Target(card.tmdbId ?: card.id, false, season.coerceAtLeast(1), episode.coerceAtLeast(1),
             title = card.title, year = card.year.toIntOrNull(), imdbId = card.imdbId)

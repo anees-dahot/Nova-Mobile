@@ -28,6 +28,7 @@ object SmartDownloads {
         val id = DownloadMeta.id(card, season, episode)
         if (!handled.add(id)) return
         val s = LocalStore.settings()
+        val watchedMeta = NovaDownloads.get(ctx, id)?.let { DownloadMeta.of(it) }
         if (s.dlAutoDeleteWatched || s.smartDownloads) {
             DownloadService.sendRemoveDownload(ctx, NovaDownloadService::class.java, id, false)
             NovaDownloads.get(ctx, id)?.let { NovaDownloads.deleteSubtitles(it) }
@@ -35,11 +36,17 @@ object SmartDownloads {
         if (!s.smartDownloads || card.type == MediaType.MOVIE) return
         val app = ctx.applicationContext
         scope.launch {
-            val next = upcoming(card, season, episode, s.keepNext.coerceIn(1, 3))
+            val keep = s.keepNext.coerceIn(1, 3)
+            // With "Skip Anime Filler" on, filler/recap episodes don't take a slot
+            val filler = if (s.skipFiller) com.anees.novamobile.data.sources.anime.FillerInfo.forShow(card) else null
+            val next = upcoming(card, season, episode, if (filler != null) keep + 12 else keep)
+                .filter { (ns, ne) -> filler?.at(ns, ne)?.kind?.skippable != true }
+                .take(keep)
                 .filter { (ns, ne) -> NovaDownloads.get(app, DownloadMeta.id(card, ns, ne))?.state.let { it == null || it == Download.STATE_FAILED } }
             if (next.isEmpty()) return@launch
             Log.i(TAG, "smart downloads: queueing ${next.size} after S${season}E$episode")
-            DownloadStarter.enqueue(app, next.map { DownloadStarter.Item(card, it.first, it.second) })
+            // Same source and quality as the episode you just watched
+            DownloadStarter.enqueue(app, next.map { DownloadStarter.Item(card, it.first, it.second, provider = watchedMeta?.provider, height = watchedMeta?.quality) })
         }
     }
 

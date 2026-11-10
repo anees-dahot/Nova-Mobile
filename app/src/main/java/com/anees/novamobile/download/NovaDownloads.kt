@@ -96,6 +96,15 @@ object NovaDownloads {
                 ?: r.header("Content-Length")?.toLongOrNull()?.takeIf { r.code == 200 && it > 1 }
         }
     }.onFailure { Log.w(TAG, "length probe: ${it.message}") }.getOrNull()
+    /** Whether the server honours byte ranges (206 to "bytes=1-1"); hosts that answer 200 can't be split or resumed. */
+    fun supportsRange(uri: Uri): Boolean = runCatching {
+        val spec = resolve(DataSpec(StreamExtractor.unwrapProxy(uri)))
+        val req = okhttp3.Request.Builder().url(spec.uri.toString()).header("Range", "bytes=1-1")
+            .header("User-Agent", LocalStore.downloadUserAgent())
+            .apply { spec.httpRequestHeaders.forEach { (k, v) -> header(k, v) } }.build()
+        client.newCall(req).execute().use { r -> r.code == 206 || r.header("Content-Range") != null }
+    }.getOrDefault(true)
+
     /**
      * HLS/DASH segments downloaded at once, shared by all running downloads. Stream CDNs answer
      * each small segment slowly (~0.5s to first byte), so throughput grows with parallel requests:

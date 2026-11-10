@@ -64,9 +64,12 @@ object MultimoviesSource {
             // Servers embed the TMDB id: a page for some other title with the same name is skipped
             val ids = servers.mapNotNull { tmdbIdOf(it.url) }.toSet()
             if (ids.isNotEmpty() && t.tmdbId.toString() !in ids) { Log.i(TAG, "multimovies: \"${hit.title}\" is another title"); continue }
-            val found = extract(servers, page) ?: continue
-            Log.i(TAG, "multimovies: \"${hit.title}\" via ${found.server}")
-            return WebStreamSniffer.Sniffed(found.url, mapOf("Referer" to found.referer), VmHttp.UA, emptyList())
+            val found = extract(servers, page).ifEmpty { null } ?: continue
+            Log.i(TAG, "multimovies: \"${hit.title}\" via ${found.joinToString { it.server }}")
+            // Every server that answered: the best plays, the rest stay listed (they often differ in audio and cut)
+            val all = found.map { f -> WebStreamSniffer.Sniffed(f.url, mapOf("Referer" to f.referer), VmHttp.UA, emptyList(),
+                meta = com.anees.novamobile.ui.player.StreamMeta(server = f.server)) }
+            return all.first().copy(variants = all.drop(1).takeIf { it.isNotEmpty() })
         }
         return null
     }
@@ -149,17 +152,17 @@ object MultimoviesSource {
      * Unwraps every server at once and keeps the best that answered in time: Cineverse
      * (Hindi-first multi-audio) and Filmu (1080p, English + Hindi) ahead of unknown embeds.
      */
-    private suspend fun extract(servers: List<Server>, pageUrl: String): Found? = coroutineScope {
+    private suspend fun extract(servers: List<Server>, pageUrl: String): List<Found> = coroutineScope {
         val jobs = servers.take(10).map { s ->
             async { withTimeoutOrNull(EXTRACT_BUDGET_MS) { runCatching { extractOne(s, pageUrl) }.getOrNull() } }
         }
         val found = jobs.awaitAll().filterNotNull()
-        if (found.size <= 1) return@coroutineScope found.firstOrNull()
+        if (found.size <= 1) return@coroutineScope found
         // Servers of one page often differ in audio (Hindi-only vs Hindi + English): most languages wins,
         // the known-good hosts break ties
         val langs = found.map { f -> async { f to com.anees.novamobile.ui.player.AudioProbe.langs(WebStreamSniffer.Sniffed(f.url, mapOf("Referer" to f.referer), VmHttp.UA, emptyList())).size } }.awaitAll()
         Log.i(TAG, "multimovies servers: ${langs.joinToString { "${it.first.server}=${it.second}" }}")
-        langs.sortedWith(compareByDescending<Pair<Found, Int>> { it.second }.thenBy { priority(it.first) }).first().first
+        langs.sortedWith(compareByDescending<Pair<Found, Int>> { it.second }.thenBy { priority(it.first) }).map { it.first }.distinctBy { it.url }
     }
 
     private fun priority(f: Found): Int = when {

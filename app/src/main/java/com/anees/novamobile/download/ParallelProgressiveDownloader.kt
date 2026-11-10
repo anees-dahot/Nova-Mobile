@@ -79,6 +79,11 @@ class ParallelProgressiveDownloader(request: DownloadRequest, private val factor
             // Server won't say how big: one connection, like Media3's own downloader
             single(listener); return
         }
+        // Server ignores ranges (some Google file links): every piece would restart at byte 0 — one connection
+        if (cache.getCachedBytes(key, 0, length) == 0L && !NovaDownloads.supportsRange(uri)) {
+            Log.i(TAG, "parallel: server ignores ranges, one connection")
+            single(listener); return
+        }
         val pieces = ConcurrentLinkedQueue<LongArray>()
         var pos = 0L
         // Last ~10% in 1 MB pieces: the download doesn't crawl at the end waiting on one slow 4 MB piece

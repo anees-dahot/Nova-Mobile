@@ -5,6 +5,8 @@ import com.anees.novamobile.data.api.RetrofitClient
 import com.anees.novamobile.data.model.LangTags
 import com.anees.novamobile.ui.player.StreamExtractor
 import com.anees.novamobile.ui.player.WebStreamSniffer
+import com.anees.novamobile.ui.player.ReleaseInfo
+import com.anees.novamobile.ui.player.StreamMeta
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -130,18 +132,26 @@ object MovieBoxSource {
             val all = listOfNotNull(play?.optJSONArray("streams"), dl?.optJSONArray("downloads")).flatMap { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) } }
                 .filter { !it.optBoolean("vipLocked") && it.optString("url").startsWith("http") && !it.optString("url").contains("macdn.aoneroom.com/other/") }
             val best = all.maxByOrNull { it.optString("resolutions").toIntOrNull() ?: it.optInt("resolution", 0) } ?: return@runCatching null
-            val subs = dl?.optJSONArray("captions")?.let { a ->
+            val caps = dl?.optJSONArray("captions")?.let { a ->
                 (0 until a.length()).mapNotNull { a.optJSONObject(it) }.sortedByDescending { it.optString("lan") == "en" }
-                    .mapNotNull { it.optString("url").takeIf { u -> u.startsWith("http") } }
-            }.orEmpty().take(4)
+                    .mapNotNull { c -> c.optString("url").takeIf { u -> u.startsWith("http") }?.let { it to ReleaseInfo.langCode(c.optString("lan").ifBlank { c.optString("lanName") }) } }
+            }.orEmpty().take(6)
+            val subs = caps.map { it.first }
+            /** Codec / length / format the API lists per file (field names vary between its endpoints). */
+            fun metaOf(o: JSONObject) = StreamMeta(
+                codec = o.optString("codecName").ifBlank { o.optString("codec") }.takeIf { it.isNotBlank() }?.let { c ->
+                    when { c.contains("265") || c.contains("hevc", true) -> "HEVC"; c.contains("264") || c.contains("avc", true) -> "x264"; c.contains("av1", true) -> "AV1"; else -> c } },
+                durationSec = listOf("duration", "durationSeconds").firstNotNullOfOrNull { k -> o.optString(k).toDoubleOrNull()?.toInt()?.takeIf { it > 0 } },
+                bytes = o.optString("size").toLongOrNull()?.takeIf { it > 0 },
+                subLangs = caps.map { it.second }.takeIf { l -> l.any { it.isNotEmpty() } })
             val height = best.optString("resolutions").toIntOrNull() ?: best.optInt("resolution", 0)
             // Like the MovieBox app: every quality is its own MP4 with a known size
             val options = all.mapNotNull { o ->
                 val h = o.optString("resolutions").toIntOrNull() ?: o.optInt("resolution", 0)
-                if (h <= 0) null else WebStreamSniffer.Sniffed.Option(o.optString("url"), h, o.optString("size").toLongOrNull()?.takeIf { it > 0 })
+                if (h <= 0) null else WebStreamSniffer.Sniffed.Option(o.optString("url"), h, o.optString("size").toLongOrNull()?.takeIf { it > 0 }, metaOf(o))
             }.groupBy { it.height }.map { (_, same) -> same.firstOrNull { it.bytes != null } ?: same.first() }.sortedBy { it.height }
             WebStreamSniffer.Sniffed(best.optString("url"), mapOf("Referer" to PLAY_REFERER), UA, subs, height = height.takeIf { it > 0 },
-                options = options.takeIf { it.size > 1 })
+                options = options.takeIf { it.size > 1 }, meta = metaOf(best))
         }.getOrNull()
     }
 

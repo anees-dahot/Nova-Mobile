@@ -61,6 +61,22 @@ object StreamExtractor {
      * are only stable cache keys).
      */
     val RESOLVERS = listOf(
+        // HDHub4u: huge Hindi + Hollywood catalogue, 480p→4K with sizes (exact IMDb match), direct files via HubCloud
+        Provider("HDHub4u", { "hdhub4u://movie/$it" }, { id, s, e -> "hdhub4u://tv/$id/$s/$e" },
+            timeoutMs = 25_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.hub.HubSources.hdHub4u(t) }),
+        // MoviesDrive: IMDb-exact, 480p→4K with sizes, direct files via HubCloud
+        Provider("MoviesDrive", { "moviesdrive://movie/$it" }, { id, s, e -> "moviesdrive://tv/$id/$s/$e" },
+            timeoutMs = 25_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.hub.HubSources.moviesDrive(t) }),
+        // 4KHDHub: real releases (WEB-DL/BluRay/REMUX, x265 10-bit, DV/HDR, Hindi+English), direct MKVs via HubCloud
+        Provider("4KHDHub", { "4khdhub://movie/$it" }, { id, s, e -> "4khdhub://tv/$id/$s/$e" },
+            timeoutMs = 25_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.hub.HubSources.fourKHdHub(t) }),
+        // VixSrc over HTTP (API → embed → token-signed master): tagged audio languages, many subtitles, 1080p
+        Provider("VixSrc", { "vixsrc://movie/$it" }, { id, s, e -> "vixsrc://tv/$id/$s/$e" },
+            timeoutMs = 15_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.vixsrc.VixSrcSource.resolve(t) }),
         Provider("Vegamovies",
             { id -> "vegamovies://movie/$id" },
             { id, s, e -> "vegamovies://tv/$id/$s/$e" },
@@ -117,14 +133,21 @@ object StreamExtractor {
         // JW Player page by TMDB id; English + Hindi
         Provider("XPass", { "https://play.xpass.top/e/movie/$it" }, { id, s, e -> "https://play.xpass.top/e/tv/$id/$s/$e" }, 20_000, multiAudio = true),
         // Token-signed HLS, often several audio languages
-        Provider("VixSrc", { "https://vixsrc.to/movie/$it" }, { id, s, e -> "https://vixsrc.to/tv/$id/$s/$e" }, 20_000, multiAudio = true),
         Provider("VidRock", { "https://vidrock.net/movie/$it" }, { id, s, e -> "https://vidrock.net/tv/$id/$s/$e" }, 20_000),
     )
 
     /** Remote list (sources.json in the GitHub repo) if available, else the built-in one; then extra embeds + resolvers. */
+    /**
+     * Retired after live tests (Nov 2026): never answered (VidLink, VidSrc CC, Videasy — Videasy also hijacks
+     * the first tap with an ad) or answered slowly with nothing usable (VidLux: no quality/length, VaPlayer's files).
+     * Dropped even when an older sources.json still lists them.
+     */
+    /** Also retired after three-title tests: Braflix (missed movies, 480p at best), VidSrc (no quality/length/language), VidRock (slowest page, nothing new). */
+    private val RETIRED = setOf("VidLink", "VidSrc CC", "Videasy", "VidLux", "Braflix", "VidSrc", "VidRock")
+
     val PROVIDERS: List<Provider> get() {
-        val base = remote() ?: BUILT_IN
-        return base + EXTRA_EMBEDS.filter { e -> base.none { it.name == e.name } } + RESOLVERS
+        val base = (remote() ?: BUILT_IN).filter { it.name !in RETIRED && RESOLVERS.none { r -> r.name == it.name } }
+        return (base + EXTRA_EMBEDS.filter { e -> base.none { it.name == e.name } } + RESOLVERS).filter { it.name !in RETIRED }
     }
 
     private var remoteCache: Pair<String, List<Provider>>? = null
@@ -226,7 +249,10 @@ object StreamExtractor {
 
     /** The stream in [lang] among [s] and its variants. */
     fun variant(s: WebStreamSniffer.Sniffed, lang: String?): WebStreamSniffer.Sniffed? =
-        if (lang == null) s else s.withVariants().firstOrNull { it.audioLang == lang }
+        if (lang == null) s else s.withVariants().firstOrNull { variantKey(it) == lang }
+
+    /** What tells one stream of a source from its siblings: its dub language ("hi"), else its server ("@Filmu"). */
+    fun variantKey(v: WebStreamSniffer.Sniffed): String? = v.audioLang ?: v.meta?.server?.let { "@$it" }
 
     /** The page the WebView sniffs: found by the source's [Provider.page] search, else its fixed embed URL. */
     suspend fun sniffUrl(p: Provider, t: Target): String? = when {

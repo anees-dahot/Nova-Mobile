@@ -233,6 +233,17 @@ object PublicExport {
         Thread {
             note.update(0f)
             val t0 = System.currentTimeMillis()
+            // Release files (MKV with DD+ / DTS / several audio tracks): an exact copy as .mkv keeps every track;
+            // remuxing to MP4 would drop audio MP4 can't hold
+            val raw = rawKey(d)?.takeIf { isMkv(it) }
+            if (raw != null) {
+                val ok = runCatching {
+                    val produce: (FileOutputStream) -> Unit = { out -> copyRaw(raw, d.contentLength, out) { note.update(it) } }
+                    if (req.tree != null) writeTree(ctx, req.tree, m, null, produce, ext = "mkv") else publish(ctx, m, null, produce, ext = "mkv")
+                }.onFailure { Log.w(TAG, "${req.id}: mkv copy failed", it) }.isSuccess
+                main.post { if (ok) finish(ctx, job, true, "Saved ${DownloadNotifier.name(m)}") else fail(ctx, req, "Couldn't copy the file") }
+                return@Thread
+            }
             val plan = FastExport.plan(ctx, d)
             val ok = plan != null && runCatching {
                 val produce: (FileOutputStream) -> Unit = { out -> FastExport.write(ctx, plan, out) { note.update(it) } }
@@ -250,6 +261,38 @@ object PublicExport {
                 }
             }
         }.start()
+    }
+
+    /** Cache key of a single direct-file download (null for HLS/DASH). */
+    private fun rawKey(d: Download): String? =
+        if (d.request.streamKeys.isNotEmpty() || d.request.uri.toString().contains("m3u8")) null
+        else d.request.customCacheKey ?: NovaDownloads.stableKey(d.request.uri)
+
+    private fun reader(key: String) = androidx.media3.datasource.cache.CacheDataSource(NovaDownloads.cache, null)
+        .let { ds -> key to ds }
+
+    private fun isMkv(key: String): Boolean = runCatching {
+        val (k, ds) = reader(key)
+        try {
+            ds.open(androidx.media3.datasource.DataSpec.Builder().setUri(Uri.parse("cache://$k")).setKey(k).setPosition(0).setLength(4).build())
+            val b = ByteArray(4); var got = 0
+            while (got < 4) { val r = ds.read(b, got, 4 - got); if (r < 0) break; got += r }
+            got == 4 && b[0] == 0x1A.toByte() && b[1] == 0x45.toByte() && b[2] == 0xDF.toByte() && b[3] == 0xA3.toByte()
+        } finally { ds.close() }
+    }.getOrDefault(false)
+
+    /** Whole saved file, straight from the cache, into [out]. */
+    private fun copyRaw(key: String, length: Long, out: FileOutputStream, progress: (Float) -> Unit) {
+        val (k, ds) = reader(key)
+        try {
+            ds.open(androidx.media3.datasource.DataSpec.Builder().setUri(Uri.parse("cache://$k")).setKey(k).build())
+            val buf = ByteArray(1 shl 20); var total = 0L; var last = 0L
+            while (true) {
+                val r = ds.read(buf, 0, buf.size); if (r < 0) break
+                out.write(buf, 0, r); total += r
+                if (length > 0 && total - last > 8L * 1024 * 1024) { last = total; progress(total.toFloat() / length) }
+            }
+        } finally { ds.close() }
     }
 
     private fun fail(ctx: Context, req: Request, msg: String) {
@@ -598,7 +641,7 @@ object PublicExport {
     }
 
     /** Copy into a folder the user picked: <folder>/<Title>/<file>.mp4 plus subtitles, via DocumentsContract. */
-    private fun writeTree(ctx: Context, tree: Uri, m: DownloadMeta, video: File?, produce: ((FileOutputStream) -> Unit)? = null) {
+    private fun writeTree(ctx: Context, tree: Uri, m: DownloadMeta, video: File?, produce: ((FileOutputStream) -> Unit)? = null, ext: String = "mp4") {
         val r = ctx.contentResolver
         val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
         val (_, base) = place(m)
@@ -643,7 +686,8 @@ object PublicExport {
         }
         val subs = subtitleTracks(ctx, m)
         var embedded = true
-        copy("$base.mp4", "video/mp4", video, produce) { fd -> embedded = embedSubs(fd, subs) }
+        if (ext == "mkv") { copy("$base.mkv", "video/x-matroska", video, produce); embedded = false }   // subtitles beside it
+        else copy("$base.mp4", "video/mp4", video, produce) { fd -> embedded = embedSubs(fd, subs) }
         // Subtitle files from earlier saves would sit beside the video and be loaded on top of the embedded ones
         listOf("$base.srt", "$base.vtt").forEach { replace(it) }
         subs.mapNotNull { it.lang }.distinct().forEach { l -> replace("$base.$l.srt"); replace("$base.$l.vtt") }
@@ -653,11 +697,12 @@ object PublicExport {
         }
     }
 
-    private fun publish(ctx: Context, m: DownloadMeta, video: File?, produce: ((FileOutputStream) -> Unit)? = null) {
+    private fun publish(ctx: Context, m: DownloadMeta, video: File?, produce: ((FileOutputStream) -> Unit)? = null, ext: String = "mp4") {
         val (folder, base) = place(m)
         val subs = subtitleTracks(ctx, m)
         var embedded = true
-        write(ctx, folder, "$base.mp4", "video/mp4", video, produce) { fd -> embedded = embedSubs(fd, subs) }
+        if (ext == "mkv") { write(ctx, folder, "$base.mkv", "video/x-matroska", video, produce); embedded = false }   // subtitles beside it
+        else write(ctx, folder, "$base.mp4", "video/mp4", video, produce) { fd -> embedded = embedSubs(fd, subs) }
         removeOldSubtitleFiles(ctx, folder, base)
         // Video is safe now: a subtitle that can't be written must not make the whole export run again
         if (!embedded) sidecars(ctx, base, subs).forEach { (f, name) ->

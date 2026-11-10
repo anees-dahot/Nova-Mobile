@@ -229,7 +229,8 @@ object LangTags {
     fun name(code: String?): String? = code?.let { NAMES[norm(it) ?: it.take(2).lowercase()] ?: java.util.Locale(it).displayLanguage.takeIf { n -> n.isNotBlank() && n != it } }
 
     fun label(card: MediaCard, learned: List<String>?): String? {
-        val seen = learned.orEmpty().mapNotNull { name(it) }.distinct()
-        return if (seen.isNotEmpty()) seen.take(3).joinToString(" · ") else name(card.lang)
+        // Original language first, then dubs streams were found with ("English · Hindi"), never a stray dub alone
+        val seen = (listOfNotNull(name(card.lang)) + learned.orEmpty().mapNotNull { name(it) }).distinct()
+        return seen.takeIf { it.isNotEmpty() }?.take(3)?.joinToString(" · ")
     }
 }

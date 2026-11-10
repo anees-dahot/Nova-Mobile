@@ -7,6 +7,8 @@
 -keep class com.anees.novamobile.ui.player.WebStreamSniffer$Sniffed { *; }
 # Per-quality files of a stream (cached to disk with Gson, like Sniffed)
 -keep class com.anees.novamobile.ui.player.WebStreamSniffer$Sniffed$Option { *; }
+# What sources state about a stream (release, cut, codec, subtitle languages), cached with Sniffed
+-keep class com.anees.novamobile.ui.player.StreamMeta { *; }
 -keep class com.anees.novamobile.data.local.Settings { *; }
 -keep,allowobfuscation,allowshrinking class com.google.gson.reflect.TypeToken
 -keep,allowobfuscation,allowshrinking class * extends com.google.gson.reflect.TypeToken

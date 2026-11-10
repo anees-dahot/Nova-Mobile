@@ -370,6 +370,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         OpenSubs.prefetch(t, repo, subLangs())
         // An instant start gives the search a moment; a race takes longer than the search anyway
         if (providers.any { StreamExtractor.cached(it, t) != null }) OpenSubs.await(t, repo, subLangs(), 1_500)
+        if (playSavedPick(t)) return
         while (providerIndex < providers.size) {
             val p = providers[providerIndex]
             val cachedLink = StreamExtractor.cached(p, t)
@@ -416,6 +417,43 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         proxyLastResort?.let { s -> proxyLastResort = null; Log.i(TAG, "last resort: source's own proxy"); play(s, bypassProxy = false); return }
         qualityLastResort?.let { s -> qualityLastResort = null; Log.i(TAG, "last resort: only sub-720p sources answered"); play(s); return }
         showRetry("No source answered in time.\nRetry usually works, or pick a source yourself.")
+    }
+
+    /**
+     * The version you picked on the Sources page for this title (any episode): that source, dub/server and
+     * quality play first. Only on the first search; a failure falls back to the normal search.
+     */
+    private var savedPickTried = false
+    private suspend fun playSavedPick(t: StreamExtractor.Target): Boolean {
+        if (savedPickTried || offlineItem != null) return false
+        savedPickTried = true
+        val (pk, h) = LocalStore.sourcePick(key()) ?: return false
+        val (name, v) = StreamExtractor.splitPick(pk)
+        val p = providers.firstOrNull { it.name == name } ?: return false
+        showStatus("Connecting to your pick: $name")
+        val r = StreamExtractor.cached(p, t) ?: searchOne(t, p) ?: return false.also { Log.i(TAG, "saved pick $pk didn't answer") }
+        StreamExtractor.remember(p, t, r)
+        val s = StreamExtractor.variant(r, v) ?: r
+        providerIndex = providers.indexOf(p).coerceAtLeast(0)
+        usedCache = false
+        Log.i(TAG, "playing saved pick $pk ${if (h > 0) "${h}p" else "auto"}")
+        if (h > 0 && s.options.isNullOrEmpty()) pickedHeight = h
+        play(if (h > 0) com.anees.novamobile.download.DownloadStarter.pickOption(s, h) else s)
+        return true
+    }
+
+    /** HLS quality picked on the Sources page: locked once its tracks are known (the tallest at or under it). */
+    private var pickedHeight = 0
+    private fun applyPickedHeight(tracks: Tracks) {
+        val want = pickedHeight.takeIf { it > 0 } ?: return
+        val exo = player ?: return
+        val g = tracks.groups.firstOrNull { it.type == C.TRACK_TYPE_VIDEO } ?: return
+        val idx = (0 until g.length).filter { g.getTrackFormat(it).height > 0 }
+        val i = idx.filter { g.getTrackFormat(it).height <= want }.maxByOrNull { g.getTrackFormat(it).height }
+            ?: idx.minByOrNull { g.getTrackFormat(it).height } ?: return
+        pickedHeight = 0
+        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon().setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
+        Log.i(TAG, "picked quality: ${g.getTrackFormat(i).height}p")
     }
 
     /** Subtitle languages worth fetching: yours, then English. */
@@ -598,7 +636,21 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
      * Returns true when the link may play.
      */
     private suspend fun qualityGate(s: WebStreamSniffer.Sniffed): Boolean {
-        if (offlineItem != null || !s.url.contains("m3u8", ignoreCase = true)) return true
+        if (offlineItem != null) return true
+        // CAM recording, the cut you don't want (Settings), or so short it's another title: other sources first
+        if (providerIndex < providers.size - 1) {
+            val t = target
+            val movie = card.type == MediaType.MOVIE || t?.isMovie == true
+            val expected = if (movie) card.runtime else seasonEpisodes.firstOrNull { it.episodeNumber == episode }?.runtime
+            val sec = s.meta?.durationSec ?: AudioProbe.info(s).durationSec
+            if (CutRules.avoid(sec, s.meta, expected, movie, card.title)) {
+                Log.i(TAG, "${providers.getOrNull(providerIndex)?.name}: CAM / unwanted cut / wrong length (${sec}s), trying other sources")
+                if (qualityLastResort == null) qualityLastResort = s
+                providerIndex++
+                return false
+            }
+        }
+        if (!s.url.contains("m3u8", ignoreCase = true)) return true
         val max = QualityGate.maxHeightAsync(s)
         if (max < 0 || max >= QualityGate.MIN_HEIGHT) return true
         val p = providers.getOrNull(providerIndex)
@@ -861,6 +913,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 fallback(error.errorCodeName)
             }
             override fun onTracksChanged(tracks: Tracks) {
+                applyPickedHeight(tracks)
                 updateQualityLabel()
                 val audio = tracks.groups.filter { it.type == C.TRACK_TYPE_AUDIO }
                 fun langOf(f: Format) = com.anees.novamobile.data.model.LangTags.norm(f.language) ?: com.anees.novamobile.data.model.LangTags.code(f.label)
@@ -964,7 +1017,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         findViewById<View>(R.id.btn_rew10).setOnClickListener { player?.let { p -> p.seekBack(); seekFlash(false, 10) } }
         findViewById<View>(R.id.btn_fwd10).setOnClickListener { player?.let { p -> p.seekForward(); seekFlash(true, 10) } }
         // Quiet text buttons: 18dp icons
-        listOf(R.id.btn_speed, R.id.btn_tracks, R.id.btn_quality, R.id.btn_episodes, R.id.btn_next_ep).forEach { id ->
+        listOf(R.id.btn_speed, R.id.btn_tracks, R.id.btn_quality, R.id.btn_server, R.id.btn_episodes, R.id.btn_next_ep).forEach { id ->
             findViewById<TextView>(id).apply {
                 val d = compoundDrawablesRelative[0]?.mutate()?.apply { setBounds(0, 0, 18.dp, 18.dp) }
                 setCompoundDrawablesRelative(d, null, null, null)
@@ -972,6 +1025,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         }
         speedBtn.setOnClickListener { speedSheet() }
         qualityBtn.setOnClickListener { qualitySheet() }
+        findViewById<View>(R.id.btn_server).setOnClickListener { serverSheet() }
         episodesBtn.setOnClickListener { openDrawer() }
         nextEpBtn.setOnClickListener { playNext() }
         unlockBtn.setOnClickListener { setLocked(false) }
@@ -1538,9 +1592,29 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         }
         if (offlineItem == null) {
             items += ActionSheet.Item("Source", header = true)
-            items += ActionSheet.Item("Switch source…") { sourceSheet() }
+            items += ActionSheet.Item("Switch server…") { serverSheet() }
         }
         ActionSheet.show(this, null, items)
+    }
+
+    /** Every server with its languages, type, qualities, size and running time; tap = play it from the same second. */
+    private fun serverSheet() {
+        if (offlineItem != null) { android.widget.Toast.makeText(this, "Playing the downloaded copy", android.widget.Toast.LENGTH_SHORT).show(); return }
+        val t = target ?: run { sourceSheet(); return }
+        val expected = if (card.type == MediaType.MOVIE || t.isMovie) card.runtime
+            else seasonEpisodes.firstOrNull { it.episodeNumber == episode }?.runtime
+        val movie = card.type == MediaType.MOVIE || t.isMovie
+        com.anees.novamobile.ui.sources.SourcesPage(this, card, season, episode, com.anees.novamobile.ui.sources.SourcesPage.Mode.STREAM,
+            expected, playingUrl = current?.url) { pick ->
+            if (pick == null) return@SourcesPage   // Auto: keep what plays; the next search goes by your settings
+            usedCache = false
+            val (name, v) = StreamExtractor.splitPick(pick.provider)
+            val p = providers.firstOrNull { it.name == name } ?: return@SourcesPage
+            val s = pick.stream?.let { StreamExtractor.variant(it, null) } ?: StreamExtractor.cached(p, t)?.let { StreamExtractor.variant(it, v) }
+            if (s != null && pick.height > 0 && s.options.isNullOrEmpty()) pickedHeight = pick.height
+            if (s != null) switchTo(p, if (pick.height > 0) com.anees.novamobile.download.DownloadStarter.pickOption(s, pick.height) else s)
+            else switchSource(providers.indexOf(p).coerceAtLeast(0))
+        }.show()
     }
 
     private fun sourceSheet() {

@@ -16,8 +16,8 @@ android {
         applicationId = "com.anees.novamobile"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "1.3.12"
+        versionCode = 17
+        versionName = "1.3.13"
         buildConfigField("String", "TRAKT_ID", "\"${localProps.getProperty("trakt.clientId", "")}\"")
         buildConfigField("String", "TRAKT_SECRET", "\"${localProps.getProperty("trakt.clientSecret", "")}\"")
         buildConfigField("String", "ANILIST_ID", "\"${localProps.getProperty("anilist.clientId", "")}\"")
@@ -53,6 +53,7 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.webkit:webkit:1.14.0")   // scripts + messages in every frame (players inside other-site iframes)
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.fragment:fragment-ktx:1.6.2")
     implementation("androidx.activity:activity-ktx:1.8.2")

@@ -16,6 +16,8 @@ import com.anees.novamobile.data.sources.vegamovies.VmHttp
 import com.anees.novamobile.ui.player.StreamExtractor
 import com.anees.novamobile.ui.player.WebStreamSniffer
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import org.json.JSONObject
@@ -61,29 +63,37 @@ object IndStreamSources {
         val root = rootA.await()?.takeIf { it.optBoolean("ok", false) }
         root?.optString("imdb")?.takeIf { it.startsWith("tt") }?.let { imdbCache[t.tmdbId] = it }
 
-        // Dub variants are separate single-language streams; the original is used (no language setting any more)
-        val want = emptyList<String>()
-        val dub = if (want.isEmpty()) null else runCatching {
-            val arr = varsA.await()?.optJSONArray("variants") ?: return@runCatching null
-            (0 until arr.length()).asSequence().mapNotNull { arr.optJSONObject(it) }.firstOrNull { v ->
-                val lang = Regex("""^(.*\S)\s+dub$""", RegexOption.IGNORE_CASE)
-                    .find(v.optString("language").trim())?.groupValues?.get(1)?.lowercase()
-                lang != null && lang in want
-            }?.let { it.optString("dubSubjectId") to it.optString("detailPath") }
-                ?.takeIf { it.first.isNotBlank() && it.second.isNotBlank() }
-        }.getOrNull()
+        val root0 = root ?: return@coroutineScope null
+        // Dub versions ("Hindi dub") are separate single-language streams: each becomes a variant of the original
+        val dubs = runCatching {
+            val arr = withTimeoutOrNull(6_000) { varsA.await() }?.optJSONArray("variants") ?: return@runCatching emptyList()
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.mapNotNull { v ->
+                val lang = Regex("""^(.*\S)\s+dub$""", RegexOption.IGNORE_CASE).find(v.optString("language").trim())?.groupValues?.get(1)
+                    ?.let { com.anees.novamobile.ui.player.ReleaseInfo.langCode(it) }?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val ids = v.optString("dubSubjectId") to v.optString("detailPath")
+                if (ids.first.isBlank() || ids.second.isBlank()) null else lang to ids
+            }.distinctBy { it.first }.take(4)
+        }.getOrDefault(emptyList())
         varsA.cancel()
-        val chosen = dub?.let { embed(it)?.takeIf { r -> r.optBoolean("ok", false) } } ?: root
-            ?: return@coroutineScope null
+        val dubStreams = dubs.map { (lang, ids) -> async { embed(ids)?.takeIf { it.optBoolean("ok", false) }?.let { build(it, lang) } } }.awaitAll().filterNotNull()
+        val main = build(root0, null) ?: return@coroutineScope dubStreams.firstOrNull()
+        Log.i(TAG, "netmirror: ${root0.optString("title")} + dubs ${dubStreams.mapNotNull { it.audioLang }}")
+        main.copy(variants = dubStreams.takeIf { it.isNotEmpty() })
+    }
 
-        val url = bestMp4(chosen) ?: return@coroutineScope null
-        Log.i(TAG, "netmirror: ${chosen.optString("title")}${if (dub != null) " (dub)" else ""}")
+    /** One NetMirror answer → stream: every MP4 quality with its size, captions with their languages. */
+    private fun build(chosen: JSONObject, lang: String?): WebStreamSniffer.Sniffed? {
+        val url = bestMp4(chosen) ?: return null
         val arr = chosen.optJSONArray("streams")
         val options = (0 until (arr?.length() ?: 0)).mapNotNull { arr?.optJSONObject(it) }
             .mapNotNull { o -> o.optString("url").takeIf { it.startsWith("http") }?.let { WebStreamSniffer.Sniffed.Option(it, o.optInt("resolution", 0), o.optLong("size", 0).takeIf { s -> s > 0 }) } }
             .filter { it.height > 0 }.distinctBy { it.height }.sortedBy { it.height }
-        WebStreamSniffer.Sniffed(url, mapOf("Referer" to NM_PLAY_REFERER), UA, captions(chosen),
-            height = options.firstOrNull { it.url == url }?.height, options = options.takeIf { it.size > 1 })
+        val (subs, subLangs) = captionsWithLangs(chosen)
+        val meta = com.anees.novamobile.ui.player.StreamMeta(release = chosen.optString("title").ifBlank { null },
+            durationSec = listOf("duration", "runtime", "length").firstNotNullOfOrNull { k -> chosen.optInt(k, 0).takeIf { it > 0 } }?.let { if (it < 400) it * 60 else it },
+            langs = lang?.let { listOf(it) }, subLangs = subLangs.takeIf { it.any { l -> l.isNotEmpty() } })
+        return WebStreamSniffer.Sniffed(url, mapOf("Referer" to NM_PLAY_REFERER), UA, subs, audioLang = lang,
+            height = options.firstOrNull { it.url == url }?.height, options = options.takeIf { it.size > 1 }, meta = meta)
     }
 
     /** Highest resolution at or under the Max Quality setting; the lone `mp4` field otherwise. */
@@ -94,6 +104,17 @@ object IndStreamSources {
             .mapNotNull { o -> o.optString("url").takeIf { it.startsWith("http") }?.let { it to o.optInt("resolution", 0) } }
         val pick = all.filter { it.second <= cap }.maxByOrNull { it.second } ?: all.minByOrNull { it.second }
         return pick?.first ?: root.optString("mp4").takeIf { it.startsWith("http") }
+    }
+
+    /** Captions (English first) with their languages, same order. */
+    private fun captionsWithLangs(root: JSONObject): Pair<List<String>, List<String>> {
+        val arr = root.optJSONArray("captions") ?: return emptyList<String>() to emptyList()
+        val l = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            .sortedByDescending { it.optString("lang").startsWith("en") }
+            .mapNotNull { o -> o.optString("url").takeIf { it.isNotBlank() }?.let { (if (it.startsWith("http")) it else NM_BASE + it) to
+                com.anees.novamobile.ui.player.ReleaseInfo.langCode(o.optString("lang").ifBlank { o.optString("label") }) } }
+            .take(6)
+        return l.map { it.first } to l.map { it.second }
     }
 
     /** English captions first; NetMirror lists them as site-relative proxy paths. */

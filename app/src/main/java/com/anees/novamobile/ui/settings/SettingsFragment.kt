@@ -96,6 +96,8 @@ class SettingsFragment : Fragment(), TabPage {
         header("Downloads")
         row("Downloads", "") { (activity as? com.anees.novamobile.MainActivity)?.openDownloads() }
         val qualities = listOf("480p (smaller)", "720p", "1080p (best)")
+        val cuts = listOf("Any", "Official length (theatrical)", "Extended / longest cut")
+        row("Movie Cut", cuts[s.prefCut.coerceIn(0, 2)].substringBefore(" (")) { pick("Movie Cut", cuts, s.prefCut.coerceIn(0, 2)) { save(s.copy(prefCut = it)) } }
         row("Download Quality", qualities[s.dlQuality].substringBefore(" ")) { pick("Download Quality", qualities, s.dlQuality) { saveDl(s.copy(dlQuality = it)) } }
         row("Wi-Fi Only", if (s.dlWifiOnly) "On" else "Off") { saveDl(s.copy(dlWifiOnly = !s.dlWifiOnly)) }
         row("Only While Charging", if (s.dlOnlyCharging) "On · great for overnight downloads" else "Off") { saveDl(s.copy(dlOnlyCharging = !s.dlOnlyCharging)) }

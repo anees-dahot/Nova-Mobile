@@ -59,7 +59,7 @@ object DownloadStarter {
                     val minutes: Int? = null)
 
     /** One real quality a source offers: height, size when known, direct file or HLS. */
-    data class Quality(val height: Int, val bytes: Long?, val mp4: Boolean)
+    data class Quality(val height: Int, val bytes: Long?, val mp4: Boolean, val meta: com.anees.novamobile.ui.player.StreamMeta? = null)
 
     /** Settings index (0/1/2) → picture height. */
     fun heightOf(quality: Int) = when (quality) { 0 -> 480; 2 -> 1080; else -> 720 }
@@ -73,14 +73,21 @@ object DownloadStarter {
 
     /** One answering source for the download sheet: real audio languages and best picture height (-1 unknown). */
     data class Probe(val provider: String, val langs: List<String>, val height: Int, val audioTracks: Int = -1,
-                     val qualities: List<Quality> = emptyList())
+                     val qualities: List<Quality> = emptyList(),
+                     /** Running time in seconds (-1 unknown): tells an extended cut or a wrong title apart. */
+                     val durationSec: Int = -1,
+                     /** The stream itself (this dub / server), to play it at once from the Sources page. */
+                     val stream: WebStreamSniffer.Sniffed? = null,
+                     /** What the source states about it (release, cut, CAM/WEB-DL, codec, server). */
+                     val meta: com.anees.novamobile.ui.player.StreamMeta? = null)
 
     /**
      * Asks every source for [item] at once (plain-HTTP resolvers right away, hidden pages a little
      * apart) and reports each that answers. Found links are cached, so the download then starts instantly.
      */
-    fun probe(ctx: Context, item: Item): kotlinx.coroutines.flow.Flow<Probe> = kotlinx.coroutines.flow.channelFlow {
+    fun probe(ctx: Context, item: Item, quickFirst: Boolean = false): kotlinx.coroutines.flow.Flow<Probe> = kotlinx.coroutines.flow.channelFlow {
         val t = StreamExtractor.resolveTarget(item.card, item.season, item.episode, repo) ?: return@channelFlow
+        val probeAt = System.currentTimeMillis()
         val host = Prefetcher.host
         var pages = 0
         for (p in StreamExtractor.ordered()) {
@@ -91,15 +98,22 @@ object DownloadStarter {
                 delay(wait)
                 val r = cached ?: withTimeoutOrNull(p.timeoutMs) {
                     runCatching { p.resolver?.invoke(t) ?: StreamExtractor.sniffUrl(p, t)?.let { WebStreamSniffer(ctx, host!!).sniff(it, p.timeoutMs) } }.getOrNull()
-                } ?: return@launch
+                } ?: run { Log.i(TAG, "probe miss ${p.name} ${System.currentTimeMillis() - probeAt}ms"); return@launch }
                 StreamExtractor.remember(p, t, r)
                 // Per-language streams (CastleTV, MovieBox) each get their own row: "CastleTV#hi"
                 r.withVariants().forEachIndexed { i, v ->
                     launch {
+                        val name = StreamExtractor.variantKey(v)?.takeIf { i > 0 }?.let { "${p.name}#$it" } ?: p.name
+                        // [quickFirst]: the playlist-level answer shows at once, the deep one replaces it (same name)
+                        if (quickFirst) AudioProbe.info(v).let { q ->
+                            send(Probe(name, q.langs, q.height, q.audioTracks, qualities(v, q), q.durationSec.takeIf { it > 0 } ?: v.meta?.durationSec ?: -1, v, v.meta))
+                        }
                         // Deep read: first segment / MP4 index, so every row shows its real audio and quality
                         val info = AudioProbe.info(v, deep = true)
-                        send(Probe(if (i == 0 || v.audioLang == null) p.name else "${p.name}#${v.audioLang}", info.langs, info.height, info.audioTracks,
-                            qualities(v, info)))
+                        Log.i(TAG, "probe $name ${System.currentTimeMillis() - probeAt}ms h=${info.heights.ifEmpty { listOf(info.height) }} " +
+                            "langs=${info.langs} tracks=${info.audioTracks} dur=${info.durationSec} mp4=${isProgressive(v.url)} opts=${v.options?.size ?: 0} subs=${v.subtitles.size}")
+                        send(Probe(StreamExtractor.variantKey(v)?.takeIf { i > 0 }?.let { "${p.name}#$it" } ?: p.name, info.langs, info.height, info.audioTracks,
+                            qualities(v, info), info.durationSec.takeIf { it > 0 } ?: v.meta?.durationSec ?: -1, v, v.meta))
                     }
                 }
             }
@@ -110,11 +124,11 @@ object DownloadStarter {
     private suspend fun qualities(v: WebStreamSniffer.Sniffed, info: AudioProbe.Info): List<Quality> = coroutineScope {
         val opts = v.options?.takeIf { it.isNotEmpty() }
         if (opts != null) return@coroutineScope opts.map { o ->
-            async { Quality(o.height, o.bytes ?: sizeOf(o.url, v), isProgressive(o.url) || !o.url.contains("m3u8")) }
+            async { Quality(o.height, o.bytes ?: sizeOf(o.url, v), isProgressive(o.url) || !o.url.contains("m3u8"), o.meta) }
         }.awaitAll()
         val mp4 = isProgressive(v.url)
-        val hs = info.heights.ifEmpty { listOf(info.height).filter { it > 0 } }
-        if (mp4) hs.take(1).map { Quality(it, sizeOf(v.url, v), true) } else hs.map { Quality(it, null, false) }
+        val hs = info.heights.ifEmpty { listOfNotNull(info.height.takeIf { it > 0 } ?: v.height) }
+        if (mp4) hs.take(1).map { Quality(it, sizeOf(v.url, v) ?: v.meta?.bytes, true, v.meta) } else hs.map { Quality(it, null, false) }
     }
 
     /** Content-Length of a direct file (Range 0-0 → Content-Range total), null when the server won't say. */
@@ -131,7 +145,7 @@ object DownloadStarter {
         }
     }
 
-    private const val MAX_PROBE_PAGES = 6
+    private const val MAX_PROBE_PAGES = 8
     private const val PROBE_STAGGER_MS = 1_500L
 
     /** True while items are being resolved (keeps [ResolveService] alive). */
@@ -229,7 +243,7 @@ object DownloadStarter {
         resume(app)
     }
 
-    private const val PARALLEL_RESOLVES = 2
+    private const val PARALLEL_RESOLVES = 3   // bulk: a season resolves three at a time (hidden pages stay staggered)
     /** Items being resolved right now (main thread only). */
     private val inFlight = mutableSetOf<String>()
     private fun pk(i: Item) = "${i.card.type}:${i.card.id}:${i.season}:${i.episode}"
@@ -262,12 +276,19 @@ object DownloadStarter {
         val target = StreamExtractor.resolveTarget(item.card, item.season, item.episode, repo) ?: return false
         val sources = StreamExtractor.ordered().filter { it.name != item.skipProvider }
         // Your pick from the sheet first (with a timeout); else every source races and the best answer wins
-        val (pickName, pickLang) = item.provider?.let { StreamExtractor.splitPick(it) } ?: (null to null)
+        // No pick in the sheet: the source (and dub) that served this show's last episode, so a season stays one source and one quality
+        val showKey = "${item.card.type}:${item.card.id}"
+        val saved = LocalStore.sourcePick(showKey)
+        val (pickName, pickLang) = item.provider?.let { StreamExtractor.splitPick(it) } ?: lastGood[showKey]
+            ?: saved?.first?.let { StreamExtractor.splitPick(it) } ?: (null to null)
         val picked = pickName?.let { n -> sources.firstOrNull { it.name == n } }
-        val wantH = item.height ?: heightOf(item.quality ?: LocalStore.settings().dlQuality)
+        val wantH = item.height ?: saved?.second?.takeIf { it > 0 && item.provider == null } ?: heightOf(item.quality ?: LocalStore.settings().dlQuality)
+        val movie = item.card.type == com.anees.novamobile.data.model.MediaType.MOVIE || target.isMovie
+        val expectedMin = if (movie) item.card.runtime else item.minutes
         val candidates = mutableListOf<Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed>>()
-        if (picked != null) ask(ctx, picked, target, headless)?.let { candidates += picked to it }
-        if (candidates.isEmpty()) candidates += race(ctx, sources, target, headless, wantH)
+        // Your source gets a second try before anyone else is asked (one slow answer shouldn't switch the season's quality)
+        if (picked != null) (ask(ctx, picked, target, headless) ?: if (item.provider != null) ask(ctx, picked, target, headless) else null)?.let { candidates += picked to it }
+        if (candidates.isEmpty()) candidates += race(ctx, sources, target, headless, wantH, expectedMin, movie)
         var raced = picked == null
         val queue = ArrayDeque(candidates)
         while (true) {
@@ -275,7 +296,7 @@ object DownloadStarter {
                 // The source you picked didn't work out: let every other source race instead of giving up
                 if (raced) break
                 raced = true
-                queue += race(ctx, sources.filter { it != picked }, target, headless, wantH)
+                queue += race(ctx, sources.filter { it != picked }, target, headless, wantH, expectedMin, movie)
                 continue
             }
             val (p, sniffed) = queue.removeFirst()
@@ -286,9 +307,12 @@ object DownloadStarter {
             // Every subtitle the source offers, cleaned of ads
             val saved = (withTimeoutOrNull(20_000) { withContext(Dispatchers.IO) {
                 val dir = File(NovaDownloads.manager(ctx).let { NovaDownloads.dir }, "subs").apply { mkdirs() }
-                chosen.subtitles.filterNot { SubtitleCleaner.isThumbnailTrack(it) }.take(10).mapIndexedNotNull { i, url ->
+                // Language as the source states it, else guessed from the file name
+                val stated = chosen.meta?.subLangs.orEmpty()
+                chosen.subtitles.mapIndexed { i, u -> u to stated.getOrNull(i)?.takeIf { it.isNotEmpty() } }
+                    .filterNot { SubtitleCleaner.isThumbnailTrack(it.first) }.take(10).mapIndexedNotNull { i, (url, lang) ->
                     val out = File(dir, "${id.hashCode()}_$i.vtt")
-                    if (SubtitleCleaner.saveTo(ctx, url, RetrofitClient.base, chosen.headers, out)) out.absolutePath to (SubtitleCleaner.langOf(url) ?: "") else null
+                    if (SubtitleCleaner.saveTo(ctx, url, RetrofitClient.base, chosen.headers, out)) out.absolutePath to (lang ?: SubtitleCleaner.langOf(url) ?: "") else null
                 }
             } } ?: emptyList<Pair<String, String>>().also { Log.w(TAG, "subtitles took too long; downloading without the rest") })
             // Source brought no subtitles: OpenSubtitles (English + yours)
@@ -312,7 +336,8 @@ object DownloadStarter {
             if (LocalStore.pendingDownloads().none { pk(it) == pk(item) }) { Log.i(TAG, "$id cancelled during search"); return true }
             NovaDownloads.registerKey(request)
             DownloadService.sendAddDownload(ctx, NovaDownloadService::class.java, request, false)
-            Log.i(TAG, "queued $id via ${p.name} (${if (isProgressive(chosen.url)) "MP4" else "HLS"})")
+            lastGood[showKey] = p.name to StreamExtractor.variantKey(chosen)
+            Log.i(TAG, "queued $id via ${p.name} (${if (isProgressive(chosen.url)) "MP4" else "HLS"}, want ${wantH}p)")
             return true
         }
         return false
@@ -329,27 +354,56 @@ object DownloadStarter {
         }?.also { StreamExtractor.remember(p, t, it) }   // whole answer (all dubs) cached before a variant is picked
     }
 
+    private val FILE_HOSTS = listOf("r2.dev", "r2.cloudflarestorage.com", "video-downloads.googleusercontent.com", "googlevideo.com",
+        "pixeldrain.dev/api/file", "pixeldrain.com/api/file", "hubcloud")
+
     /** Direct file (MP4/MKV/WebM) rather than an HLS playlist. */
     fun isProgressive(url: String): Boolean {
         val path = (StreamExtractor.unwrapProxy(Uri.parse(url)).path ?: url).lowercase()
-        return !url.lowercase().contains("m3u8") && (path.endsWith(".mp4") || path.endsWith(".mkv") || path.endsWith(".webm") || path.contains(".mp4/"))
+        val u = url.lowercase()
+        return !u.contains("m3u8") && (path.endsWith(".mp4") || path.endsWith(".mkv") || path.endsWith(".webm") || path.contains(".mp4/") ||
+            // File hosts that serve whole files without an extension (Vegamovies V-Cloud / G-Drive)
+            FILE_HOSTS.any { u.contains(it) })
     }
 
-    /** Higher is better: direct file first, then the wanted audio language, then more dubs. */
-    private fun score(s: WebStreamSniffer.Sniffed, langs: List<String>, wanted: String?, wantH: Int = Int.MAX_VALUE): Int =
-        (if ((s.height ?: 0) in 1..wantH) 150 else 0) +   // within the quality you picked beats a bigger file above it
-        (if (isProgressive(s.url)) 1000 else 0) + (if (wanted != null && (langs.contains(wanted) || s.audioLang == wanted)) 500 else 0) + langs.size * 10 + (s.height ?: 0) / 100   // closer to your quality wins ties
+    /** The picked file's own release details, else the stream's. */
+    private fun s0meta(v: WebStreamSniffer.Sniffed, chosen: WebStreamSniffer.Sniffed) =
+        v.options?.firstOrNull { it.url == chosen.url }?.meta?.orElse(v.meta) ?: v.meta
+
+    /** Show → (source, dub) that served its last episode: later episodes go there first. */
+    private val lastGood = mutableMapOf<String, Pair<String, String?>>()
+
+    /** Height this stream would download at for [wantH]: the MP4 option picked, else the tallest HLS variant within it (-1 unknown). */
+    fun effectiveHeight(s: WebStreamSniffer.Sniffed, info: AudioProbe.Info?, wantH: Int): Int {
+        if (!s.options.isNullOrEmpty()) return pickOption(s, wantH).height ?: -1
+        val hs = (info?.heights.orEmpty().ifEmpty { listOfNotNull(info?.height, s.height) }).filter { it > 0 }
+        if (hs.isEmpty()) return -1
+        return hs.filter { it <= wantH }.maxOrNull() ?: hs.min()
+    }
+
+    /**
+     * Higher is better. Your audio language first (can't watch without it), then the quality you picked
+     * (exact beats lower beats unknown beats higher), then direct file over HLS, then more dubs.
+     */
+    private fun score(s: WebStreamSniffer.Sniffed, langs: List<String>, wanted: String?, h: Int, wantH: Int): Int {
+        val fit = when { h <= 0 -> 1200; h <= wantH -> 2000 - (wantH - h); else -> 1000 - (h - wantH) / 2 }
+        return fit + (if (isProgressive(s.url)) 300 else 0) +
+            (if (wanted != null && (langs.contains(wanted) || s.audioLang == wanted)) 3000 else 0) + langs.size * 10
+    }
 
     /**
      * Every source at once (plain-HTTP resolvers right away, hidden pages staggered, like [probe]).
      * Stops [RACE_GRACE_MS] after the first answer, at once on a direct file in the wanted language,
      * or at [RACE_CAP_MS]; returns answers best first so a dead link falls through to the next.
      */
-    private suspend fun race(ctx: Context, sources: List<StreamExtractor.Provider>, t: StreamExtractor.Target, headless: Boolean, wantH: Int):
+    private suspend fun race(ctx: Context, sources: List<StreamExtractor.Provider>, t: StreamExtractor.Target, headless: Boolean, wantH: Int,
+                             expectedMin: Int? = null, movie: Boolean = false):
             List<Pair<StreamExtractor.Provider, WebStreamSniffer.Sniffed>> = coroutineScope {
         val wanted = LangTags.norm(LocalStore.settings().audioLang)
         val results = kotlinx.coroutines.channels.Channel<Triple<StreamExtractor.Provider, WebStreamSniffer.Sniffed, Int>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
         var pages = 0
+        // Direct file, exactly your quality, in your language: nothing can beat it
+        val perfect = kotlinx.coroutines.CompletableDeferred<Unit>()
         val jobs = sources.mapNotNull { p ->
             val cached = StreamExtractor.cached(p, t)
             if (cached == null && p.resolver == null && (headless || Prefetcher.host == null || pages >= MAX_PROBE_PAGES)) return@mapNotNull null
@@ -360,10 +414,16 @@ object DownloadStarter {
                 // Per-dub streams (MovieBox / CastleTV "Hindi dub") compete one by one: the one in your language can win
                 val best = r.withVariants().map { v ->
                     async {
-                        val langs = withTimeoutOrNull(6_000) { runCatching { AudioProbe.langs(v) }.getOrNull() }.orEmpty()
-                        v to score(pickOption(v, wantH), langs, wanted, wantH)
+                        val info = withTimeoutOrNull(6_000) { runCatching { AudioProbe.info(v) }.getOrNull() }
+                        val h = effectiveHeight(v, info, wantH)
+                        val chosen = pickOption(v, wantH)
+                        // CAM, wrong cut for your setting, or so short it's probably another title: pushed down
+                        val pen = com.anees.novamobile.ui.player.CutRules.penalty(info?.durationSec?.takeIf { it > 0 } ?: v.meta?.durationSec ?: -1,
+                            (s0meta(v, chosen)), expectedMin, movie, t.title)
+                        Triple(v, score(chosen, info?.langs.orEmpty(), wanted, h, wantH) + pen, h)
                     }
                 }.awaitAll().maxByOrNull { it.second } ?: return@launch
+                if (best.third == wantH && isProgressive(pickOption(best.first, wantH).url) && best.second >= 3000) perfect.complete(Unit)
                 results.send(Triple(p, best.first, best.second))
             }
         }
@@ -379,7 +439,7 @@ object DownloadStarter {
             val v = r.getOrNull() ?: break
             got += v
             if (got.size == 1) deadline = minOf(deadline, System.currentTimeMillis() + RACE_GRACE_MS)
-            if (v.third >= 1500) break   // direct file in your language: can't do better
+            if (perfect.isCompleted) break
         }
         coroutineContext.cancelChildren()
         Log.i(TAG, "race: ${got.joinToString { "${it.first.name}=${it.third}" }} in ${System.currentTimeMillis() - startAt}ms")
@@ -404,7 +464,14 @@ object DownloadStarter {
         if (isProgressive(s.url)) {
             meta = meta.copy(quality = s.height?.takeIf { it > 0 }, audioLangs = listOfNotNull(s.audioLang).takeIf { it.isNotEmpty() })
             val u = Uri.parse(s.url)
-            return DownloadRequest.Builder(id, u).setData(meta.toBytes()).setCustomCacheKey(NovaDownloads.fileKey(u)).build()
+            // Fresh link for a download already under way: same size = same file, so keep its cache key and every
+            // saved piece, even when the new URL looks nothing like the old one (Google / HubCloud links change wholly)
+            val old = NovaDownloads.get(ctx, id)
+            val key = old?.request?.customCacheKey?.takeIf { old.bytesDownloaded > 0 && old.contentLength > 0 &&
+                withContext(Dispatchers.IO) { NovaDownloads.totalLength(u) } == old.contentLength }
+                ?: NovaDownloads.fileKey(u)
+            if (old != null && key == old.request.customCacheKey) Log.i(TAG, "$id: fresh link, same file — ${old.bytesDownloaded shr 20} MB kept")
+            return DownloadRequest.Builder(id, u).setData(meta.toBytes()).setCustomCacheKey(key).build()
         }
         val settings = LocalStore.settings()
         val http = OkHttpDataSource.Factory(RetrofitClient.base).setUserAgent(s.userAgent).setDefaultRequestProperties(s.headers)

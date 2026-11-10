@@ -3,6 +3,9 @@ package com.anees.novamobile.data.sources.vegamovies
 import com.anees.novamobile.data.local.LocalStore
 import com.anees.novamobile.ui.player.StreamExtractor
 import com.anees.novamobile.ui.player.WebStreamSniffer
+import com.anees.novamobile.ui.player.ReleaseInfo
+import com.anees.novamobile.ui.player.StreamMeta
+import kotlinx.coroutines.withTimeoutOrNull
 import android.util.Log
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -289,22 +292,37 @@ object VegamoviesSource {
             u.contains("googlevideo.com")
     }
 
-    /** Walk candidates in wave order; first one that resolves to a real file wins. */
-    private suspend fun emit(cands: List<Cand>, pageUrl: String): WebStreamSniffer.Sniffed? {
+    /**
+     * Walk candidates in wave order; the first that resolves to a real file plays. The page's other
+     * qualities are then resolved side by side (briefly), so downloads can list each with its release
+     * details (WEB-DL / BluRay, HEVC, Extended, languages, size from the heading).
+     */
+    private suspend fun emit(cands: List<Cand>, pageUrl: String): WebStreamSniffer.Sniffed? = coroutineScope {
         val origin = VmHttp.originOf(pageUrl) ?: VmHttp.mainUrl
         val playbackHeaders = VmHttp.commonHeaders + mapOf("Referer" to pageUrl, "Origin" to origin)
-        for (c in cands.take(MAX_ATTEMPTS)) {
-            val url = when {
-                c.kind == Servers.VCLOUD || c.url.contains("vcloud") ->
-                    VcloudResolver.resolve(c.url, pageUrl, VmHttp.commonHeaders).firstOrNull()?.url
-                c.url.contains("fastdl") ->
-                    NexdriveResolver.resolveEmbed(c.url, pageUrl, VmHttp.commonHeaders)
-                looksPlayable(c.url) -> c.url
-                else -> null
-            } ?: continue
-            if (!looksPlayable(url)) continue
-            return WebStreamSniffer.Sniffed(url, playbackHeaders, VmHttp.UA, emptyList())
-        }
-        return null
+        suspend fun fileOf(c: Cand): String? = when {
+            c.kind == Servers.VCLOUD || c.url.contains("vcloud") ->
+                VcloudResolver.resolve(c.url, pageUrl, VmHttp.commonHeaders).firstOrNull()?.url
+            c.url.contains("fastdl") ->
+                NexdriveResolver.resolveEmbed(c.url, pageUrl, VmHttp.commonHeaders)
+            looksPlayable(c.url) -> c.url
+            else -> null
+        }?.takeIf { looksPlayable(it) }
+        var primary: Pair<Cand, String>? = null
+        for (c in cands.take(MAX_ATTEMPTS)) { val u = fileOf(c) ?: continue; primary = c to u; break }
+        val (pc, pu) = primary ?: return@coroutineScope null
+        fun heightOf(c: Cand) = LinkNaming.qualityInt(c.heading).takeIf { it > 0 } ?: ReleaseInfo.height(c.heading) ?: 0
+        fun metaOf(c: Cand) = (ReleaseInfo.parse(c.heading) ?: StreamMeta()).copy(server = c.kind.ifBlank { null })
+        val others = cands.filter { it.heading != pc.heading && heightOf(it) > 0 }.groupBy { it.heading }.values.map { it.first() }.take(4)
+        val extra = others.map { c -> async { withTimeoutOrNull(EXTRA_BUDGET_MS) { runCatching { fileOf(c) }.getOrNull() }?.let { c to it } } }
+            .awaitAll().filterNotNull()
+        val options = (listOf(pc to pu) + extra).mapNotNull { (c, u) ->
+            heightOf(c).takeIf { it > 0 }?.let { h -> WebStreamSniffer.Sniffed.Option(u, h, metaOf(c).bytes, metaOf(c)) }
+        }.distinctBy { it.height }.sortedBy { it.height }
+        Log.i(TAG, "vegamovies: ${options.joinToString { "${it.height}p ${it.meta?.badges()}" }}")
+        WebStreamSniffer.Sniffed(pu, playbackHeaders, VmHttp.UA, emptyList(), height = heightOf(pc).takeIf { it > 0 },
+            options = options.takeIf { it.size > 1 }, meta = metaOf(pc))
     }
+
+    private const val EXTRA_BUDGET_MS = 6_000L
 }

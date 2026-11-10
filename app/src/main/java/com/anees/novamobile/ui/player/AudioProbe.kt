@@ -27,13 +27,19 @@ object AudioProbe {
     /** [audioTracks]/[height]: -1 = couldn't tell. [langs]: two-letter codes of labelled audio tracks. */
     data class Info(val langs: List<String>, val audioTracks: Int, val height: Int,
                     /** Every picture height offered (HLS master variants); empty = only [height]. */
-                    val heights: List<Int> = emptyList()) {
+                    val heights: List<Int> = emptyList(),
+                    /** Running time in seconds (HLS segment total, MP4 index, DASH duration); -1 = couldn't tell. */
+                    val durationSec: Int = -1) {
         companion object { val UNKNOWN = Info(emptyList(), -1, -1) }
     }
 
     private const val PEEK_BYTES = 256 * 1024L
     private const val SEGMENT_BYTES = 1_500_000L
     private const val CALL_S = 4L
+    private const val PLAYLIST_BYTES = 3_000_000L
+    private val EXTINF = Regex("""#EXTINF:\s*([\d.]+)""")
+    private val ISO_DUR = Regex("""PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?""")
+    private val MPD_TAG = Regex("""<MPD\b[^>]*>""", RegexOption.IGNORE_CASE)
     private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Safari/537.36"
     private val HLS_AUDIO = Regex("""#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*""", RegexOption.IGNORE_CASE)
     private val DASH_SET = Regex("""<AdaptationSet\b[^>]*>""", RegexOption.IGNORE_CASE)
@@ -56,7 +62,10 @@ object AudioProbe {
      */
     suspend fun info(s: WebStreamSniffer.Sniffed, deep: Boolean = false): Info {
         synchronized(cache) { cache[s.url] }?.let { (wasDeep, i) -> if (wasDeep || !deep) return i }
-        val read = withTimeoutOrNull(if (deep) 12_000 else 4_500) { withContext(Dispatchers.IO) { runCatching { read(s, deep) }.getOrNull() } } ?: Info.UNKNOWN
+        val read = withTimeoutOrNull(if (deep) 12_000 else 4_500) { withContext(Dispatchers.IO) { runCatching { read(s, deep) }.getOrNull() } }
+            // Deep read ran out of time (slow segment host): the playlist-level answer still has qualities and length
+            ?: (if (deep) withTimeoutOrNull(6_000) { withContext(Dispatchers.IO) { runCatching { read(s, false) }.getOrNull() } } else null)
+            ?: Info.UNKNOWN
         // The stream can't tell: trust what the source declared
         val r = read.copy(
             langs = read.langs.ifEmpty { listOfNotNull(s.audioLang) },
@@ -92,13 +101,51 @@ object AudioProbe {
     private fun read(s: WebStreamSniffer.Sniffed, deep: Boolean): Info {
         val bytes = fetch(s.url, s, PEEK_BYTES) ?: return Info.UNKNOWN
         if (isMp4(bytes)) return mp4(bytes, s, deep)
+        if (isMkv(bytes)) return mkv(bytes)
         val head = String(bytes, Charsets.UTF_8)
         return when {
-            head.contains("#EXT-X-STREAM-INF") -> hlsMaster(head, s, deep)
-            head.contains("#EXTINF") -> if (deep) hlsMedia(head, s.url, s) else Info.UNKNOWN
+            head.contains("#EXT-X-STREAM-INF") -> hlsMaster(head, s, deep).let { i ->
+                // Running time: the first variant's segment list (text only, cheap)
+                val variant = head.lineSequence().map { it.trim() }.dropWhile { !it.startsWith("#EXT-X-STREAM-INF") }
+                    .drop(1).firstOrNull { it.isNotEmpty() && !it.startsWith("#") }?.let { resolve(s.url, it) }
+                i.copy(durationSec = variant?.let { hlsDuration(null, it, s) } ?: -1)
+            }
+            head.contains("#EXTINF") -> (if (deep) hlsMedia(head, s.url, s) else Info.UNKNOWN).copy(durationSec = hlsDuration(head, s.url, s))
             head.contains("<MPD", true) -> dash(head)
             else -> Info.UNKNOWN
         }
+    }
+
+    /** Sum of #EXTINF of a complete (VOD) segment list; fetched in full when the first peek was cut short. */
+    private fun hlsDuration(peek: String?, url: String, s: WebStreamSniffer.Sniffed): Int {
+        val text = peek?.takeIf { it.contains("#EXT-X-ENDLIST") }
+            ?: fetch(url, s, PLAYLIST_BYTES)?.let { String(it, Charsets.UTF_8) } ?: return -1
+        if (!text.contains("#EXT-X-ENDLIST")) return -1   // live or cut off: a partial sum would mislead
+        val total = EXTINF.findAll(text).sumOf { it.groupValues[1].toDoubleOrNull() ?: 0.0 }
+        return total.toInt().takeIf { it > 0 } ?: -1
+    }
+
+    /** "PT2H1M3.5S" → seconds. */
+    private fun isoDuration(v: String?): Int {
+        val m = v?.let { ISO_DUR.find(it) } ?: return -1
+        val (h, mi, se) = m.destructured
+        return ((h.toIntOrNull() ?: 0) * 3600 + (mi.toIntOrNull() ?: 0) * 60 + (se.toDoubleOrNull() ?: 0.0)).toInt().takeIf { it > 0 } ?: -1
+    }
+
+    /** Movie length from the mvhd box (timescale + duration), -1 when it isn't in [b]. */
+    private fun mvhd(b: ByteArray): Int {
+        fun u32(i: Int) = ((b[i].toLong() and 0xff) shl 24) or ((b[i + 1].toLong() and 0xff) shl 16) or ((b[i + 2].toLong() and 0xff) shl 8) or (b[i + 3].toLong() and 0xff)
+        var j = 0
+        while (j < b.size - 36) {
+            if (b[j] == 'm'.code.toByte() && b[j + 1] == 'v'.code.toByte() && b[j + 2] == 'h'.code.toByte() && b[j + 3] == 'd'.code.toByte()) {
+                val v1 = b[j + 4].toInt() == 1
+                val scale = if (v1) u32(j + 24) else u32(j + 16)
+                val dur = if (v1) (u32(j + 28) shl 32) or u32(j + 32) else u32(j + 20)
+                return if (scale > 0 && dur > 0) (dur / scale).toInt() else -1
+            }
+            j++
+        }
+        return -1
     }
 
     private fun hlsMaster(head: String, s: WebStreamSniffer.Sniffed, deep: Boolean): Info {
@@ -135,7 +182,72 @@ object AudioProbe {
         val audio = sets.filter { attr(it, "contentType") == "audio" || attr(it, "mimeType")?.startsWith("audio") == true }
         val langs = audio.mapNotNull { code(attr(it, "lang")) ?: LangTags.code(attr(it, "label")) }.distinct()
         val height = DASH_H.findAll(head).mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull() ?: -1
-        return Info(langs, audio.size.takeIf { it > 0 } ?: -1, height)
+        return Info(langs, audio.size.takeIf { it > 0 } ?: -1, height,
+            durationSec = isoDuration(MPD_TAG.find(head)?.value?.let { attr(it, "mediaPresentationDuration") }))
+    }
+
+    // ── Matroska (MKV) ────────────────────────────────────────────────────────
+
+    private fun isMkv(b: ByteArray) = b.size > 4 && b[0] == 0x1A.toByte() && b[1] == 0x45.toByte() && b[2] == 0xDF.toByte() && b[3] == 0xA3.toByte()
+
+    /**
+     * Release files (4KHDHub, HDHub4u, MoviesDrive…) are MKVs: their header states the length (Info → Duration ×
+     * TimecodeScale), every audio track's language ("hin", "eng") and the picture height — all in the first bytes.
+     */
+    private fun mkv(b: ByteArray): Info {
+        fun u(i: Int) = b[i].toInt() and 0xff
+        /** EBML variable-size integer at [i]: (value, length). */
+        fun vint(i: Int): Pair<Long, Int>? {
+            if (i >= b.size) return null
+            val first = u(i); var len = 1; var mask = 0x80
+            while (len <= 8 && first and mask == 0) { len++; mask = mask shr 1 }
+            if (len > 8 || i + len > b.size) return null
+            var v = (first and (mask - 1)).toLong()
+            for (k in 1 until len) v = (v shl 8) or u(i + k).toLong()
+            return v to len
+        }
+        fun find(id: IntArray, from: Int, to: Int): Int {
+            var i = from
+            while (i <= to - id.size) { if (id.indices.all { u(i + it) == id[it] }) return i; i++ }
+            return -1
+        }
+        fun uint(at: Int, len: Int) = (0 until len).fold(0L) { acc, k -> (acc shl 8) or u(at + k).toLong() }
+        val end = b.size
+        // Length: TimecodeScale (ns per tick, default 1 ms) × Duration (float ticks)
+        var scale = 1_000_000L
+        find(intArrayOf(0x2A, 0xD7, 0xB1), 0, minOf(end, 200_000)).takeIf { it >= 0 }?.let { p -> vint(p + 3)?.let { (n, l) -> if (n in 1..8) scale = uint(p + 3 + l, n.toInt()) } }
+        var sec = -1
+        find(intArrayOf(0x44, 0x89), 0, minOf(end, 200_000)).takeIf { it >= 0 }?.let { p -> vint(p + 2)?.let { (n, l) ->
+            val at = p + 2 + l
+            val ticks = when (n.toInt()) { 8 -> java.lang.Double.longBitsToDouble(uint(at, 8)); 4 -> java.lang.Float.intBitsToFloat(uint(at, 4).toInt()).toDouble(); else -> -1.0 }
+            if (ticks > 0) sec = (ticks * scale / 1e9).toInt()
+        } }
+        // Tracks: each TrackEntry (0xAE) → type (0x83: 1 video, 2 audio), language (0x22B59C), height (0xBA)
+        val langs = mutableListOf<String>(); var audio = 0; var height = -1
+        // The first hit is often the SeekHead's pointer to Tracks (SeekID 0x53AB, size 0x84): skip those
+        var i = find(intArrayOf(0x16, 0x54, 0xAE, 0x6B), 0, end)
+        while (i >= 3 && u(i - 1) == 0x84 && u(i - 2) == 0xAB && u(i - 3) == 0x53) i = find(intArrayOf(0x16, 0x54, 0xAE, 0x6B), i + 4, end)
+        if (i >= 0) {
+            i += 4; vint(i)?.let { i += it.second }
+            var guard = 0
+            while (i < end - 2 && guard++ < 64) {
+                if (u(i) != 0xAE) { i++; continue }
+                val (size, l) = vint(i + 1) ?: break
+                val st = i + 1 + l; val en = minOf(end, st + size.toInt())
+                if (size <= 0 || st >= end) break
+                val type = find(intArrayOf(0x83), st, en).takeIf { it >= 0 && it + 2 < en }?.let { p -> vint(p + 1)?.let { (n, ll) -> uint(p + 1 + ll, n.toInt().coerceIn(1, 2)) } } ?: 0
+                if (type == 2L) {
+                    audio++
+                    find(intArrayOf(0x22, 0xB5, 0x9C), st, en).takeIf { it >= 0 }?.let { p -> vint(p + 3)?.let { (n, ll) ->
+                        val tag = String(b, p + 3 + ll, n.toInt().coerceIn(0, 8).coerceAtMost(end - p - 3 - ll), Charsets.ISO_8859_1).trimEnd('\u0000')
+                        iso2(tag)?.let { langs += it } } } ?: langs.add("en")   // no Language element = "eng" (Matroska default)
+                } else if (type == 1L) {
+                    find(intArrayOf(0xBA), st, en).takeIf { it >= 0 }?.let { p -> vint(p + 1)?.let { (n, ll) -> if (n in 1..4) height = maxOf(height, uint(p + 1 + ll, n.toInt()).toInt()) } }
+                }
+                i = en
+            }
+        }
+        return Info(langs.distinct(), if (audio > 0) audio else -1, height, durationSec = sec)
     }
 
     // ── MP4 ───────────────────────────────────────────────────────────────────
@@ -147,13 +259,15 @@ object AudioProbe {
         val boxes = mp4Tracks(head)
         if (boxes.isNotEmpty()) {
             val audio = boxes.filter { it.first == "soun" }
-            return Info(audio.mapNotNull { it.second }.distinct(), audio.size, boxes.filter { it.first == "vide" }.maxOfOrNull { it.third } ?: -1)
+            return Info(audio.mapNotNull { it.second }.distinct(), audio.size, boxes.filter { it.first == "vide" }.maxOfOrNull { it.third } ?: -1,
+                durationSec = mvhd(head))
         }
         if (!deep) return Info.UNKNOWN
         // Index at the end of the file: read the last few MB, else let MediaExtractor find it
         tail(s)?.let { t -> mp4Tracks(t).takeIf { it.isNotEmpty() }?.let { boxes ->
             val audio = boxes.filter { it.first == "soun" }
-            return Info(audio.mapNotNull { it.second }.distinct(), audio.size, boxes.filter { it.first == "vide" }.maxOfOrNull { it.third } ?: -1)
+            return Info(audio.mapNotNull { it.second }.distinct(), audio.size, boxes.filter { it.first == "vide" }.maxOfOrNull { it.third } ?: -1,
+                durationSec = mvhd(t))
         } }
         return extractUrl(s)
     }
@@ -271,7 +385,8 @@ object AudioProbe {
             val height = formats.filter { it.getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true }
                 .mapNotNull { runCatching { it.getInteger(MediaFormat.KEY_HEIGHT) }.getOrNull() }.maxOrNull() ?: -1
             val langs = audio.mapNotNull { a -> runCatching { a.getString(MediaFormat.KEY_LANGUAGE) }.getOrNull()?.let { code(it) ?: iso2(it) } }.distinct()
-            Info(langs, if (formats.isEmpty()) -1 else audio.size, height)
+            val dur = formats.mapNotNull { f -> runCatching { f.getLong(MediaFormat.KEY_DURATION) }.getOrNull() }.maxOrNull()
+            Info(langs, if (formats.isEmpty()) -1 else audio.size, height, durationSec = dur?.let { (it / 1_000_000).toInt() }?.takeIf { it > 0 } ?: -1)
         } catch (e: Exception) { Info.UNKNOWN } finally { ex.release() }
     }
 

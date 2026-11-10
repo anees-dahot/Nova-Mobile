@@ -127,13 +127,19 @@ object CastleTvSource {
         val text = post("$BASE/film-api/v2.0.1/movie/getVideo2?clientType=1&packageName=$PKG&channel=IndiaA&lang=en-US", body.toString()) ?: return null
         val data = decrypt(text, sec)?.let { it.optJSONObject("data") ?: it } ?: return null
         val url = data.optString("videoUrl").takeIf { it.startsWith("http") } ?: return null
-        val subs = data.optJSONArray("subtitles")?.let { arr ->
-            (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.optString("url")?.takeIf { u -> u.startsWith("http") } }
-        }.orEmpty().take(4)
+        val caps = data.optJSONArray("subtitles")?.let { arr ->
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.mapNotNull { o -> o.optString("url").takeIf { u -> u.startsWith("http") }?.let { u ->
+                u to com.anees.novamobile.ui.player.ReleaseInfo.langCode(listOf("languageName", "language", "lang", "title", "name").firstNotNullOfOrNull { k -> o.optString(k).takeIf { it.isNotBlank() } }) } }
+        }.orEmpty().take(6)
+        val subs = caps.map { it.first }
         // "HD 720P" / "SD 480P": the best listed is what resolution=3 hands out
         val height = data.optJSONArray("videos")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it)?.optString("resolutionDescription") } }
             .orEmpty().plus(data.optString("resolutionDescription")).mapNotNull { HEIGHT.find(it)?.groupValues?.get(1)?.toIntOrNull() }.maxOrNull()
-        return WebStreamSniffer.Sniffed(url, emptyMap(), "okhttp/4.9.3", subs, height = height)
+        val meta = com.anees.novamobile.ui.player.StreamMeta(
+            durationSec = listOf("duration", "videoDuration", "totalTime").firstNotNullOfOrNull { k -> data.optString(k).toDoubleOrNull()?.toInt()?.takeIf { it > 0 } }
+                ?.let { if (it > 100_000) it / 1000 else it },   // some builds answer in ms
+            subLangs = caps.map { it.second }.takeIf { l -> l.any { it.isNotEmpty() } })
+        return WebStreamSniffer.Sniffed(url, emptyMap(), "okhttp/4.9.3", subs, height = height, meta = meta)
     }
 
     /** Envelope: `{"data":"<cipher>"}` or a bare cipher; AES-CBC, key = IV = first 16 bytes of the security key. */

@@ -49,9 +49,23 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
             if (items.isEmpty()) return
             DownloadSheet(act, items, onChange).open()
         }
+
+        /** A version was picked on the Sources page: start at once (space check + live status), no choosing step. */
+        fun startNow(act: AppCompatActivity, items: List<DownloadStarter.Item>, provider: String?, height: Int?, bytes: Long?, onChange: () -> Unit = {}) {
+            if (items.isEmpty()) return
+            DownloadSheet(act, items, onChange).apply {
+                this.provider = provider
+                selH = height ?: DownloadStarter.heightOf(LocalStore.settings().dlQuality)
+                if (provider != null && bytes != null) sourceQualities[provider] = listOf(DownloadStarter.Quality(selH, bytes, true))
+                else bestBytes = bytes
+                startAtOnce = true
+            }.open()
+        }
     }
 
     private val ctx = act
+    /** Opened from the Sources page with a pick: skip straight to the download. */
+    private var startAtOnce = false
     private val dialog = Dialog(ctx, android.R.style.Theme_Translucent_NoTitleBar_Fullscreen)
     private val body = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
     private val footer = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -88,6 +102,7 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
         dialog.setOnDismissListener { poll?.let { main.removeCallbacks(it) }; probeJob?.cancel(); onChange() }
         when {
             items.size == 1 && NovaDownloads.completed(ctx, ids.first()) -> problem("Already downloaded", "It's in your Downloads and plays offline.")
+            startAtOnce -> start(null)
             else -> choose()   // always: the source list is worth a look (quality pre-picked if remembered)
         }
         dialog.show()
@@ -424,7 +439,10 @@ class DownloadSheet private constructor(private val act: AppCompatActivity, priv
                 probes += pr
                 val qs = pr.qualities.filter { it.height > 0 }.distinctBy { it.height }.sortedBy { it.height }
                 val q = "\n" + kind + (if (qs.isNotEmpty()) qs.joinToString(" · ") { x -> "${x.height}p" + (x.bytes?.let { " ${DownloadUi.size(ctx, it * items.size.coerceAtLeast(1))}" } ?: "") }
-                    else if (pr.height > 0) "${pr.height}p" else "quality unknown")
+                    else if (pr.height > 0) "${pr.height}p" else "quality unknown") +
+                    // Running time vs the official one: extended cut, theatrical, or a wrong title
+                    (com.anees.novamobile.ui.player.StreamLength.label(pr.durationSec, first.minutes ?: first.card.runtime.takeIf { first.card.type == MediaType.MOVIE },
+                        first.card.type == MediaType.MOVIE)?.let { "\n$it" } ?: "")
                 updateBest()
                 val title = pr.provider.split('#').let { parts -> if (parts.size > 1) "${parts[0]}  ·  ${LangTags.name(parts[1]) ?: parts[1]} dub" else parts[0] }
                 val r = row(pr.provider, title, audio + q, highlight = pr.langs.size >= 2)

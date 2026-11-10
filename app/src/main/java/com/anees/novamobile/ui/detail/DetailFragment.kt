@@ -65,6 +65,18 @@ class DetailFragment : Fragment() {
         updateListLabel()
 
         playBtn.setOnClickListener { PlayerActivity.launch(requireContext(), card, season, episode) }
+        // Every stream from every source, grouped by cut and quality; the pick plays and sticks to the title
+        view.findViewById<TextView>(R.id.detail_sources).apply {
+            val d = compoundDrawablesRelative[0]?.mutate()?.apply { val px = (18 * resources.displayMetrics.density).toInt(); setBounds(0, 0, px, px) }
+            setCompoundDrawablesRelative(d, null, null, null)
+        }.setOnClickListener {
+            val act = activity as? androidx.appcompat.app.AppCompatActivity ?: return@setOnClickListener
+            val s = if (card.type == com.anees.novamobile.data.model.MediaType.MOVIE) 0 else season.coerceAtLeast(1)
+            val e = if (card.type == com.anees.novamobile.data.model.MediaType.MOVIE) 0 else episode.coerceAtLeast(1)
+            com.anees.novamobile.ui.sources.SourcesPage(act, card, s, e, com.anees.novamobile.ui.sources.SourcesPage.Mode.STREAM, expectedMinutes(s, e)) {
+                PlayerActivity.launch(requireContext(), card, s, e)
+            }.show()
+        }
         listBtn.setOnClickListener { LocalStore.toggleWatchlist(card); updateListLabel() }
         trailerBtn.setOnClickListener {
             loading.visibility = View.VISIBLE
@@ -89,7 +101,7 @@ class DetailFragment : Fragment() {
             launch { showRelated(view) }
             if (repo.isBlocked(card)) {
                 view.findViewById<TextView>(R.id.detail_overview).text = "This title isn't available in Nova TV."
-                listOf(playBtn, listBtn, trailerBtn).forEach { it.visibility = View.GONE }
+                listOf(playBtn, listBtn, trailerBtn, view.findViewById<View>(R.id.detail_sources)).forEach { it.visibility = View.GONE }
                 return@launch
             }
             when (card.type) {
@@ -150,10 +162,26 @@ class DetailFragment : Fragment() {
 
     /** Every download starts in the download sheet: quality, then live progress with actions. */
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+    /** Download: every version from every source first; tapping one starts it (live status in the download sheet). */
     private fun download(items: List<com.anees.novamobile.download.DownloadStarter.Item>) {
         val act = activity as? androidx.appcompat.app.AppCompatActivity ?: return
-        com.anees.novamobile.ui.downloads.DownloadSheet.show(act, items) { refreshDownloads() }
+        val first = items.firstOrNull() ?: return
+        val sheet = com.anees.novamobile.ui.downloads.DownloadSheet
+        // Already downloaded (single): the sheet says so and offers Play
+        if (items.size == 1 && com.anees.novamobile.download.NovaDownloads.completed(act, com.anees.novamobile.download.DownloadMeta.id(first.card, first.season, first.episode))) {
+            sheet.show(act, items) { refreshDownloads() }; return
+        }
+        com.anees.novamobile.ui.sources.SourcesPage(act, first.card, first.season, first.episode, com.anees.novamobile.ui.sources.SourcesPage.Mode.DOWNLOAD,
+            first.minutes ?: expectedMinutes(first.season, first.episode), count = items.size,
+            moreOptions = { sheet.show(act, items) { refreshDownloads() } }) { pick ->
+            sheet.startNow(act, items, pick?.provider, pick?.height?.takeIf { it > 0 }, pick?.bytes) { refreshDownloads() }
+        }.show()
     }
+
+    /** Official runtime: the movie's, else this episode's (when its season is loaded). */
+    private fun expectedMinutes(s: Int, e: Int): Int? =
+        if (card.type == com.anees.novamobile.data.model.MediaType.MOVIE) card.runtime
+        else currentEpisodes.firstOrNull { it.seasonNumber == s && it.episodeNumber == e }?.runtime
 
     /** Download button + episode rings follow the downloads live while this page is open. */
     private val dlTick = android.os.Handler(android.os.Looper.getMainLooper())

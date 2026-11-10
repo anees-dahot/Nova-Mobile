@@ -22,6 +22,7 @@ data class Settings(
     val volumeBoost: Int = 0,              // 0 off, 1 +6dB, 2 +10dB, 3 +15dB
     val maxQuality: Int = 1080,            // playback cap: 720, 1080, or 2160 (a 4K stream would stutter a low-RAM box)
     val dlQuality: Int = 1,                // 0 480p, 1 720p, 2 1080p
+    val prefCut: Int = 0,                  // movies with several cuts: 0 any, 1 official (theatrical) length, 2 extended / longest
     val dlWifiOnly: Boolean = false,
     val dlParallel: Int = 2,
     val dlAutoDeleteWatched: Boolean = false,
@@ -99,6 +100,12 @@ object LocalStore {
     /** Download retry counts survive the app being closed (no endless retry storm after restarts). */
     fun dlAttempts(id: String): Int = prefs.getInt("dlatt_$id", 0)
     fun setDlAttempts(id: String, n: Int) = prefs.edit().apply { if (n <= 0) remove("dlatt_$id") else putInt("dlatt_$id", n) }.apply()
+
+    /** Source picked by hand on the Sources page for a title ("Name#variant" + height, 0 = auto quality); every episode follows it. */
+    fun sourcePick(key: String): Pair<String, Int>? = prefs.getString("srcpick_$key", null)?.let { v ->
+        v.substringBeforeLast('|').takeIf { it.isNotBlank() }?.let { it to (v.substringAfterLast('|').toIntOrNull() ?: 0) } }
+    fun setSourcePick(key: String, provider: String?, height: Int) =
+        prefs.edit().apply { if (provider == null) remove("srcpick_$key") else putString("srcpick_$key", "$provider|$height") }.apply()
 
     fun audioFor(key: String): String? = prefs.getString("audio_$key", null)
     fun setAudioFor(key: String, lang: String) = prefs.edit().putString("audio_$key", lang).apply()

@@ -219,12 +219,19 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // onNewIntent always lands before onResume, so a notification's page wins over the player
+        if (!skipPlayerReturn) com.anees.novamobile.ui.player.PlayerActivity.returnTo(this)
+        skipPlayerReturn = false
         // Every time Nova is opened or brought back (throttled inside), not only on a cold start
         handler.postDelayed(autoUpdateCheck, 4000)
     }
 
+    /** Set when a notification asked for a specific page, so the player doesn't cover it. */
+    private var skipPlayerReturn = false
+
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
+        if (intent.hasExtra("open")) skipPlayerReturn = true
         if (intent.getStringExtra("open") == "update") handler.postDelayed(updateFromNote, 300)
         if (intent.getStringExtra("open") == "downloads") openDownloads()
         if (intent.getStringExtra("open") == "beam_send") { openDownloads(); com.anees.novamobile.transfer.BeamUi.send(this) }
@@ -331,6 +338,12 @@ class MainActivity : AppCompatActivity() {
         com.anees.novamobile.ui.player.Prefetcher.cancel()
         openOverlay(DetailFragment.newInstance(card))
     }
+
+    fun openPerson(id: Int, name: String, photo: String?) =
+        openOverlay(com.anees.novamobile.ui.person.PersonFragment.of(id, name, photo))
+
+    fun openBrowse(type: com.anees.novamobile.data.model.MediaType = com.anees.novamobile.data.model.MediaType.MOVIE, genre: Int? = null) =
+        openOverlay(com.anees.novamobile.ui.browse.BrowseFragment.of(type, genre))
 
     private fun openOverlay(f: Fragment) {
         supportFragmentManager.beginTransaction()

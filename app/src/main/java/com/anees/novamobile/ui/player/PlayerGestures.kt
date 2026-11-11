@@ -22,6 +22,7 @@ import kotlin.math.abs
  *  - drag left half up/down: brightness · right half: volume (past max: loudness boost)
  *  - drag sideways: seek, with a preview of where you'll land
  *  - hold: 2× while held
+ *  - drag the subtitles up / down: move them (stays for every video)
  *  - pinch: fit ↔ zoom to fill
  * Touches starting at the screen edges are left to the system (back gesture, status bar).
  */
@@ -46,9 +47,14 @@ class PlayerGestures(
         fun hud(icon: Int, text: String, fraction: Float?)   // fraction null: no bar
         fun hideHud()
         fun seekFlash(forward: Boolean, seconds: Int)
+        /** Where the subtitles sit on screen right now (view coordinates), or null when they're off. */
+        fun subtitleBand(): android.graphics.RectF?
+        /** The saved gap under the subtitles, as a share of the view's height. */
+        fun subtitleBottom(): Float
+        fun moveSubtitles(bottom: Float, done: Boolean)
     }
 
-    private enum class Mode { NONE, SEEK, BRIGHTNESS, VOLUME }
+    private enum class Mode { NONE, SEEK, BRIGHTNESS, VOLUME, SUBTITLE }
 
     private val audio = activity.getSystemService(AudioManager::class.java)
     private val slop = ViewConfiguration.get(activity).scaledTouchSlop
@@ -59,6 +65,8 @@ class PlayerGestures(
     private var startY = 0f
     private var seekFrom = 0L
     private var seekTo = 0L
+    private var subFrom = 0f
+    private var subTo = 0f
     private var brightness = -1f
     private var volumeAcc = 0f           // fractional volume steps carried between moves
     private var holding = false
@@ -176,12 +184,16 @@ class PlayerGestures(
         }
 
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
-            if (!host.enabled || !host.swipes || ignore || holding || scaling || e2.pointerCount > 1) return false
+            if (!host.enabled || ignore || holding || scaling || e2.pointerCount > 1) return false
             val totalX = e2.x - startX
             val totalY = e2.y - startY
             if (mode == Mode.NONE) {
                 if (abs(totalX) < slop * 2 && abs(totalY) < slop * 2) return false
+                // A vertical drag that starts on the subtitles moves them, even with swipe gestures switched off
+                val onSubs = abs(totalY) > abs(totalX) && host.subtitleBand()?.contains(startX, startY) == true
+                if (!onSubs && !host.swipes) return false
                 mode = when {
+                    onSubs -> Mode.SUBTITLE.also { subFrom = host.subtitleBottom(); subTo = subFrom }
                     abs(totalX) > abs(totalY) -> Mode.SEEK.also { seekFrom = host.position(); seekTo = seekFrom }
                     startX < view.width / 2f -> Mode.BRIGHTNESS
                     else -> Mode.VOLUME
@@ -223,6 +235,11 @@ class PlayerGestures(
                     val label = if (b > 0) "Boost +${listOf(0, 6, 10, 15)[b]} dB" else "${cur * 100 / max}%"
                     host.hud(R.drawable.ic_volume, label, if (b > 0) 1f else cur.toFloat() / max)
                 }
+                Mode.SUBTITLE -> {
+                    // Follows the finger 1:1; kept clear of the very top and the bottom edge
+                    subTo = (subFrom - totalY / view.height).coerceIn(0.08f, 0.82f)
+                    host.moveSubtitles(subTo, done = false)
+                }
                 Mode.NONE -> {}
             }
             return true
@@ -248,6 +265,7 @@ class PlayerGestures(
         when (mode) {
             Mode.SEEK -> { host.seekTo(seekTo); host.hideHud() }
             Mode.BRIGHTNESS, Mode.VOLUME -> view.postDelayed({ host.hideHud() }, 500)
+            Mode.SUBTITLE -> host.moveSubtitles(subTo, done = true)
             Mode.NONE -> {}
         }
         mode = Mode.NONE

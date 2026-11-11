@@ -122,7 +122,8 @@ object BeamLink {
         do {
             val p = Peer(host, inv.port, inv.token, direct = host == BeamWifi.HOST_IP && net == null, network = net)
             if (hello(p, 2000)) return p
-            if (waitMs > 2500) kotlinx.coroutines.delay(500)
+            // A refused connection answers at once: without a pause this spun, building a client per pass
+            kotlinx.coroutines.delay(if (waitMs > 2500) 500 else 150)
         } while (System.currentTimeMillis() < deadline)
         return null
     }

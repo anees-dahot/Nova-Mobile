@@ -7,7 +7,7 @@
 
     <FrameLayout android:id="@+id/ep_frame"
         android:layout_width="136dp" android:layout_height="77dp" android:background="@drawable/skeleton">
-        <ImageView android:id="@+id/ep_still" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
+        <ImageView android:importantForAccessibility="no" android:id="@+id/ep_still" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
         <TextView android:id="@+id/ep_number" android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_gravity="center" android:textColor="@color/nova_white40" android:textSize="22sp" android:fontFamily="sans-serif-light"/>
         <View android:id="@+id/ep_dim" android:layout_width="match_parent" android:layout_height="match_parent"

@@ -77,7 +77,7 @@ class DetailFragment : Fragment() {
                 PlayerActivity.launch(requireContext(), card, s, e)
             }.show()
         }
-        listBtn.setOnClickListener { LocalStore.toggleWatchlist(card); updateListLabel() }
+        listBtn.setOnClickListener { com.anees.novamobile.ui.common.Ui.confirm(it); LocalStore.toggleWatchlist(card); updateListLabel() }
         trailerBtn.setOnClickListener {
             loading.visibility = View.VISIBLE
             viewLifecycleOwner.lifecycleScope.launch {
@@ -89,6 +89,7 @@ class DetailFragment : Fragment() {
             }
         }
         view.findViewById<View>(R.id.detail_back).setOnClickListener { parentFragmentManager.popBackStack() }
+        view.findViewById<View>(R.id.detail_share).setOnClickListener { share() }
         // Tap the description to expand it
         view.findViewById<TextView>(R.id.detail_overview).let { o -> o.setOnClickListener { o.maxLines = if (o.maxLines == 4) 40 else 4 } }
         // Instant Play: find the stream for the episode Play would start, while the user reads
@@ -99,6 +100,7 @@ class DetailFragment : Fragment() {
         // Enrich with full details (runtime, genres, seasons, episodes)
         viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.CoroutineExceptionHandler { _, e -> android.util.Log.e("NovaTV", "detail load failed", e) }) {
             launch { showRelated(view) }
+            launch { showCast(view) }
             if (repo.isBlocked(card)) {
                 view.findViewById<TextView>(R.id.detail_overview).text = "This title isn't available in Nova TV."
                 listOf(playBtn, listBtn, trailerBtn, view.findViewById<View>(R.id.detail_sources)).forEach { it.visibility = View.GONE }
@@ -108,12 +110,14 @@ class DetailFragment : Fragment() {
                 MediaType.MOVIE -> repo.getMovieDetail(card.id)?.let { d ->
                     card = card.copy(imdbId = d.imdbId, runtime = d.runtime, genres = d.genres.ifEmpty { card.genres })
                     view.let { renderMeta(it, card) }
+                    launch { loadImdb(view) }
                 }
                 MediaType.SERIES -> repo.getSeriesDetail(card.id)?.let { (c, raw) ->
                     card = card.copy(imdbId = c.imdbId, totalSeasons = raw.numberOfSeasons)
                     renderMeta(view, card)
                     val seasons = raw.seasons?.filter { it.seasonNumber > 0 && it.episodeCount > 0 }?.map { it.seasonNumber } ?: listOf(1)
                     setupSeasons(view, seasons)
+                    launch { loadImdb(view) }
                 }
                 MediaType.ANIME -> {
                     val full = repo.getAnimeDetail(card.id)
@@ -249,10 +253,19 @@ class DetailFragment : Fragment() {
         ))
     }
 
+    private var imdbRating: String? = null
+
+    private suspend fun loadImdb(view: View) {
+        val id = card.imdbId?.takeIf { it.startsWith("tt") } ?: return
+        imdbRating = repo.imdbRating(id, card.type == MediaType.SERIES) ?: return
+        if (isAdded) renderMeta(view, card)
+    }
+
     private fun renderMeta(view: View, c: MediaCard) {
         view.findViewById<TextView>(R.id.detail_meta).text = listOfNotNull(
             c.year.ifEmpty { null },
             c.rating.takeIf { it > 0 }?.let { "★ ${"%.1f".format(it)}" },
+            imdbRating?.let { "IMDb $it" },
             c.runtime?.takeIf { it > 0 }?.let { "${it / 60}h ${it % 60}m" },
             c.totalSeasons?.let { "$it Season${if (it > 1) "s" else ""}" },
             c.episodes?.takeIf { c.type == MediaType.ANIME }?.let { "$it Episodes" },
@@ -343,6 +356,82 @@ class DetailFragment : Fragment() {
         if (com.anees.novamobile.data.sources.anime.FillerInfo.applies(card)) viewLifecycleOwner.lifecycleScope.launch {
             val f = com.anees.novamobile.data.sources.anime.FillerInfo.forShow(card)
             if (f.eps.isNotEmpty()) (list.adapter as? EpisodeAdapter)?.let { a -> a.filler = f; a.notifyDataSetChanged() }
+        }
+    }
+
+    /** Title, year and a link anyone can open (TMDB / AniList page), through the system share sheet. */
+    private fun share() {
+        val url = when (card.type) {
+            MediaType.MOVIE -> "https://www.themoviedb.org/movie/${card.id}"
+            MediaType.SERIES -> "https://www.themoviedb.org/tv/${card.id}"
+            MediaType.ANIME -> "https://anilist.co/anime/${card.id}"
+        }
+        val name = card.title + card.year.takeIf { it.isNotEmpty() }?.let { " ($it)" }.orEmpty()
+        val send = Intent(Intent.ACTION_SEND).setType("text/plain")
+            .putExtra(Intent.EXTRA_SUBJECT, name)
+            .putExtra(Intent.EXTRA_TEXT, "$name\n$url")
+        runCatching { startActivity(Intent.createChooser(send, "Share")) }
+    }
+
+    private suspend fun showCast(view: View) {
+        val people = repo.cast(card)
+        if (people.isEmpty() || !isAdded) return
+        view.findViewById<View>(R.id.cast_title).visibility = View.VISIBLE
+        view.findViewById<RecyclerView>(R.id.cast_list).apply {
+            visibility = View.VISIBLE
+            layoutManager = LinearLayoutManager(requireContext(), LinearLayoutManager.HORIZONTAL, false)
+            itemAnimator = null
+            adapter = CastAdapter(people)
+        }
+    }
+
+    /** Round photo, name, role. Tap opens everything else that person is in. */
+    private inner class CastAdapter(val people: List<com.anees.novamobile.data.api.CastMember>) : RecyclerView.Adapter<CastAdapter.VH>() {
+        inner class VH(val box: android.widget.LinearLayout, val photo: ImageView, val name: TextView, val role: TextView) : RecyclerView.ViewHolder(box)
+
+        override fun getItemCount() = people.size
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+            val ctx = parent.context
+            val d = ctx.resources.displayMetrics.density
+            fun px(v: Int) = (v * d).toInt()
+            val photo = ImageView(ctx).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundResource(R.drawable.skeleton)
+                outlineProvider = object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(v: View, o: android.graphics.Outline) = o.setOval(0, 0, v.width, v.height)
+                }
+                clipToOutline = true
+            }
+            fun line(size: Float, color: Int) = TextView(ctx).apply {
+                textSize = size; setTextColor(color); gravity = android.view.Gravity.CENTER_HORIZONTAL
+                maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            val name = line(12f, 0xE6FFFFFF.toInt()).apply { setPadding(0, px(6), 0, 0) }
+            val role = line(11f, 0x99FFFFFF.toInt())
+            val box = android.widget.LinearLayout(ctx).apply {
+                orientation = android.widget.LinearLayout.VERTICAL; gravity = android.view.Gravity.CENTER_HORIZONTAL
+                layoutParams = RecyclerView.LayoutParams(px(84), ViewGroup.LayoutParams.WRAP_CONTENT)
+                setPadding(px(4), 0, px(4), 0)
+                addView(photo, android.widget.LinearLayout.LayoutParams(px(68), px(68)))
+                addView(name); addView(role)
+                com.anees.novamobile.ui.common.Ui.pressable(this, 0.95f)
+            }
+            return VH(box, photo, name, role).also { h ->
+                box.setOnClickListener {
+                    val p = people.getOrNull(h.bindingAdapterPosition) ?: return@setOnClickListener
+                    (activity as? com.anees.novamobile.MainActivity)?.openPerson(p.id, p.name, p.photoUrl)
+                }
+            }
+        }
+
+        override fun onBindViewHolder(h: VH, position: Int) {
+            val p = people[position]
+            h.name.text = p.name
+            h.role.text = p.role
+            h.role.visibility = if (p.role.isBlank()) View.GONE else View.VISIBLE
+            h.box.contentDescription = listOf(p.name, p.role).filter { it.isNotBlank() }.joinToString(", ")
+            h.photo.load(p.photoUrl) { crossfade(150) }
         }
     }
 

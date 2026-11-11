@@ -32,8 +32,17 @@ object OpenSubs {
     /** Start (or join) the search for [t]; safe to call early, e.g. while sources are still racing. */
     @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     fun prefetch(t: StreamExtractor.Target, repo: MediaRepository, langs: List<String>): Deferred<List<Sub>> = synchronized(jobs) {
-        jobs.getOrPut(key(t)) {
-            GlobalScope.async(Dispatchers.IO) { runCatching { search(t, repo, langs) }.getOrDefault(emptyList()) }
+        val k = key(t)
+        jobs.getOrPut(k) {
+            GlobalScope.async(Dispatchers.IO) {
+                runCatching { search(t, repo, langs) }.getOrElse {
+                    // A failed search (network, rate limit) is forgotten, so the next play asks again;
+                    // only a real answer, even an empty one, is kept
+                    Log.w(TAG, "opensubtitles failed: ${it.message}")
+                    synchronized(jobs) { jobs.remove(k) }
+                    emptyList()
+                }
+            }
         }
     }
 
@@ -59,7 +68,10 @@ object OpenSubs {
         }
         val body = withContext(Dispatchers.IO) {
             val req = Request.Builder().url(API + path).header("X-User-Agent", "TemporaryUserAgent").build()
-            RetrofitClient.base.newCall(req).execute().use { if (it.isSuccessful) it.body?.string() else null }
+            RetrofitClient.base.newCall(req).execute().use {
+                if (!it.isSuccessful) throw java.io.IOException("HTTP ${it.code}")
+                it.body?.string()
+            }
         } ?: return emptyList()
         val arr = JSONArray(body)
         val all = (0 until arr.length()).map { arr.getJSONObject(it) }

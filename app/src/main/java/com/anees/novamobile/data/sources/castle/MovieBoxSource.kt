@@ -115,7 +115,8 @@ object MovieBoxSource {
                 val o = JSONObject(r.body?.string() ?: return@use null)
                 if (r.code == 401 || r.code == 403 || o.optString("code", "0") != "0") null else unwrap(o).optJSONArray("items") ?: JSONArray()
             }
-        }.getOrNull()
+        // A network error isn't a refused token: "nothing found", without a token refresh and a second search on top
+        }.getOrElse { Log.w(TAG, "moviebox search: ${it.message}"); JSONArray() }
     }
 
     /** Best free MP4 of one subject (episode for series) plus its subtitles. */

@@ -44,13 +44,19 @@ interface TmdbApi {
     suspend fun discoverMovies(@Query("api_key") key: String, @Query("with_genres") genre: Int? = null,
                                @Query("with_original_language") lang: String? = null,
                                @Query("sort_by") sort: String = "popularity.desc",
-                               @Query("vote_count.gte") minVotes: Int? = null): TmdbPage<TmdbMovie>
+                               @Query("vote_count.gte") minVotes: Int? = null,
+                               @Query("primary_release_year") year: Int? = null,
+                               @Query("vote_average.gte") minRating: Float? = null,
+                               @Query("page") page: Int = 1): TmdbPage<TmdbMovie>
 
     @GET("discover/tv")
     suspend fun discoverSeries(@Query("api_key") key: String, @Query("with_genres") genre: Int? = null,
                                @Query("with_original_language") lang: String? = null,
                                @Query("sort_by") sort: String = "popularity.desc",
-                               @Query("vote_count.gte") minVotes: Int? = null): TmdbPage<TmdbSeries>
+                               @Query("vote_count.gte") minVotes: Int? = null,
+                               @Query("first_air_date_year") year: Int? = null,
+                               @Query("vote_average.gte") minRating: Float? = null,
+                               @Query("page") page: Int = 1): TmdbPage<TmdbSeries>
 
     @GET("{type}/{id}/videos")
     suspend fun videos(@Path("type") type: String, @Path("id") id: Int, @Query("api_key") key: String): TmdbVideos
@@ -67,7 +73,50 @@ interface TmdbApi {
     @GET("search/multi")
     suspend fun search(@Query("api_key") key: String, @Query("query") query: String,
                        @Query("page") page: Int = 1): TmdbPage<TmdbSearchResult>
+
+    @GET("{type}/{id}/credits")
+    suspend fun credits(@Path("type") type: String, @Path("id") id: Int, @Query("api_key") key: String): TmdbCredits
+
+    /** Whole-show cast (every season), ordered by episode count. */
+    @GET("tv/{id}/aggregate_credits")
+    suspend fun seriesCredits(@Path("id") id: Int, @Query("api_key") key: String): TmdbCredits
+
+    @GET("person/{id}")
+    suspend fun person(@Path("id") id: Int, @Query("api_key") key: String,
+                       @Query("append_to_response") append: String = "combined_credits"): TmdbPerson
 }
+
+data class TmdbCredits(val cast: List<CastMember> = emptyList(), val crew: List<CastMember> = emptyList())
+
+data class CastMember(
+    val id: Int = 0,
+    val name: String = "",
+    val character: String? = null,
+    val job: String? = null,
+    val roles: List<CastRole>? = null,      // aggregate_credits (series)
+    @com.google.gson.annotations.SerializedName("profile_path") val profilePath: String? = null
+) {
+    val role: String get() = character?.takeIf { it.isNotBlank() } ?: roles?.firstOrNull()?.character?.takeIf { it.isNotBlank() } ?: job.orEmpty()
+    val photoUrl: String? get() = profilePath?.let { "https://image.tmdb.org/t/p/w185$it" }
+}
+
+data class CastRole(val character: String? = null)
+
+data class TmdbPerson(
+    val id: Int = 0,
+    val name: String = "",
+    val biography: String = "",
+    val birthday: String? = null,
+    val deathday: String? = null,
+    @com.google.gson.annotations.SerializedName("place_of_birth") val placeOfBirth: String? = null,
+    @com.google.gson.annotations.SerializedName("known_for_department") val department: String? = null,
+    @com.google.gson.annotations.SerializedName("profile_path") val profilePath: String? = null,
+    @com.google.gson.annotations.SerializedName("combined_credits") val credits: PersonCredits? = null
+) {
+    val photoUrl: String? get() = profilePath?.let { "https://image.tmdb.org/t/p/w342$it" }
+}
+
+data class PersonCredits(val cast: List<TmdbSearchResult> = emptyList(), val crew: List<TmdbSearchResult> = emptyList())
 
 data class TmdbSearchResult(
     val id: Int,

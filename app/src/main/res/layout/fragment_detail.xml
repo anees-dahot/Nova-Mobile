@@ -11,7 +11,7 @@
             <!-- 16:9 backdrop with fade into the page -->
             <FrameLayout android:id="@+id/detail_header"
                 android:layout_width="match_parent" android:layout_height="340dp">
-                <ImageView android:id="@+id/detail_backdrop"
+                <ImageView android:importantForAccessibility="no" android:id="@+id/detail_backdrop"
                     android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
                 <View android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/scrim_bottom"/>
             </FrameLayout>
@@ -89,6 +89,16 @@
                     android:layout_marginTop="8dp" android:nestedScrollingEnabled="false"/>
             </LinearLayout>
 
+            <TextView android:id="@+id/cast_title"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_marginTop="24dp" android:paddingStart="16dp"
+                android:text="Cast" android:visibility="gone"
+                android:textColor="#E6FFFFFF" android:textSize="16sp" android:fontFamily="sans-serif-medium"/>
+            <androidx.recyclerview.widget.RecyclerView android:id="@+id/cast_list"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:paddingStart="12dp" android:paddingEnd="12dp" android:paddingTop="10dp"
+                android:clipToPadding="false" android:visibility="gone"/>
+
             <TextView android:id="@+id/related_title"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:layout_marginTop="24dp" android:paddingStart="16dp"
@@ -104,4 +114,8 @@
     <ImageButton android:id="@+id/detail_back"
         android:layout_width="40dp" android:layout_height="40dp" android:layout_margin="12dp"
         android:background="@drawable/circle_glass" android:src="@drawable/ic_back" android:contentDescription="Back"/>
+    <ImageButton android:id="@+id/detail_share"
+        android:layout_width="40dp" android:layout_height="40dp" android:layout_margin="12dp" android:layout_gravity="top|end"
+        android:background="@drawable/circle_glass" android:src="@drawable/ic_share" android:padding="10dp"
+        android:scaleType="fitCenter" android:contentDescription="Share"/>
 </FrameLayout>

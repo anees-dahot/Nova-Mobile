@@ -38,6 +38,26 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { trending.value = repo.trendingToday() }
     }
 
+    val refreshing = MutableLiveData(false)
+
+    /** Pull-to-refresh: fetch everything again; whatever fails keeps what's already on screen. */
+    fun refresh() {
+        if (refreshing.value == true) return
+        refreshing.value = true
+        viewModelScope.launch {
+            val fresh = runCatching { repo.getHomePage() }.getOrNull()
+            if (fresh != null && fresh.trendingMovies.isNotEmpty()) {
+                homeData.value = fresh
+                withContext(Dispatchers.IO) { repo.saveHome(dir, fresh) }
+            }
+            repo.trendingToday().takeIf { it.isNotEmpty() }?.let { trending.value = it }
+            genreRows.value.orEmpty().keys.forEach { type ->
+                repo.genreRows(type).takeIf { it.isNotEmpty() }?.let { genreRows.value = genreRows.value.orEmpty() + (type to it) }
+            }
+            refreshing.value = false
+        }
+    }
+
     fun loadGenres(type: MediaType) {
         if (genreRows.value?.containsKey(type) == true || !genreLoading.add(type)) return
         viewModelScope.launch {

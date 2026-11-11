@@ -12,7 +12,10 @@ import com.google.gson.reflect.TypeToken
 data class Settings(
     val audioLang: String = "hi",          // hi, en, ur, or "orig"
     val subtitlesOn: Boolean = false,
-    val subtitleSize: Int = 1,             // 0 small, 1 medium, 2 large
+    val subtitleSize: Int = 1,             // text height in dp (12–48); 0 / 1 / 2 are the old small / medium / large
+    val subtitleColor: Int = 0,            // 0 white, 1 yellow, 2 cyan, 3 green
+    val subtitleBg: Int = 0,               // 0 outline only, 1 dim box, 2 solid box
+    val subtitleBottom: Float = 0.08f,     // gap under the subtitles as a share of screen height; dragged in the player
     val autoplayNext: Boolean = true,
     val skipFiller: Boolean = false,
     val dlSpeedLimitKb: Int = 0,
@@ -39,6 +42,11 @@ data class Settings(
     val notifyDownloadProblem: Boolean = true,
     val autoSaveGallery: Boolean = false   // copy each finished download into Movies/Nova (uses the space twice)
 )
+
+/** Subtitle text height in dp, whichever way it was saved. */
+val Settings.subtitleDp: Int get() = when (subtitleSize) { 0 -> 18; 1 -> 22; 2 -> 28; else -> subtitleSize.coerceIn(12, 48) }
+
+val SUBTITLE_SIZES = (12..48 step 2).toList()
 
 object LocalStore {
     private const val MAX_HISTORY = 30

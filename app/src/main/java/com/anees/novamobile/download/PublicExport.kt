@@ -292,6 +292,8 @@ object PublicExport {
                 out.write(buf, 0, r); total += r
                 if (length > 0 && total - last > 8L * 1024 * 1024) { last = total; progress(total.toFloat() / length) }
             }
+            // The cache ended early (a piece is missing): fail, rather than publish a file that stops halfway as "Saved"
+            if (length > 0 && total < length) throw java.io.IOException("copy cut short: $total of $length bytes")
         } finally { ds.close() }
     }
 

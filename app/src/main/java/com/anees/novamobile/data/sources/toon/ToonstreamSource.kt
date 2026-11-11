@@ -16,7 +16,7 @@ object ToonstreamSource {
     private const val TAG = "NovaSrc"
     /** Mirrors; .one redirects to the live one (Nov 2026: toonstream.us). */
     private val DOMAINS = listOf("https://toonstream.us", "https://toonstream.vip", "https://toonstream.one")
-    private var live: String? = null
+    @Volatile private var live: String? = null
     private const val MIN_MATCH = 0.6
 
     /** Player page for the episode (or movie), or null when Toonstream doesn't have it. */

@@ -12,7 +12,7 @@
         android:focusable="false" android:visibility="gone"/>
 
     <FrameLayout android:id="@+id/f_frame" android:layout_width="72dp" android:layout_height="108dp" android:background="@drawable/skeleton">
-        <ImageView android:id="@+id/f_poster" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
+        <ImageView android:importantForAccessibility="no" android:id="@+id/f_poster" android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
         <TextView android:id="@+id/f_count" android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_gravity="bottom|end" android:layout_margin="4dp" android:background="@drawable/badge_pill"
             android:paddingStart="5dp" android:paddingEnd="5dp" android:textColor="@color/nova_white" android:textSize="11sp"
@@ -36,6 +36,6 @@
             android:max="1000" android:progressDrawable="@drawable/accent_track" android:visibility="gone"/>
     </LinearLayout>
 
-    <ImageView android:id="@+id/f_end" android:layout_width="24dp" android:layout_height="24dp" android:layout_marginStart="8dp"
+    <ImageView android:importantForAccessibility="no" android:id="@+id/f_end" android:layout_width="24dp" android:layout_height="24dp" android:layout_marginStart="8dp"
         android:src="@drawable/ic_chevron" android:tint="#66FFFFFF"/>
 </LinearLayout>

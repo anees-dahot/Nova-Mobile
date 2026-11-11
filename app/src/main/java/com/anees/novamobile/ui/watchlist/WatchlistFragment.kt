@@ -18,7 +18,7 @@ import com.anees.novamobile.data.model.HistoryEntry
 import com.anees.novamobile.data.model.MediaType
 import com.anees.novamobile.ui.common.ActionSheet
 import com.anees.novamobile.ui.home.MediaCardAdapter
-import com.anees.novamobile.ui.home.posterColumns
+import com.anees.novamobile.ui.home.posterGrid
 import com.anees.novamobile.ui.player.PlayerActivity
 
 /** "My List": large title, Saved / History segments, poster grid and a resume list. */
@@ -74,7 +74,7 @@ class WatchlistFragment : Fragment(), com.anees.novamobile.ui.common.TabPage {
         }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = px(6) })
         val cards = all.filter { filter == null || it.type == filter }.reversed()   // newest first
         rows.addView(RecyclerView(ctx).apply {
-            layoutManager = GridLayoutManager(ctx, ctx.posterColumns())
+            posterGrid()
             isNestedScrollingEnabled = false; itemAnimator = null; clipToPadding = false
             setPadding(px(10), px(4), px(10), px(8))
             adapter = MediaCardAdapter(cards, null, null,

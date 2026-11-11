@@ -200,7 +200,8 @@ object StreamExtractor {
      * switches, prefetches and Resume after an app restart skip the search entirely.
      */
     private const val TTL = 2 * 60 * 60_000L
-    private val cache = HashMap<String, Pair<Long, WebStreamSniffer.Sniffed>>()
+    // Read and written from the player, the prefetcher and several download lookups at once
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, WebStreamSniffer.Sniffed>>()
     private val gson = com.google.gson.Gson()
 
     fun cached(p: Provider, t: Target): WebStreamSniffer.Sniffed? {

@@ -51,6 +51,7 @@ import coil.load
 import com.anees.novamobile.R
 import com.anees.novamobile.data.local.LocalStore
 import com.anees.novamobile.data.local.Settings
+import com.anees.novamobile.data.local.subtitleDp
 import com.anees.novamobile.data.model.Episode
 import com.anees.novamobile.data.model.HistoryEntry
 import com.anees.novamobile.data.model.MediaCard
@@ -145,6 +146,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private var bandwidthMeter: androidx.media3.exoplayer.upstream.DefaultBandwidthMeter? = null
     private var locked = false
     private var inPip = false
+    /** Was playing when the app went to the background (not picture-in-picture): resume when Nova brings the player back. */
+    private var resumeOnReturn = false
     private var hudHide: Runnable? = null
     private var filler: com.anees.novamobile.data.sources.anime.FillerInfo.Show? = null
     private var episodeLine = ""          // "S1 · E3  ·  Episode name", shown under the title with "ends 10:42 PM"
@@ -175,7 +178,23 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         private const val DUB_WAIT_MS = 14_000L
         private const val SETTLE_MS = 1_500L
         private const val UP_NEXT_MS = 10_000L
+        /** Where subtitles sit when the user hasn't moved them: this share of the height above the bottom edge. */
+        private const val SUB_REST = 0.08f
         private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)
+
+        /** The open player, if any. It lives in its own task (for picture-in-picture), hidden from Recents. */
+        private var live: java.lang.ref.WeakReference<PlayerActivity>? = null
+
+        /**
+         * Coming back to Nova while a title is still open full-screen: put the player back on top.
+         * Not while it floats in picture-in-picture, where browsing underneath is the point.
+         */
+        fun returnTo(ctx: android.app.Activity): Boolean {
+            val a = live?.get() ?: return false
+            if (a.isFinishing || a.isDestroyed || a.inPip) return false
+            ctx.startActivity(Intent(ctx, PlayerActivity::class.java))   // no card: onNewIntent leaves playback alone
+            return true
+        }
 
         fun launch(ctx: Context, card: MediaCard, season: Int = 0, episode: Int = 0) {
             ctx.startActivity(Intent(ctx, PlayerActivity::class.java).apply {
@@ -208,6 +227,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        live = java.lang.ref.WeakReference(this)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_player)
         LocalStore.init(this)
@@ -276,7 +296,13 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     /** Player is single-instance (picture-in-picture): a new title replaces the one playing. */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        val json = intent.getStringExtra(EXTRA_CARD) ?: return
+        val json = intent.getStringExtra(EXTRA_CARD) ?: run {
+            // Brought back by returnTo(): carry on if it was playing when the user left
+            if (resumeOnReturn) player?.play()
+            resumeOnReturn = false
+            return
+        }
+        resumeOnReturn = false
         saveProgress()
         card = Gson().fromJson(json, MediaCard::class.java)
         target = null
@@ -982,11 +1008,66 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     private fun styleSubtitles() {
         listOfNotNull(playerView.subtitleView, subOverlay).forEach { it.apply {
-            setStyle(CaptionStyleCompat(Color.WHITE, Color.TRANSPARENT, Color.TRANSPARENT,
-                CaptionStyleCompat.EDGE_TYPE_OUTLINE, Color.BLACK, null))
-            setFractionalTextSize(when (settings.subtitleSize) { 0 -> 0.045f; 2 -> 0.072f; else -> 0.056f })
-            setBottomPaddingFraction(0.08f)
+            val st = LocalStore.settings()      // fresh: the player outlives a trip to Settings
+            val text = when (st.subtitleColor) { 1 -> 0xFFFFE14D.toInt(); 2 -> 0xFF7DF9FF.toInt(); 3 -> 0xFF7CFC8A.toInt(); else -> Color.WHITE }
+            val box = when (st.subtitleBg) { 1 -> 0x99000000.toInt(); 2 -> Color.BLACK; else -> Color.TRANSPARENT }
+            // Embedded styles (colours, boxes baked into the track) would override the user's choice
+            setApplyEmbeddedStyles(st.subtitleColor == 0 && st.subtitleBg == 0)
+            setStyle(CaptionStyleCompat(text, box, Color.TRANSPARENT,
+                if (box == Color.TRANSPARENT) CaptionStyleCompat.EDGE_TYPE_OUTLINE else CaptionStyleCompat.EDGE_TYPE_NONE, Color.BLACK, null))
+            setFixedTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, st.subtitleDp.toFloat())
         } }
+        placeSubs(subBottom(playerView.isControllerFullyVisible))
+        if (!subsLayoutHooked) {
+            subsLayoutHooked = true
+            // First layout, rotation, leaving picture-in-picture: the shift is in pixels, so redo it
+            playerView.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+                if (bottom - top != oldBottom - oldTop && !inPip) placeSubs(subBottom(playerView.isControllerFullyVisible))
+            }
+        }
+    }
+
+    private var subsLayoutHooked = false
+
+    /**
+     * Puts the subtitles [bottom] (share of the screen height) above the bottom edge by sliding the whole
+     * subtitle layer. Padding alone isn't enough: many tracks pin their own line, which ignores padding.
+     */
+    private fun placeSubs(bottom: Float) {
+        val shift = -(bottom - SUB_REST).coerceAtLeast(0f) * playerView.height
+        listOfNotNull(playerView.subtitleView, subOverlay).forEach {
+            it.setBottomPaddingFraction(SUB_REST)
+            it.translationY = shift
+        }
+    }
+
+    /** Subtitle height: the user's position, lifted clear of the time bar while controls show. */
+    private fun subBottom(controls: Boolean): Float {
+        val base = LocalStore.settings().subtitleBottom.coerceIn(SUB_REST, 0.82f)
+        return if (controls) maxOf(base, 0.2f) else base
+    }
+
+    private fun subtitlesShowing(): Boolean =
+        player?.currentTracks?.groups?.any { it.type == C.TRACK_TYPE_TEXT && it.isSelected } == true
+
+    /** Roughly three lines of text above the subtitle baseline, in the middle of the screen: the area a drag can grab. */
+    override fun subtitleBand(): android.graphics.RectF? {
+        if (!subtitlesShowing() || inPip) return null
+        val w = playerView.width.toFloat(); val h = playerView.height.toFloat()
+        if (w <= 0 || h <= 0) return null
+        val bottom = h * (1f - subBottom(playerView.isControllerFullyVisible))
+        val text = LocalStore.settings().subtitleDp.toFloat().dp
+        return android.graphics.RectF(w * 0.12f, bottom - text * 3.4f - 12f.dp, w * 0.88f, bottom + h * 0.07f)
+    }
+
+    override fun subtitleBottom(): Float = LocalStore.settings().subtitleBottom.coerceIn(SUB_REST, 0.82f)
+
+    override fun moveSubtitles(bottom: Float, done: Boolean) {
+        placeSubs(bottom)
+        if (done) {
+            LocalStore.saveSettings(LocalStore.settings().copy(subtitleBottom = bottom))
+            scheduleHudHide(700)
+        } else hud(R.drawable.ic_subtitles, "Subtitle position", null)
     }
 
     /** Switch the display to a refresh rate that fits the film (e.g. 24Hz) to remove judder. */
@@ -1046,7 +1127,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             skipBtn.animate().translationY(lift).setDuration(200).start()
             nextCard.animate().translationY(lift).setDuration(200).start()
             // Subtitles move up out of the way of the time bar while controls show
-            listOfNotNull(playerView.subtitleView, subOverlay).forEach { it.setBottomPaddingFraction(if (v == View.VISIBLE) 0.2f else 0.08f) }
+            placeSubs(subBottom(v == View.VISIBLE))
             if (v == View.VISIBLE) updateTimes()
         })
     }
@@ -1299,7 +1380,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             playerView.hideController()
             listOf(hud, skipBtn, nextCard, seekLeft, seekRight, unlockBtn).forEach { it.visibility = View.GONE }
             closeDrawer()
-            listOfNotNull(playerView.subtitleView, subOverlay).forEach { it.setFractionalTextSize(0.08f) }
+            listOfNotNull(playerView.subtitleView, subOverlay).forEach { it.setFractionalTextSize(0.08f); it.translationY = 0f }
         } else {
             styleSubtitles()
             // PiP window closed with ✕: the activity is already stopped
@@ -1483,15 +1564,24 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         items += ActionSheet.Item("Sync", header = true)
         items += ActionSheet.Item("Subtitle timing  ·  ${syncLabel(subSync.offsetMs)}") { syncSheet(subtitles = true) }
         items += ActionSheet.Item("Audio timing  ·  ${syncLabel(audioDelayMs)}") { syncSheet(subtitles = false) }
-        items += ActionSheet.Item("Subtitle size", header = true)
-        listOf("Small", "Medium", "Large").forEachIndexed { i, label ->
-            items += ActionSheet.Item(label, checked = settings.subtitleSize == i) {
-                settings = settings.copy(subtitleSize = i)
-                LocalStore.saveSettings(LocalStore.settings().copy(subtitleSize = i))
+        items += ActionSheet.Item("Subtitle look", header = true)
+        items += ActionSheet.Item("Size  ·  ${LocalStore.settings().subtitleDp}") { subtitleSizeSheet() }
+        if (kotlin.math.abs(LocalStore.settings().subtitleBottom - 0.08f) > 0.005f)
+            items += ActionSheet.Item("Move back to the bottom") {
+                LocalStore.saveSettings(LocalStore.settings().copy(subtitleBottom = 0.08f)); styleSubtitles()
+            }
+        ActionSheet.show(this, "Audio & Subtitles", items, subtitle = "Drag the subtitles up or down to move them.")
+    }
+
+    private fun subtitleSizeSheet() {
+        val now = LocalStore.settings().subtitleDp
+        ActionSheet.show(this, "Subtitle size", com.anees.novamobile.data.local.SUBTITLE_SIZES.map { dp ->
+            ActionSheet.Item(if (dp == 22) "22  ·  default" else dp.toString(), checked = dp == now) {
+                settings = settings.copy(subtitleSize = dp)
+                LocalStore.saveSettings(LocalStore.settings().copy(subtitleSize = dp))
                 styleSubtitles()
             }
-        }
-        ActionSheet.show(this, "Audio & Subtitles", items)
+        })
     }
 
     private fun syncLabel(ms: Long) = when {
@@ -1593,8 +1683,88 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         if (offlineItem == null) {
             items += ActionSheet.Item("Source", header = true)
             items += ActionSheet.Item("Switch server…") { serverSheet() }
+            if (current != null) items += ActionSheet.Item("Open in another player…") { openExternal() }
         }
+        items += ActionSheet.Item("Advanced", header = true)
+        items += ActionSheet.Item("Playback stats", checked = statsJob != null) { toggleStats() }
         ActionSheet.show(this, null, items)
+    }
+
+    // ── External player ───────────────────────────────────────────────────────
+
+    /**
+     * Hands the stream to VLC, MX Player, mpv… at the same second. Headers travel in the extras those
+     * players read; a player that ignores them can fail on sources that check the Referer.
+     */
+    private fun openExternal() {
+        val s = current ?: return
+        val pos = player?.currentPosition?.coerceAtLeast(0) ?: 0
+        val hls = s.url.substringBefore('?').endsWith(".m3u8", true) || s.url.contains(".m3u8")
+        val headers = (s.headers + ("User-Agent" to s.userAgent)).filter { it.value.isNotBlank() }
+        val view = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(android.net.Uri.parse(s.url), if (hls) "application/x-mpegURL" else "video/*")
+            .putExtra("title", title())
+            .putExtra("position", pos.toInt())                                          // MX Player, VLC, mpv
+            .putExtra("headers", headers.flatMap { listOf(it.key, it.value) }.toTypedArray())   // MX Player, mpv
+            .putExtra("http-user-agent", s.userAgent)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        saveProgress()
+        player?.pause()
+        runCatching { startActivity(Intent.createChooser(view, "Open with").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+            .onFailure { android.widget.Toast.makeText(this, "No video player app found", android.widget.Toast.LENGTH_SHORT).show() }
+    }
+
+    // ── Playback stats ────────────────────────────────────────────────────────
+
+    private var statsJob: Job? = null
+    private var statsView: TextView? = null
+
+    private fun toggleStats() {
+        if (statsJob != null) {
+            statsJob?.cancel(); statsJob = null
+            statsView?.visibility = View.GONE
+            return
+        }
+        val tv = statsView ?: TextView(this).apply {
+            textSize = 11f; typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(Color.WHITE); setBackgroundColor(0xB3000000.toInt())
+            setPadding(10.dp, 8.dp, 10.dp, 8.dp); setLineSpacing(0f, 1.15f)
+            isClickable = false; isFocusable = false
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            root.addView(this, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply { setMargins(16.dp, 64.dp, 0, 0) })
+            statsView = this
+        }
+        tv.visibility = View.VISIBLE
+        statsJob = lifecycleScope.launch {
+            while (true) {
+                tv.visibility = if (inPip) View.GONE else View.VISIBLE
+                tv.text = statsText()
+                delay(1000)
+            }
+        }
+    }
+
+    private fun statsText(): String {
+        val p = player ?: return "No stream"
+        fun kbps(b: Int) = if (b > 0) "${b / 1000} kbps" else "–"
+        val v = p.videoFormat
+        val a = p.audioFormat
+        val lines = mutableListOf<String>()
+        lines += "Video   " + (v?.let {
+            listOfNotNull("${it.width}×${it.height}", it.frameRate.takeIf { f -> f > 0 }?.let { f -> "${"%.0f".format(f)} fps" },
+                it.codecs ?: it.sampleMimeType?.substringAfter('/'), kbps(it.bitrate).takeIf { k -> k != "–" }).joinToString("  ")
+        } ?: "–")
+        lines += "Audio   " + (a?.let {
+            listOfNotNull(it.codecs ?: it.sampleMimeType?.substringAfter('/'), it.channelCount.takeIf { c -> c > 0 }?.let { c -> "$c ch" },
+                it.sampleRate.takeIf { r -> r > 0 }?.let { r -> "${r / 1000} kHz" }, it.language, kbps(it.bitrate).takeIf { k -> k != "–" }).joinToString("  ")
+        } ?: "–")
+        lines += "Buffer  ${"%.1f".format(p.totalBufferedDuration / 1000f)} s"
+        lines += "Dropped ${p.videoDecoderCounters?.droppedBufferCount ?: 0} frames"
+        bandwidthMeter?.bitrateEstimate?.takeIf { it > 0 }?.let { lines += "Network ${"%.1f".format(it / 1_000_000f)} Mbps" }
+        lines += "Speed   ${p.playbackParameters.speed}×"
+        lines += "Source  " + if (offlineItem != null) "Download" else
+            listOfNotNull(providers.getOrNull(providerIndex)?.name, current?.url?.let { runCatching { android.net.Uri.parse(it).host }.getOrNull() }).joinToString("  ·  ")
+        return lines.joinToString("\n")
     }
 
     /** Every server with its languages, type, qualities, size and running time; tap = play it from the same second. */
@@ -1732,11 +1902,12 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     override fun onStop() {
         super.onStop()
         saveProgress()
-        if (!inPip) player?.pause()      // in picture-in-picture it keeps playing
+        if (!inPip) { resumeOnReturn = player?.isPlaying == true; player?.pause() }      // in picture-in-picture it keeps playing
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        if (live?.get() === this) live = null
         runCatching { unregisterReceiver(pipReceiver) }
         subSync.set(0)
         streamJob?.cancel()

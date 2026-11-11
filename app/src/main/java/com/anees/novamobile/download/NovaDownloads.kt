@@ -295,6 +295,10 @@ object NovaDownloads {
                     dm.pauseDownloads()
                     DownloadNotifier.storageFull(ctx)
                 }
+                // Refused by every fresh link and source so far (expired, blocked, fake file): stop and say so, rather
+                // than search for sources again and again in the background. Retry starts the count over.
+                n > MAX_LINK_ATTEMPTS && !isNetwork(e) ->
+                    DownloadMeta.of(d)?.let { DownloadNotifier.failed(ctx, id, DownloadNotifier.name(it), "The stream stopped working. Retry finds a fresh link.") }
                 // Fake success (an HTML error page instead of the video): a fresh link, from another source after 2 tries
                 msg.contains(NOT_VIDEO) -> DownloadStarter.refresh(ctx, d, nextSource = n >= 2)
                 // Busy server (rate limit / overload): wait like network trouble, then a fresh link if it keeps up
@@ -318,6 +322,8 @@ object NovaDownloads {
                 else -> DownloadMeta.of(d)?.let { DownloadNotifier.failed(ctx, id, DownloadNotifier.name(it), "The stream stopped working. Retry finds a fresh link.") }
             }
         }
+
+        private val MAX_LINK_ATTEMPTS = 12
 
         /** Deleted (or already retried) while waiting: leave it alone. */
         private fun retryIfStillFailed(dm: DownloadManager, id: String) {

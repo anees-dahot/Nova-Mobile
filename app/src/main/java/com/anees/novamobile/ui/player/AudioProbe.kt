@@ -54,6 +54,9 @@ object AudioProbe {
 
     /** url → (deep?, info): a deep result answers shallow questions too. */
     private val cache = HashMap<String, Pair<Boolean, Info>>()
+    /** url → when its probe came back empty-handed (guarded by [cache]'s lock). */
+    private val unknownAt = HashMap<String, Long>()
+    private const val UNKNOWN_TTL_MS = 2 * 60_000L
     /** MediaExtractor reads over HTTP with no cancel: it runs here and is abandoned after a deadline. */
     private val extractorPool = Executors.newCachedThreadPool()
 
@@ -65,7 +68,11 @@ object AudioProbe {
      * [deep] = true (download sheet): also reads the first segment / MP4 index, up to ~1.5 MB and a few seconds.
      */
     suspend fun info(s: WebStreamSniffer.Sniffed, deep: Boolean = false): Info {
-        synchronized(cache) { cache[s.url] }?.let { (wasDeep, i) -> if (wasDeep || !deep) return i }
+        synchronized(cache) {
+            // A probe that learnt nothing (timeout, host busy) only counts for a couple of minutes, then it's asked again
+            val stale = unknownAt[s.url]?.let { System.currentTimeMillis() - it > UNKNOWN_TTL_MS } == true
+            if (stale) null else cache[s.url]
+        }?.let { (wasDeep, i) -> if (wasDeep || !deep) return i }
         val read = withTimeoutOrNull(if (deep) 12_000 else 4_500) { withContext(Dispatchers.IO) { runCatching { read(s, deep) }.getOrNull() } }
             // Deep read ran out of time (slow segment host): the playlist-level answer still has qualities and length
             ?: (if (deep) withTimeoutOrNull(6_000) { withContext(Dispatchers.IO) { runCatching { read(s, false) }.getOrNull() } } else null)
@@ -76,7 +83,11 @@ object AudioProbe {
             height = read.height.takeIf { it > 0 } ?: s.height ?: -1,
             audioTracks = if (read.audioTracks < 0 && s.audioLang != null) 1 else read.audioTracks,
         )
-        synchronized(cache) { if (cache.size > 300) cache.clear(); cache[s.url] = deep to r }
+        synchronized(cache) {
+            if (cache.size > 300) { cache.clear(); unknownAt.clear() }
+            cache[s.url] = deep to r
+            if (read == Info.UNKNOWN) unknownAt[s.url] = System.currentTimeMillis() else unknownAt.remove(s.url)
+        }
         return r
     }
 

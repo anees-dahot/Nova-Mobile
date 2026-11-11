@@ -3,7 +3,7 @@
     android:id="@+id/hero_root"
     android:layout_width="match_parent" android:layout_height="wrap_content">
 
-    <ImageView android:id="@+id/hero_image"
+    <ImageView android:importantForAccessibility="no" android:id="@+id/hero_image"
         android:layout_width="match_parent" android:layout_height="match_parent"
         android:scaleType="centerCrop"/>
     <View android:layout_width="match_parent" android:layout_height="match_parent"

@@ -114,14 +114,14 @@ class BeamServer(private val ctx: Context, private val token: String) {
     private fun manifest(out: OutputStream, u: Uri) {
         val id = u.getQueryParameter("id")
         val d = offers().firstOrNull { it.request.id == id } ?: return respond(out, 404, "text/plain", "no such download".toByteArray())
-        val json = manifests.getOrPut(d.request.id) {
+        val json = manifests[d.request.id] ?: run {
             val cache = NovaDownloads.cache
             val keys = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
             val rec = CacheKeyFactory { spec -> NovaDownloads.KEYS.buildCacheKey(spec).also { keys += it } }
             val f = CacheDataSource.Factory().setCache(cache).setCacheKeyFactory(rec)
                 .setUpstreamDataSourceFactory(PlaceholderDataSource.FACTORY).setCacheWriteDataSinkFactory(null)
-            runCatching { DefaultDownloaderFactory(f, Runnable::run).createDownloader(d.request).download(null) }
-                .onFailure { Log.w(TAG, "walk of ${d.request.id} incomplete: ${it.message}") }
+            val walked = runCatching { DefaultDownloaderFactory(f, Runnable::run).createDownloader(d.request).download(null) }
+                .onFailure { Log.w(TAG, "walk of ${d.request.id} incomplete: ${it.message}") }.isSuccess
             val entries = keys.mapNotNull { k ->
                 val spans = cache.getCachedSpans(k).filter { it.isCached }.sortedBy { it.position }
                 if (spans.isEmpty()) return@mapNotNull null
@@ -130,7 +130,8 @@ class BeamServer(private val ctx: Context, private val token: String) {
                     spans.map { longArrayOf(it.position, it.length) })
             }
             Log.i(TAG, "manifest ${d.request.id}: ${entries.size} keys, ${entries.sumOf { e -> e.spans.sumOf { it[1] } } shr 20} MB")
-            gson.toJson(entries)
+            // Only a complete walk is kept: a cut-short one would be served as "the whole file" for the rest of the session
+            gson.toJson(entries).also { if (walked) manifests[d.request.id] = it }
         }
         respond(out, 200, "application/json", json.toByteArray())
     }

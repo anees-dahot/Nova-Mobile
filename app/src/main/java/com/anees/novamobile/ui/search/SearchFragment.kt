@@ -24,7 +24,7 @@ import com.anees.novamobile.ui.common.QuickActions
 import com.anees.novamobile.ui.common.TabPage
 import com.anees.novamobile.ui.home.HomeViewModel
 import com.anees.novamobile.ui.home.MediaCardAdapter
-import com.anees.novamobile.ui.home.posterColumns
+import com.anees.novamobile.ui.home.posterGrid
 import kotlinx.coroutines.*
 
 /** Search: system keyboard + mic, results update as you type, Trending and recents when empty. */
@@ -37,6 +37,11 @@ class SearchFragment : Fragment(), TabPage {
     private lateinit var results: RecyclerView
     private lateinit var title: TextView
     private lateinit var recent: LinearLayout
+    private lateinit var typeChips: LinearLayout
+    /** Results filter: null = everything. Kept while typing, so "anime only" sticks across searches. */
+    private var typeFilter: com.anees.novamobile.data.model.MediaType? = null
+    private var lastHeader = ""
+    private var lastCards: List<MediaCard> = emptyList()
 
     private val voice = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
         val text = r.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
@@ -52,7 +57,7 @@ class SearchFragment : Fragment(), TabPage {
         title = view.findViewById(R.id.results_title)
         recent = view.findViewById(R.id.recent)
         val clear = view.findViewById<View>(R.id.btn_clear)
-        results.layoutManager = GridLayoutManager(requireContext(), requireContext().posterColumns())
+        results.posterGrid()
         results.itemAnimator = null
         // Scrolling the results hides the keyboard
         results.addOnScrollListener(object : RecyclerView.OnScrollListener() {
@@ -68,6 +73,8 @@ class SearchFragment : Fragment(), TabPage {
         }
         clear.setOnClickListener { input.setText("") }
         view.findViewById<View>(R.id.btn_voice).setOnClickListener { startVoice() }
+        view.findViewById<View>(R.id.btn_browse).setOnClickListener { hideKeyboard(); (activity as? MainActivity)?.openBrowse() }
+        typeChips = view.findViewById(R.id.type_chips)
 
         home.trending.observe(viewLifecycleOwner) { if (input.text.isNullOrBlank()) showCards("Trending Now", it) }
         renderRecent()
@@ -101,7 +108,14 @@ class SearchFragment : Fragment(), TabPage {
         }
     }
 
-    private fun showCards(header: String, cards: List<MediaCard>) {
+    private fun showCards(header: String, all: List<MediaCard>) {
+        lastHeader = header; lastCards = all
+        // Filter chips only for real results, and only when there's more than one kind to choose between
+        val kinds = all.map { it.type }.distinct()
+        val filterable = header == "Results" && kinds.size > 1
+        if (typeFilter != null && typeFilter !in kinds) typeFilter = null
+        renderTypeChips(if (filterable) kinds else emptyList())
+        val cards = if (filterable && typeFilter != null) all.filter { it.type == typeFilter } else all
         title.text = header
         results.adapter = MediaCardAdapter(cards,
             onLongClick = { _, c -> QuickActions.show(requireContext(), c) },
@@ -110,6 +124,29 @@ class SearchFragment : Fragment(), TabPage {
                 hideKeyboard()
                 (activity as? MainActivity)?.openDetail(c)
             })
+    }
+
+    private fun renderTypeChips(kinds: List<com.anees.novamobile.data.model.MediaType>) {
+        typeChips.removeAllViews()
+        typeChips.visibility = if (kinds.isEmpty()) View.GONE else View.VISIBLE
+        if (kinds.isEmpty()) return
+        val dp = resources.displayMetrics.density
+        val options = listOf<com.anees.novamobile.data.model.MediaType?>(null) + com.anees.novamobile.data.model.MediaType.values().filter { it in kinds }
+        options.forEach { t ->
+            typeChips.addView(TextView(requireContext()).apply {
+                text = when (t) {
+                    null -> "All"
+                    com.anees.novamobile.data.model.MediaType.MOVIE -> "Movies"
+                    com.anees.novamobile.data.model.MediaType.SERIES -> "Series"
+                    com.anees.novamobile.data.model.MediaType.ANIME -> "Anime"
+                }
+                textSize = 13f; gravity = Gravity.CENTER
+                setTextColor(0xE6FFFFFF.toInt())
+                setBackgroundResource(R.drawable.chip_bg); isSelected = t == typeFilter
+                setPadding((14 * dp).toInt(), 0, (14 * dp).toInt(), 0)
+                setOnClickListener { com.anees.novamobile.ui.common.Ui.tick(it); typeFilter = t; showCards(lastHeader, lastCards) }
+            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, (32 * dp).toInt()).apply { marginStart = (8 * dp).toInt() })
+        }
     }
 
     private fun renderRecent() {

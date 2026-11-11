@@ -35,11 +35,16 @@ object UniversalExtractor {
     }
 
     /** Embed hosts where the fast tier keeps missing: after a few misses the WebView starts at once. */
-    private val misses = ConcurrentHashMap<String, Int>()
-    fun worthTrying(url: String): Boolean = (misses[host(url)] ?: 0) < 3
+    private val misses = ConcurrentHashMap<String, Pair<Int, Long>>()   // host → (misses in a row, last miss)
+    private const val MISS_TTL_MS = 30 * 60_000L
+    /** Misses age out: a host that was down (or changed its page) gets the fast tier back, not "never again this session". */
+    fun worthTrying(url: String): Boolean =
+        misses[host(url)]?.let { (n, at) -> n < 3 || System.currentTimeMillis() - at > MISS_TTL_MS } ?: true
     private fun noteResult(url: String, ok: Boolean) {
         val h = host(url)
-        if (ok) misses.remove(h) else misses.merge(h, 1, Int::plus)
+        val now = System.currentTimeMillis()
+        if (ok) misses.remove(h)
+        else misses.merge(h, 1 to now) { old, _ -> (if (now - old.second > MISS_TTL_MS) 1 else old.first + 1) to now }
     }
 
     suspend fun extract(pageUrl: String, userAgent: String): WebStreamSniffer.Sniffed? = withContext(Dispatchers.IO) {

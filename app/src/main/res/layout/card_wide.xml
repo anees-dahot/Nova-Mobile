@@ -7,7 +7,7 @@
     <FrameLayout android:id="@+id/card_frame"
         android:layout_width="match_parent" android:layout_height="124dp"
         android:background="@drawable/skeleton">
-        <ImageView android:id="@+id/card_poster"
+        <ImageView android:importantForAccessibility="no" android:id="@+id/card_poster"
             android:layout_width="match_parent" android:layout_height="match_parent"
             android:scaleType="centerCrop"/>
         <TextView android:id="@+id/card_badge"

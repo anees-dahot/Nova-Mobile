@@ -77,6 +77,12 @@ class MediaCardAdapter(
             if (card.year.isNotEmpty()) append(card.year)
             if (card.rating > 0) append("  ★ ${"%.1f".format(card.rating)}")
         }
+        holder.itemView.contentDescription = listOfNotNull(
+            card.title,
+            when (card.type) { MediaType.MOVIE -> "Movie"; MediaType.SERIES -> "Series"; MediaType.ANIME -> "Anime" },
+            card.year.ifEmpty { null },
+            card.rating.takeIf { it > 0 }?.let { "rated ${"%.1f".format(it)}" }
+        ).joinToString(", ")
         val fresh = isNew(card.released)
         // No type chips on posters (Apple style); only a quiet "New" when it's recent
         holder.badge.text = "New"
@@ -107,4 +113,15 @@ private fun isNew(date: String?): Boolean {
 internal fun android.content.Context.posterColumns(sidePaddingDp: Int = 24): Int {
     val dm = resources.displayMetrics
     return ((dm.widthPixels / dm.density - sidePaddingDp) / 122f).toInt().coerceAtLeast(3)
+}
+
+/** Poster grid: as many columns as fit, with air between rows so one row's caption doesn't touch the next poster. */
+internal fun RecyclerView.posterGrid(): Int {
+    val columns = context.posterColumns()
+    layoutManager = androidx.recyclerview.widget.GridLayoutManager(context, columns)
+    val gap = (18 * resources.displayMetrics.density).toInt()
+    addItemDecoration(object : RecyclerView.ItemDecoration() {
+        override fun getItemOffsets(out: android.graphics.Rect, v: View, parent: RecyclerView, state: RecyclerView.State) { out.bottom = gap }
+    })
+    return columns
 }

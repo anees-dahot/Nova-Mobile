@@ -71,7 +71,8 @@ internal object NexdriveResolver {
             if (body?.let { extractDirect(it) } != null) break
         }
         val direct = body?.let { extractDirect(it) }
-        if (directCache.size < 96) directCache[embedUrl] = direct ?: ""
+        // "No link" is only remembered when the page actually loaded; a failed fetch is retried next time
+        if (directCache.size < 96 && (direct != null || body != null)) directCache[embedUrl] = direct ?: ""
         return direct
     }
 

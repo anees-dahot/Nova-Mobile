@@ -68,6 +68,15 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
             }
         })
 
+        view.findViewById<androidx.swiperefreshlayout.widget.SwipeRefreshLayout>(R.id.refresh).apply {
+            val d = resources.displayMetrics.density
+            setProgressViewOffset(false, (40 * d).toInt(), (104 * d).toInt())   // clear of the brand bar
+            setProgressBackgroundColorSchemeColor(0xFF2C2C2E.toInt())
+            setColorSchemeColors(0xFFFFFFFF.toInt())
+            setOnRefreshListener { viewModel.refresh() }
+            viewModel.refreshing.observe(viewLifecycleOwner) { isRefreshing = it }
+        }
+
         adapter.submitList(listOf(HomeItem.Hero) + (1..3).map { HomeItem.Skeleton("sk$it", wide = it == 1 && tabIndex == 0) })
         viewModel.homeData.observe(viewLifecycleOwner) { render() }
         viewModel.genreRows.observe(viewLifecycleOwner) { if (tabIndex == 1 || tabIndex == 2) render() }
@@ -133,7 +142,15 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
             }
             viewModel.trending.value?.take(10)?.takeIf { it.size >= 5 }?.let { items += HomeItem.Row("top10", "Top 10 Today", it, ranked = true) }
         }
-        content.forEach { (title, cards) -> items += HomeItem.Row(title, title, cards) }
+        val genreType = when (tabIndex) { 1 -> MediaType.MOVIE; 2 -> MediaType.SERIES; else -> null }
+        val genreIds = when (genreType) {
+            MediaType.MOVIE -> com.anees.novamobile.data.repository.MediaRepository.MOVIE_GENRES
+            MediaType.SERIES -> com.anees.novamobile.data.repository.MediaRepository.TV_GENRES
+            else -> emptyList()
+        }.toMap()
+        content.forEach { (title, cards) ->
+            items += HomeItem.Row(title, title, cards, browse = genreType?.let { t -> genreIds[title]?.let { t to it } })
+        }
         if (items.isEmpty()) return  // keep skeletons until something arrives
         // No banner (offline): first row would sit under the top bar
         val top = if (items.first() == HomeItem.Hero) 0 else (activity as? MainActivity)?.topBarHeight() ?: 0
@@ -176,6 +193,11 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
             val h = LocalStore.history().getOrNull(index) ?: return
             PlayerActivity.launch(requireContext(), h.card, h.season, h.episode)
         } else (activity as? MainActivity)?.openDetail(card)
+    }
+
+    override fun onRowMore(row: HomeItem.Row) {
+        val (type, genre) = row.browse ?: return
+        (activity as? MainActivity)?.openBrowse(type, genre)
     }
 
     override fun onCardLongClick(row: HomeItem.Row, index: Int, card: MediaCard) =

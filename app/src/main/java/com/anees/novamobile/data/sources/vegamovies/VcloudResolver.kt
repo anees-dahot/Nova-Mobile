@@ -29,12 +29,14 @@ internal object VcloudResolver {
     /** vcloud page → its double-atob token page → the r2 streamable file URLs. */
     suspend fun resolve(vcloudUrl: String, referer: String, headers: Map<String, String>): List<VcloudStream> {
         directCache[vcloudUrl]?.let { return it }
+        // A page that didn't load (timeout, network blip) says nothing about the link: only a page that
+        // loaded without a token is remembered as dead, else one hiccup hid this link until the app restarted
         val page = VmHttp.get(vcloudUrl, headers + mapOf("Referer" to referer), timeoutMs = 15_000)
-            ?: return rememberEmpty(vcloudUrl)
+            ?: return emptyList()
         val tokenUrl = ATOB_ATOB.find(page)?.groupValues?.get(1)?.let { decodeDoubleAtob(it) }
             ?.takeIf { it.startsWith("http") } ?: return rememberEmpty(vcloudUrl)
         val token = VmHttp.get(tokenUrl, headers + mapOf("Referer" to vcloudUrl), timeoutMs = 15_000)
-            ?: return rememberEmpty(vcloudUrl)
+            ?: return emptyList()
         val seen = ArrayList<VcloudStream>(4)
         val urls = LinkedHashSet<String>()
         BTN.findAll(token).forEach { m ->

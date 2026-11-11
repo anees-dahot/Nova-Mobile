@@ -163,13 +163,18 @@ object VmHttp {
 
     /** Domains move often: re-derive them from the seed hosts, keeping one that serves the search index. */
     suspend fun refreshDomains(): Unit = coroutineScope {
-        if (System.currentTimeMillis() - lastHeal.get() < HEAL_COOLDOWN_MS) return@coroutineScope
+        val started = System.currentTimeMillis()
+        val last = lastHeal.get()
+        // Claim the heal up front, so two searches starting together don't both walk the seeds
+        if (started - last < HEAL_COOLDOWN_MS || !lastHeal.compareAndSet(last, started)) return@coroutineScope
         val a = async { verifiedBase("vegamovies", VEGA_SEEDS) }
         val b = async { verifiedBase("rogmovies", ROG_SEEDS) }
-        a.await()?.let { mainUrl = it }
-        b.await()?.let { bollywoodUrl = it }
-        lastHeal.set(System.currentTimeMillis())
+        val vega = a.await()?.also { mainUrl = it }
+        val rog = b.await()?.also { bollywoodUrl = it }
+        // Nothing verified (offline, seeds down for a moment): try again soon instead of a full cooldown later
+        lastHeal.set(if (vega == null && rog == null) System.currentTimeMillis() - HEAL_COOLDOWN_MS + HEAL_RETRY_MS else System.currentTimeMillis())
     }
+    private const val HEAL_RETRY_MS = 10_000L
 
     fun needsHeal(): Boolean = System.currentTimeMillis() - lastHeal.get() > HEAL_COOLDOWN_MS
 

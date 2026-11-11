@@ -17,6 +17,7 @@ import com.anees.novamobile.BuildConfig
 import com.anees.novamobile.R
 import com.anees.novamobile.data.local.LocalStore
 import com.anees.novamobile.data.local.Settings
+import com.anees.novamobile.data.local.subtitleDp
 import com.anees.novamobile.ui.common.ActionSheet
 import com.anees.novamobile.ui.common.TabPage
 
@@ -55,8 +56,21 @@ class SettingsFragment : Fragment(), TabPage {
         val s = LocalStore.settings()
         header("Playback")
         row("Subtitles", if (s.subtitlesOn) "On" else "Off") { save(s.copy(subtitlesOn = !s.subtitlesOn)) }
-        val sizes = listOf("Small", "Medium", "Large")
-        row("Subtitle Size", sizes[s.subtitleSize]) { pick("Subtitle Size", sizes, s.subtitleSize) { save(s.copy(subtitleSize = it)) } }
+        val sizes = com.anees.novamobile.data.local.SUBTITLE_SIZES
+        val sizeNow = s.subtitleDp
+        row("Subtitle Size", sizeNow.toString()) {
+            pick("Subtitle Size", sizes.map { if (it == 22) "22  ·  default" else it.toString() }, sizes.indexOf(sizeNow)) { save(s.copy(subtitleSize = sizes[it])) }
+        }
+        val subColors = listOf("White", "Yellow", "Cyan", "Green")
+        row("Subtitle Color", subColors[s.subtitleColor.coerceIn(0, 3)]) { pick("Subtitle Color", subColors, s.subtitleColor) { save(s.copy(subtitleColor = it)) } }
+        val subBgs = listOf("Outline", "Dim Box", "Solid Box")
+        row("Subtitle Background", subBgs[s.subtitleBg.coerceIn(0, 2)]) { pick("Subtitle Background", subBgs, s.subtitleBg) { save(s.copy(subtitleBg = it)) } }
+        val subPos = listOf("Bottom" to 0.08f, "Raised" to 0.15f, "High" to 0.24f)
+        val posNow = subPos.indexOfFirst { kotlin.math.abs(it.second - s.subtitleBottom) < 0.005f }
+        row("Subtitle Position", if (posNow >= 0) subPos[posNow].first else "Custom  ·  ${(s.subtitleBottom * 100).toInt()}% up") {
+            pick("Subtitle Position", subPos.map { it.first }, posNow) { save(s.copy(subtitleBottom = subPos[it].second)) }
+        }
+        note("In the player, drag the subtitles up or down to put them anywhere. A box makes them readable on bright scenes.")
         val boosts = listOf("Off", "+6 dB", "+10 dB", "+15 dB")
         row("Volume Boost", boosts[s.volumeBoost]) { pick("Volume Boost", boosts, s.volumeBoost) { save(s.copy(volumeBoost = it)) } }
         row("Autoplay Next Episode", if (s.autoplayNext) "On" else "Off") { save(s.copy(autoplayNext = !s.autoplayNext)) }

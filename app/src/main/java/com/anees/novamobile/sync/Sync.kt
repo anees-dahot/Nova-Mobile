@@ -53,10 +53,11 @@ object Sync {
         scope.launch { if (!send(p)) LocalStore.saveSyncQueue((LocalStore.syncQueue() + p).takeLast(300)) }
     }
 
-    private suspend fun send(p: Pending): Boolean = services.filter { it.loggedIn() && handles(it, p.card) }.all { s ->
+    // Every account gets the update even when an earlier one fails (AniList down must not hold back MAL)
+    private suspend fun send(p: Pending): Boolean = services.filter { it.loggedIn() && handles(it, p.card) }.map { s ->
         runCatching { if (p.kind == "watched") s.markWatched(p.card, p.season, p.episode) else s.setListed(p.card, p.listed) }
             .onFailure { Log.w(TAG, "${s.name}: ${it.message}") }.getOrDefault(false)
-    }
+    }.all { it }
 
     private fun handles(s: SyncService, c: MediaCard) = if (s === TraktSync) c.type != MediaType.ANIME else c.type == MediaType.ANIME
 

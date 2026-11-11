@@ -43,7 +43,7 @@
             <View android:id="@+id/side_left_fill" android:layout_width="match_parent" android:layout_height="0dp"
                 android:layout_gravity="bottom" android:background="@color/nova_white"/>
         </FrameLayout>
-        <ImageView android:layout_width="20dp" android:layout_height="20dp" android:layout_marginTop="10dp" android:src="@drawable/ic_brightness"/>
+        <ImageView android:importantForAccessibility="no" android:layout_width="20dp" android:layout_height="20dp" android:layout_marginTop="10dp" android:src="@drawable/ic_brightness"/>
     </LinearLayout>
     <LinearLayout android:id="@+id/side_right"
         android:layout_width="44dp" android:layout_height="wrap_content" android:layout_gravity="center_vertical|end"
@@ -53,7 +53,7 @@
             <View android:id="@+id/side_right_fill" android:layout_width="match_parent" android:layout_height="0dp"
                 android:layout_gravity="bottom" android:background="@color/nova_white"/>
         </FrameLayout>
-        <ImageView android:id="@+id/side_right_icon" android:layout_width="20dp" android:layout_height="20dp" android:layout_marginTop="10dp" android:src="@drawable/ic_volume"/>
+        <ImageView android:importantForAccessibility="no" android:id="@+id/side_right_icon" android:layout_width="20dp" android:layout_height="20dp" android:layout_marginTop="10dp" android:src="@drawable/ic_volume"/>
         <TextView android:id="@+id/side_right_text" android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_marginTop="4dp" android:textColor="@color/nova_white" android:textSize="10sp" android:visibility="gone"/>
     </LinearLayout>
@@ -65,7 +65,7 @@
         android:background="@drawable/pill_glass" android:orientation="horizontal" android:gravity="center_vertical"
         android:paddingStart="14dp" android:paddingEnd="16dp" android:paddingTop="8dp" android:paddingBottom="8dp"
         android:visibility="gone">
-        <ImageView android:id="@+id/hud_icon" android:layout_width="20dp" android:layout_height="20dp"/>
+        <ImageView android:importantForAccessibility="no" android:id="@+id/hud_icon" android:layout_width="20dp" android:layout_height="20dp"/>
         <TextView android:id="@+id/hud_text" android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:layout_marginStart="10dp" android:textColor="@color/nova_white" android:textSize="14sp"
             android:fontFamily="sans-serif-medium" android:fontFeatureSettings="tnum"/>
@@ -95,7 +95,7 @@
         android:background="@drawable/card_glass" android:orientation="vertical" android:padding="10dp"
         android:visibility="gone">
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
-            <ImageView android:id="@+id/next_still" android:layout_width="112dp" android:layout_height="63dp"
+            <ImageView android:importantForAccessibility="no" android:id="@+id/next_still" android:layout_width="112dp" android:layout_height="63dp"
                 android:scaleType="centerCrop" android:background="#22FFFFFF"/>
             <LinearLayout android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content"
                 android:orientation="vertical" android:layout_marginStart="10dp">
@@ -146,7 +146,7 @@
     <FrameLayout android:id="@+id/loading_layer"
         android:layout_width="match_parent" android:layout_height="match_parent"
         android:background="@android:color/black" android:clickable="true">
-        <ImageView android:id="@+id/loading_backdrop"
+        <ImageView android:importantForAccessibility="no" android:id="@+id/loading_backdrop"
             android:layout_width="match_parent" android:layout_height="match_parent" android:scaleType="centerCrop"/>
         <View android:layout_width="match_parent" android:layout_height="match_parent" android:background="@drawable/scrim"/>
         <ImageButton android:id="@+id/loading_close" android:layout_width="44dp" android:layout_height="44dp"

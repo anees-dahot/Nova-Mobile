@@ -67,6 +67,69 @@ class MediaRepository {
         MediaType.ANIME -> emptyList()
     }
 
+    // ── Cast & people ─────────────────────────────────────────────────────────
+
+    /** TMDB ("movie" | "tv", id) for any card; anime goes through its ani.zip mapping. */
+    private suspend fun tmdbRef(card: MediaCard): Pair<String, Int>? = when (card.type) {
+        MediaType.MOVIE -> "movie" to card.id
+        MediaType.SERIES -> "tv" to card.id
+        MediaType.ANIME -> animeMapping(card.id)?.mappings?.let { m ->
+            m.tmdbId?.toIntOrNull()?.let { (if (m.type == "MOVIE") "movie" else "tv") to it }
+        }
+    }
+
+    /** Top-billed cast, then the director / creator. Empty when TMDB has nothing. */
+    suspend fun cast(card: MediaCard): List<com.anees.novamobile.data.api.CastMember> = safe {
+        val (type, id) = tmdbRef(card) ?: return@safe emptyList()
+        val c = if (type == "tv") tmdb.seriesCredits(id, KEY) else tmdb.credits(type, id, KEY)
+        val lead = c.crew.filter { it.job == "Director" }.take(2)
+        (c.cast.take(18) + lead).filter { it.id > 0 && it.name.isNotBlank() }.distinctBy { it.id }
+    }
+
+    /** A person and everything of theirs Nova can open, most popular first. */
+    suspend fun person(id: Int): Pair<com.anees.novamobile.data.api.TmdbPerson, List<MediaCard>>? = runCatching {
+        val p = tmdb.person(id, KEY)
+        val all = p.credits?.let { if (p.department == "Acting" || it.crew.isEmpty()) it.cast + it.crew else it.crew + it.cast }.orEmpty()
+        p to all.asSequence()
+            .filter { (it.mediaType == "movie" || it.mediaType == "tv") && !it.adult && it.posterPath != null && SafeFilter.titleOk(it.title ?: it.name) }
+            .distinctBy { it.mediaType + it.id }
+            .sortedByDescending { it.voteCount }
+            .take(60).map { it.toCard() }.toList()
+    }.getOrNull()
+
+    /** IMDb score ("8.7") from Cinemeta's public catalogue (no key); null when unknown or offline. */
+    suspend fun imdbRating(imdbId: String, series: Boolean): String? = withContext(Dispatchers.IO) {
+        infoCache["imdb:$imdbId"]?.let { return@withContext it }
+        runCatching {
+            val req = Request.Builder().url("https://v3-cinemeta.strem.io/meta/${if (series) "series" else "movie"}/$imdbId.json").build()
+            RetrofitClient.http.newCall(req).execute().use { r ->
+                if (!r.isSuccessful) null
+                else Gson().fromJson(r.body?.string(), com.google.gson.JsonObject::class.java)
+                    ?.getAsJsonObject("meta")?.get("imdbRating")?.takeIf { !it.isJsonNull }?.asString
+            }
+        }.getOrNull()?.takeIf { it.toFloatOrNull()?.let { v -> v > 0f } == true }?.also { infoCache["imdb:$imdbId"] = it }
+    }
+
+    // ── Browse (filters) ──────────────────────────────────────────────────────
+
+    data class BrowseFilter(
+        val type: MediaType = MediaType.MOVIE,
+        val genre: Int? = null,
+        val year: Int? = null,
+        val minRating: Float? = null,
+        val lang: String? = null,
+        val sort: String = "popularity.desc"
+    )
+
+    suspend fun browse(f: BrowseFilter, page: Int): List<MediaCard> = safe {
+        // Rating sorts need a vote floor, or one-vote 10.0 titles fill the page
+        val votes = if (f.sort.startsWith("vote_average") || f.minRating != null) 200 else null
+        if (f.type == MediaType.MOVIE)
+            tmdb.discoverMovies(KEY, f.genre, f.lang, f.sort, votes, f.year, f.minRating, page).results.movies()
+        else
+            tmdb.discoverSeries(KEY, f.genre, f.lang, f.sort, votes, f.year, f.minRating, page).results.series()
+    }
+
     /** Trending titles across movies + TV for the empty Search screen. */
     suspend fun trendingToday(): List<MediaCard> = safe {
         tmdb.trendingAllDay(KEY).results
@@ -194,8 +257,9 @@ class MediaRepository {
     private inline fun <T> safe(block: () -> List<T>): List<T> = runCatching(block).getOrDefault(emptyList())
 
     companion object {
-        private val mappingCache = HashMap<Int, AniZip>()
-        private val infoCache = HashMap<String, String>()
+        // Shared by every MediaRepository and hit from several threads (parallel download lookups, home rows)
+        private val mappingCache = java.util.concurrent.ConcurrentHashMap<Int, AniZip>()
+        private val infoCache = java.util.concurrent.ConcurrentHashMap<String, String>()
         val MOVIE_GENRES = listOf("Action" to 28, "Comedy" to 35, "Horror" to 27, "Sci-Fi" to 878, "Thriller" to 53, "Animation" to 16, "Romance" to 10749)
         val TV_GENRES = listOf("Drama" to 18, "Crime" to 80, "Comedy" to 35, "Sci-Fi & Fantasy" to 10765, "Mystery" to 9648, "Action & Adventure" to 10759)
     }

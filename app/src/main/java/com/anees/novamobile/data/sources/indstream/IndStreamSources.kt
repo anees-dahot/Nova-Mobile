@@ -63,7 +63,8 @@ object IndStreamSources {
         val root = rootA.await()?.takeIf { it.optBoolean("ok", false) }
         root?.optString("imdb")?.takeIf { it.startsWith("tt") }?.let { imdbCache[t.tmdbId] = it }
 
-        val root0 = root ?: return@coroutineScope null
+        // Not here: don't make the answer wait for the variants request still in flight
+        val root0 = root ?: run { varsA.cancel(); return@coroutineScope null }
         // Dub versions ("Hindi dub") are separate single-language streams: each becomes a variant of the original
         val dubs = runCatching {
             val arr = withTimeoutOrNull(6_000) { varsA.await() }?.optJSONArray("variants") ?: return@runCatching emptyList()

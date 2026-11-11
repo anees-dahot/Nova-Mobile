@@ -26,12 +26,17 @@ object HubSources {
     private const val TAG = "NovaTV"
     private val UA = VmHttp.UA
     private const val DOMAINS = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json"
-    private var domains: JSONObject? = null
-    private var domainsAt = 0L
+    @Volatile private var domains: JSONObject? = null
+    @Volatile private var domainsAt = 0L
+    @Volatile private var domainsTriedAt = 0L
 
     /** Live domain of a site from the community domains list (6h), else [fallback]. */
     private suspend fun domain(key: String, fallback: String): String {
-        if (domains == null || System.currentTimeMillis() - domainsAt > 6 * 3600_000L) {
+        val now = System.currentTimeMillis()
+        // List unreachable (GitHub raw is blocked on some networks): ask again in 5 minutes, not on every
+        // search, where each of the three hub sources waited out the timeout first
+        if ((domains == null || now - domainsAt > 6 * 3600_000L) && now - domainsTriedAt > 5 * 60_000L) {
+            domainsTriedAt = now
             VmHttp.get(DOMAINS, mapOf("User-Agent" to UA), 6_000)?.let { runCatching { JSONObject(it) }.getOrNull() }?.let { domains = it; domainsAt = System.currentTimeMillis() }
         }
         return domains?.optString(key)?.takeIf { it.startsWith("http") }?.trimEnd('/') ?: fallback
@@ -214,9 +219,11 @@ object HubSources {
         if (url.contains("hubcdn")) {
             val html = VmHttp.get(url, h, 10_000) ?: return null
             val enc = Regex("""[?&]r=([A-Za-z0-9+/=]{20,})""").find(html)?.groupValues?.get(1) ?: return null
-            val inner = b64(enc)
+            // Not base64 after all, or not a link: "no file" for this pick, never an exception that ends the whole source
+            val inner = runCatching { b64(enc) }.getOrNull() ?: return null
             val direct = Regex("""link=(https?://\S+)""").find(inner)?.groupValues?.get(1) ?: inner
-            return HubFile(java.net.URLDecoder.decode(direct, "UTF-8"), null, null)
+            val file = runCatching { java.net.URLDecoder.decode(direct, "UTF-8") }.getOrNull()?.takeIf { it.startsWith("http") } ?: return null
+            return HubFile(file, null, null)
         }
         val u = resolveRedirect(url)
         if (u.contains("hubcloud")) return hubCloud(u)
@@ -278,7 +285,7 @@ object HubSources {
                 client.newCall(okhttp3.Request.Builder().url(url).header("User-Agent", UA).header("Referer", referer).build()).execute()
                     .use { r -> if (r.isRedirect) r.header("Location") else null }
             }.getOrNull() ?: return@withContext url
-            url = java.net.URI(url).resolve(loc).toString()
+            url = runCatching { java.net.URI(url).resolve(loc).toString() }.getOrNull() ?: return@withContext url
         }
         url
     }

@@ -25,7 +25,9 @@ sealed class HomeItem {
         val wide: Boolean = false,
         val progress: List<Float>? = null,
         val subtitles: List<String?>? = null,
-        val ranked: Boolean = false
+        val ranked: Boolean = false,
+        /** Genre rows: (type, TMDB genre id) the title opens in Browse. */
+        val browse: Pair<com.anees.novamobile.data.model.MediaType, Int>? = null
     ) : HomeItem()
 }
 
@@ -34,6 +36,7 @@ interface RowCallbacks {
     fun onCardFocused(card: MediaCard)
     fun onCardClick(row: HomeItem.Row, index: Int, card: MediaCard)
     fun onCardLongClick(row: HomeItem.Row, index: Int, card: MediaCard)
+    fun onRowMore(row: HomeItem.Row) {}
 }
 
 /**
@@ -89,7 +92,9 @@ class RowsAdapter(private val cb: RowCallbacks) : ListAdapter<HomeItem, Recycler
 
         fun bind(row: HomeItem.Row) {
             key = row.key
-            title.text = row.title
+            title.text = if (row.browse != null) "${row.title}  ›" else row.title
+            title.contentDescription = if (row.browse != null) "${row.title}, see all" else null
+            if (row.browse != null) title.setOnClickListener { cb.onRowMore(row) } else { title.setOnClickListener(null); title.isClickable = false }
             list.adapter = MediaCardAdapter(row.cards, row.progress, row.subtitles, row.wide, row.ranked,
                 onFocus = cb::onCardFocused,
                 onLongClick = { i, c -> cb.onCardLongClick(row, i, c) },

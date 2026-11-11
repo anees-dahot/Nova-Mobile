@@ -156,6 +156,9 @@ object LocalStore {
     fun saveAiringCache(eps: List<com.anees.novamobile.calendar.AiringEp>) = write("airing_cache", eps)
     fun scheduledReminders(): List<Int> = read("airing_ids", object : TypeToken<List<Int>>() {})
     fun saveScheduledReminders(ids: List<Int>) = write("airing_ids", ids)
+    /** Episode keys already announced, so a caught-up reminder never shows twice. */
+    fun notifiedEpisodes(): Set<String> = read("airing_notified", object : TypeToken<List<String>>() {}).toSet()
+    @Synchronized fun markNotified(key: String) = write("airing_notified", (read("airing_notified", object : TypeToken<List<String>>() {}) - key + key).takeLast(300))
 
     // ── Account sync ──────────────────────────────────────────────────────────
 

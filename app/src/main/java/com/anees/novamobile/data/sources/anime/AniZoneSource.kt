@@ -44,7 +44,11 @@ object AniZoneSource {
         val subs = data?.optJSONArray("subtitles")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it)?.optString("file") } }
             .orEmpty().map { it.replace("\\/", "/") }.filter { it.endsWith(".vtt") || it.endsWith(".srt") }.take(4)
         Log.i(TAG, "anizone: \"${best.second.firstOrNull()}\" ep $ep")
-        return WebStreamSniffer.Sniffed(src, mapOf("Referer" to "$BASE/"), VmHttp.UA, subs)
+        val allSubs = data?.optJSONArray("subtitles")?.length() ?: 0
+        val meta = com.anees.novamobile.ui.player.StreamMeta(release = best.second.firstOrNull(), episode = ep.takeIf { !t.isMovie },
+            server = "AniZone", subs = allSubs.takeIf { it > 0 }?.let { if (it == 1) "1 sub" else "$it subs" })
+            .orElse(com.anees.novamobile.ui.player.JsonMeta.from(data))
+        return WebStreamSniffer.Sniffed(src, mapOf("Referer" to "$BASE/"), VmHttp.UA, subs, meta = meta)
     }
 
     /** slug → every title the site lists for it. */

@@ -78,8 +78,17 @@ class SettingsFragment : Fragment(), TabPage {
         header("New Episodes")
         row("Calendar", "") { (activity as? com.anees.novamobile.MainActivity)?.openCalendar() }
         row("New Episode Alerts", if (s.newEpisodeAlerts) "On" else "Off") {
+            val app = requireContext().applicationContext
             save(s.copy(newEpisodeAlerts = !s.newEpisodeAlerts))
-            viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { runCatching { com.anees.novamobile.calendar.AiringCalendar.reschedule(requireContext().applicationContext) } }
+            if (!s.newEpisodeAlerts) (activity as? com.anees.novamobile.MainActivity)?.ensureNotificationPermission()
+            viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { runCatching { com.anees.novamobile.calendar.AiringCalendar.reschedule(app) } }
+        }
+        if (s.newEpisodeAlerts) row("Send Test Alert", "") {
+            val app = requireContext().applicationContext
+            val why = com.anees.novamobile.calendar.AiringReceiver.blocker(app)
+            if (why == com.anees.novamobile.calendar.AiringReceiver.Blocker.PERMISSION) (activity as? com.anees.novamobile.MainActivity)?.ensureNotificationPermission()
+            val msg = if (why == null) com.anees.novamobile.calendar.AiringCalendar.scheduleTest(app) else "Notifications are blocked — allow them first"
+            android.widget.Toast.makeText(app, msg, android.widget.Toast.LENGTH_SHORT).show()
         }
         header("Accounts")
         com.anees.novamobile.sync.Sync.services.forEach { svc ->
@@ -194,8 +203,8 @@ class SettingsFragment : Fragment(), TabPage {
             for (p in com.anees.novamobile.ui.player.StreamExtractor.PROVIDERS) {
                 val t0 = System.currentTimeMillis()
                 val r = if (p.resolver != null) p.resolver.invoke(target)
-                else com.anees.novamobile.ui.player.WebStreamSniffer(ctx, host)
-                    .sniff(com.anees.novamobile.ui.player.StreamExtractor.embedUrl(p, target), p.timeoutMs)
+                else com.anees.novamobile.ui.player.StreamExtractor.sniffUrl(p, target)?.let {
+                    com.anees.novamobile.ui.player.WebStreamSniffer(ctx, host).sniff(it, p.timeoutMs) }
                 val ms = System.currentTimeMillis() - t0
                 LocalStore.reportProvider(p.name, r != null)
                 if (r != null) LocalStore.setProviderSpeed(p.name, ms)

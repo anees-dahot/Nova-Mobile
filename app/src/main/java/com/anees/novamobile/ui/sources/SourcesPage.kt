@@ -159,7 +159,7 @@ class SourcesPage(
         val qs = when {
             files.isNotEmpty() -> files.map { Q(it.height, it.bytes ?: it.meta?.bytes, true, it.meta) }
             // HLS: every rendition it has; streaming also offers Auto (adapts to your connection)
-            all.isNotEmpty() -> (if (mode == Mode.STREAM) listOf(Q(0, null, false, null)) else emptyList()) + all.map { Q(it.height, null, false, it.meta) }
+            all.isNotEmpty() -> (if (mode == Mode.STREAM) listOf(Q(0, null, false, null)) else emptyList()) + all.map { Q(it.height, it.bytes, false, it.meta) }
             else -> listOf(Q(0, null, false, null))
         }
         // A deeper read of a source already listed: replace it in place (keeps its "same files" names)
@@ -278,6 +278,8 @@ class SourcesPage(
                 Cut.UNKNOWN -> "Length unknown"
             } to cut.color)
             e.meta.badges().filter { it !in StreamMeta.CAM_TYPES }.forEach { tags += it to Ui.TEXT }
+            e.meta.service?.let { tags += it to Ui.TEXT2 }
+            e.meta.flags?.filter { it == "Proper" || it == "Repack" || it == "Watermark" }?.forEach { tags += it to Ui.TEXT2 }
             val langs = langsOf(e).mapNotNull { LangTags.name(it) }
             val audio = when {
                 langs.isNotEmpty() -> langs.joinToString(" · ")
@@ -320,7 +322,8 @@ class SourcesPage(
         val label = if (q.height > 0) "${com.anees.novamobile.ui.player.ReleaseInfo.classOf(q.height)}p" else "Auto"
         // Direct files: MKV releases say so in their name (".mkv", "x265… [DDP5.1]"); the rest are MP4
         val mkv = (q.meta?.release ?: e.meta.release)?.contains(".mkv", true) == true || e.pr.provider in setOf("4KHDHub", "HDHub4u", "MoviesDrive")
-        val sub = listOfNotNull(if (q.mp4) (if (mkv) "MKV" else "MP4") else if (q.height > 0) null else "adaptive", q.bytes?.let { DownloadUi.size(ctx, it) }).joinToString(" · ")
+        val sub = listOfNotNull(if (q.mp4) (if (mkv) "MKV" else "MP4") else if (q.height > 0) null else "adaptive", q.bytes?.let { (if (q.mp4) "" else "~") + DownloadUi.size(ctx, it) }
+            ?: q.meta?.bitrateKbps?.takeIf { !q.mp4 }?.let { if (it >= 1000) "%.1f Mb/s".format(it / 1000.0) else "$it kb/s" }).joinToString(" · ")
         text = android.text.SpannableStringBuilder(label).apply {
             setSpan(android.text.style.StyleSpan(Typeface.BOLD), 0, length, 0)
             if (sub.isNotEmpty()) { append("  "); val st = length; append(sub)

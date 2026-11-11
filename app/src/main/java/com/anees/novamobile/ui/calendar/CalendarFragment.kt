@@ -16,6 +16,8 @@ import com.anees.novamobile.MainActivity
 import com.anees.novamobile.R
 import com.anees.novamobile.calendar.AiringCalendar
 import com.anees.novamobile.calendar.AiringEp
+import com.anees.novamobile.calendar.AiringReceiver
+import com.anees.novamobile.notify.NotifyChannels
 import com.anees.novamobile.data.local.LocalStore
 import com.anees.novamobile.ui.player.PlayerActivity
 import kotlinx.coroutines.launch
@@ -30,6 +32,7 @@ class CalendarFragment : Fragment() {
     private sealed class Row { data class Day(val label: String) : Row(); data class Ep(val e: AiringEp) : Row() }
     private val rows = mutableListOf<Row>()
     private lateinit var status: TextView
+    private lateinit var alerts: TextView
     private lateinit var list: RecyclerView
     private val time = SimpleDateFormat("h:mm a", Locale.getDefault())
     private val dayFmt = SimpleDateFormat("EEEE, MMM d", Locale.getDefault())
@@ -49,6 +52,12 @@ class CalendarFragment : Fragment() {
         })
         status = TextView(ctx).apply { textSize = 13f; setTextColor(0x99FFFFFF.toInt()); setPadding((16 * dp).toInt(), (2 * dp).toInt(), (16 * dp).toInt(), (8 * dp).toInt()) }
         root.addView(status)
+        // Why alerts won't arrive (permission / notifications off) + one-tap fix
+        alerts = TextView(ctx).apply {
+            textSize = 13f; setTextColor(Color.WHITE); visibility = View.GONE
+            setBackgroundColor(0x33FF9F0A); setPadding((16 * dp).toInt(), (10 * dp).toInt(), (16 * dp).toInt(), (10 * dp).toInt())
+        }
+        root.addView(alerts, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = (8 * dp).toInt() })
         list = RecyclerView(ctx).apply { layoutManager = LinearLayoutManager(ctx); adapter = Adapter(); itemAnimator = null; clipToPadding = false; setPadding(0, 0, 0, (24 * dp).toInt()) }
         root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
         return root
@@ -59,9 +68,71 @@ class CalendarFragment : Fragment() {
         show(LocalStore.airingCache(), loading = true)
         viewLifecycleOwner.lifecycleScope.launch {
             val eps = runCatching { AiringCalendar.load() }.getOrNull()
-            if (eps != null) show(eps, loading = false) else status.text = "Couldn't refresh — showing saved schedule"
-            context?.let { AiringCalendar.reschedule(it) }
+            if (eps != null) {
+                show(eps, loading = false)
+                if (AiringCalendar.lastLoadPartial) status.append("  ·  some shows couldn't refresh")
+            } else {
+                val saved = LocalStore.airingCache()
+                show(saved, loading = false)
+                status.text = if (saved.isEmpty()) "Couldn't load the schedule — check your connection" else "Offline — showing saved schedule"
+            }
+            context?.applicationContext?.let { app -> kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { runCatching { AiringCalendar.reschedule(app, eps) } } }
         }
+        // First visit with shows to follow: ask for notifications right when it matters
+        val prefs = requireContext().getSharedPreferences("calendar_ui", 0)
+        if (!prefs.getBoolean("asked_notif", false) && AiringCalendar.followed().isNotEmpty() &&
+            AiringReceiver.blocker(requireContext()) == AiringReceiver.Blocker.PERMISSION) {
+            prefs.edit().putBoolean("asked_notif", true).apply()
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 41)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateAlerts()
+        list.adapter?.notifyDataSetChanged()      // "Out now" badges flip while you were away
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        updateAlerts()
+    }
+
+    private fun updateAlerts() {
+        val ctx = context ?: return
+        val why = if (AiringCalendar.followed().isEmpty()) null else AiringReceiver.blocker(ctx)
+        alerts.visibility = if (why == null) View.GONE else View.VISIBLE
+        alerts.text = when (why) {
+            AiringReceiver.Blocker.SETTING_OFF -> "🔕  New-episode alerts are off.  Tap to turn on"
+            AiringReceiver.Blocker.PERMISSION -> "🔕  Nova can't notify you about new episodes.  Tap to allow"
+            AiringReceiver.Blocker.APP_OFF -> "🔕  Notifications are off for Nova.  Tap to open settings"
+            AiringReceiver.Blocker.CHANNEL_OFF -> "🔕  \"New episodes\" notifications are off.  Tap to open settings"
+            null -> ""
+        }
+        alerts.setOnClickListener {
+            when (why) {
+                AiringReceiver.Blocker.SETTING_OFF -> {
+                    LocalStore.saveSettings(LocalStore.settings().copy(newEpisodeAlerts = true)); updateAlerts()
+                    viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { runCatching { AiringCalendar.reschedule(ctx.applicationContext) } }
+                }
+                AiringReceiver.Blocker.PERMISSION ->
+                    // Denied twice → Android won't show the dialog again; go to the app's notification settings
+                    if (shouldShowRequestPermissionRationale(android.Manifest.permission.POST_NOTIFICATIONS) ||
+                        !ctx.getSharedPreferences("calendar_ui", 0).getBoolean("asked_notif", false)) {
+                        ctx.getSharedPreferences("calendar_ui", 0).edit().putBoolean("asked_notif", true).apply()
+                        requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 41)
+                    } else openAppNotificationSettings(ctx)
+                AiringReceiver.Blocker.APP_OFF -> openAppNotificationSettings(ctx)
+                AiringReceiver.Blocker.CHANNEL_OFF -> runCatching { startActivity(NotifyChannels.settingsIntent(ctx, NotifyChannels.NEW_EPISODES)) }
+                null -> {}
+            }
+        }
+    }
+
+    private fun openAppNotificationSettings(ctx: android.content.Context) = runCatching {
+        startActivity(android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, ctx.packageName))
     }
 
     private fun show(eps: List<AiringEp>, loading: Boolean) {
@@ -79,8 +150,8 @@ class CalendarFragment : Fragment() {
 
     private fun dayLabel(at: Long): String = when {
         DateUtils.isToday(at) -> "Today"
-        DateUtils.isToday(at - DateUtils.DAY_IN_MILLIS) -> "Yesterday"
-        DateUtils.isToday(at + DateUtils.DAY_IN_MILLIS) -> "Tomorrow"
+        DateUtils.isToday(at + DateUtils.DAY_IN_MILLIS) -> "Yesterday"
+        DateUtils.isToday(at - DateUtils.DAY_IN_MILLIS) -> "Tomorrow"
         else -> dayFmt.format(Date(at))
     }
 
@@ -130,9 +201,9 @@ class CalendarFragment : Fragment() {
                     val aired = e.airAt <= System.currentTimeMillis()
                     v.findViewById<ImageView>(1).load(e.card.posterUrl) { crossfade(false) }
                     v.findViewById<TextView>(2).text = e.card.title
-                    v.findViewById<TextView>(3).text = "S${e.season} · E${e.episode}" + (e.name.takeIf { it.isNotBlank() && !it.startsWith("Episode") }?.let { "  ·  $it" } ?: "")
+                    v.findViewById<TextView>(3).text = "S${e.season} · E${e.episode}" + (e.name.takeIf { it.isNotBlank() && !it.matches(Regex("(?i)episode \\d+")) }?.let { "  ·  $it" } ?: "")
                     v.findViewById<TextView>(4).apply {
-                        text = if (aired) "Out now" else if (e.exactTime) time.format(Date(e.airAt)) else "Airs"
+                        text = if (aired) "Out now" else if (e.exactTime) time.format(Date(e.airAt)) else "~" + time.format(Date(e.airAt))
                         setTextColor(if (aired) Color.BLACK else Color.WHITE)
                         setBackgroundResource(if (aired) R.drawable.btn_play_hero else R.drawable.btn_secondary)
                     }

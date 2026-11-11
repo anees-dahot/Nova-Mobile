@@ -106,19 +106,23 @@ object DownloadStarter {
                         val name = StreamExtractor.variantKey(v)?.takeIf { i > 0 }?.let { "${p.name}#$it" } ?: p.name
                         // [quickFirst]: the playlist-level answer shows at once, the deep one replaces it (same name)
                         if (quickFirst) AudioProbe.info(v).let { q ->
-                            send(Probe(name, q.langs, q.height, q.audioTracks, qualities(v, q), q.durationSec.takeIf { it > 0 } ?: v.meta?.durationSec ?: -1, v, v.meta))
+                            send(Probe(name, q.langs, q.height, q.audioTracks, qualities(v, q), q.durationSec.takeIf { it > 0 } ?: v.meta?.durationSec ?: -1, v, merged(v, q)))
                         }
                         // Deep read: first segment / MP4 index, so every row shows its real audio and quality
                         val info = AudioProbe.info(v, deep = true)
                         Log.i(TAG, "probe $name ${System.currentTimeMillis() - probeAt}ms h=${info.heights.ifEmpty { listOf(info.height) }} " +
                             "langs=${info.langs} tracks=${info.audioTracks} dur=${info.durationSec} mp4=${isProgressive(v.url)} opts=${v.options?.size ?: 0} subs=${v.subtitles.size}")
                         send(Probe(StreamExtractor.variantKey(v)?.takeIf { i > 0 }?.let { "${p.name}#$it" } ?: p.name, info.langs, info.height, info.audioTracks,
-                            qualities(v, info), info.durationSec.takeIf { it > 0 } ?: v.meta?.durationSec ?: -1, v, v.meta))
+                            qualities(v, info), info.durationSec.takeIf { it > 0 } ?: v.meta?.durationSec ?: -1, v, merged(v, info)))
                     }
                 }
             }
         }
     }
+
+    /** The source's own words (release name is richer: "DD+ 5.1 Atmos"), then what the stream itself states fills the gaps. */
+    private fun merged(v: WebStreamSniffer.Sniffed, info: AudioProbe.Info) =
+        v.meta?.orElse(info.meta) ?: info.meta
 
     /** Real qualities of one stream: its MP4 files (sizes asked with HEAD when the source didn't say) or HLS variants. */
     private suspend fun qualities(v: WebStreamSniffer.Sniffed, info: AudioProbe.Info): List<Quality> = coroutineScope {
@@ -128,7 +132,7 @@ object DownloadStarter {
         }.awaitAll()
         val mp4 = isProgressive(v.url)
         val hs = info.heights.ifEmpty { listOfNotNull(info.height.takeIf { it > 0 } ?: v.height) }
-        if (mp4) hs.take(1).map { Quality(it, sizeOf(v.url, v) ?: v.meta?.bytes, true, v.meta) } else hs.map { Quality(it, null, false) }
+        if (mp4) hs.take(1).map { Quality(it, sizeOf(v.url, v) ?: v.meta?.bytes, true, v.meta) } else hs.map { h -> info.variantMeta[h].let { m -> Quality(h, m?.bytes, false, m?.orElse(v.meta)) } }
     }
 
     /** Content-Length of a direct file (Range 0-0 → Content-Range total), null when the server won't say. */
@@ -355,7 +359,7 @@ object DownloadStarter {
     }
 
     private val FILE_HOSTS = listOf("r2.dev", "r2.cloudflarestorage.com", "video-downloads.googleusercontent.com", "googlevideo.com",
-        "pixeldrain.dev/api/file", "pixeldrain.com/api/file", "hubcloud")
+        "pixeldrain.dev/api/file", "pixeldrain.com/api/file", "hubcloud", "kurage.live/api/proxy")
 
     /** Direct file (MP4/MKV/WebM) rather than an HLS playlist. */
     fun isProgressive(url: String): Boolean {

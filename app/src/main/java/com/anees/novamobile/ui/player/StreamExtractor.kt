@@ -37,7 +37,9 @@ object StreamExtractor {
                       /** Anime: episode number within the AniList/MAL entry (season/episode are TVDB's). */
                       val aniEpisode: Int? = null,
                       /** Japanese animation (anime entry or a Japanese-language show): title-search sources must not match live action. */
-                      val anime: Boolean = false)
+                      val anime: Boolean = false,
+                      /** AniList id of this season's anime entry (Kurage and other AniList-keyed sources). */
+                      val aniListId: Int? = null)
 
     /** Built-in list, used until (or if) the remote sources.json from GitHub loads. */
     val BUILT_IN = listOf(
@@ -119,6 +121,10 @@ object StreamExtractor {
         Provider("MovieBox", { "moviebox://movie/$it" }, { id, s, e -> "moviebox://tv/$id/$s/$e" },
             timeoutMs = 25_000, multiAudio = true,
             resolver = { t -> com.anees.novamobile.data.sources.castle.MovieBoxSource.resolve(t) }),
+        // Kurage: AniList id → sub + English dub as MP4 (stream and download)
+        Provider("Kurage", { "kurage://movie/$it" }, { id, s, e -> "kurage://tv/$id/$s/$e" },
+            timeoutMs = 15_000, multiAudio = true,
+            resolver = { t -> com.anees.novamobile.data.sources.anime.KurageSource.resolve(t) }),
         // HiAnime's player: MAL id + episode → 1080p sub/dub HLS, new episodes fast
         Provider("ZokoAnime", { "zokoanime://movie/$it" }, { id, s, e -> "zokoanime://tv/$id/$s/$e" },
             timeoutMs = 15_000,
@@ -264,8 +270,31 @@ object StreamExtractor {
     fun embedUrl(p: Provider, t: Target) = if (t.isMovie) p.movie(t.tmdbId) else p.tv(t.tmdbId, t.season, t.episode)
 
     /** Movies/series map 1:1; anime goes AniList → TMDB via ani.zip (season/episode from TVDB numbering). */
-    suspend fun resolveTarget(card: MediaCard, season: Int, episode: Int, repo: MediaRepository): Target? =
-        resolveTarget0(card, season, episode, repo)?.copy(anime = card.type == MediaType.ANIME || card.lang == "ja")
+    suspend fun resolveTarget(card: MediaCard, season: Int, episode: Int, repo: MediaRepository): Target? {
+        val t = resolveTarget0(card, season, episode, repo)?.copy(anime = card.type == MediaType.ANIME || card.lang == "ja") ?: return null
+        // A Japanese show opened as a TMDB series (search, Series tab) carries no MAL / AniList id, so anime
+        // sources skipped it: look up this season's anime entry (ARM: TMDB id + season → MAL, AniList)
+        if (card.type == MediaType.SERIES && card.lang == "ja" && t.malId == null) armIds(t.tmdbId, t.season)?.let { (mal, al) ->
+            return t.copy(malId = mal, aniListId = al, aniEpisode = t.episode)
+        }
+        return t
+    }
+
+    private val armCache = HashMap<String, Pair<Int?, Int?>?>()
+    /** (MAL id, AniList id) of the anime entry for a TMDB show's season; the only entry when seasons aren't split. */
+    private suspend fun armIds(tmdb: Int, season: Int): Pair<Int?, Int?>? {
+        val key = "$tmdb:$season"
+        synchronized(armCache) { if (armCache.containsKey(key)) return armCache[key] }
+        val r = runCatching {
+            val body = com.anees.novamobile.data.sources.vegamovies.VmHttp.get("https://arm.haglund.dev/api/v2/themoviedb?id=$tmdb", emptyMap(), 6_000) ?: return null
+            val arr = org.json.JSONArray(body)
+            val all = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.filter { it.optString("media", "TV") in setOf("TV", "ONA", "") || it.has("themoviedb-season") }
+            val e = all.firstOrNull { it.optInt("themoviedb-season", -1) == season } ?: all.singleOrNull() ?: all.firstOrNull { season == 1 && !it.has("themoviedb-season") }
+            e?.let { it.optInt("myanimelist", 0).takeIf { v -> v > 0 } to it.optInt("anilist", 0).takeIf { v -> v > 0 } }
+        }.getOrNull()
+        synchronized(armCache) { armCache[key] = r }
+        return r
+    }
 
     private suspend fun resolveTarget0(card: MediaCard, season: Int, episode: Int, repo: MediaRepository): Target? = when (card.type) {
         MediaType.MOVIE -> Target(card.tmdbId ?: card.id, true, 0, 0, title = card.title, year = card.year.toIntOrNull(), imdbId = card.imdbId)
@@ -275,11 +304,11 @@ object StreamExtractor {
             val zip = repo.animeMapping(card.aniListId ?: card.id)
             val tmdb = zip?.mappings?.tmdbId?.toIntOrNull()
             if (tmdb == null) null
-            else if (zip.mappings.type == "MOVIE") Target(tmdb, true, 0, 0, zip.mappings.malId, card.title, card.year.toIntOrNull(), aniEpisode = 1)
+            else if (zip.mappings.type == "MOVIE") Target(tmdb, true, 0, 0, zip.mappings.malId, card.title, card.year.toIntOrNull(), aniEpisode = 1, aniListId = card.aniListId ?: card.id)
             else {
                 val ep = zip.episodes?.get(episode.toString())
                 Target(tmdb, false, ep?.seasonNumber ?: 1, ep?.episodeNumber ?: episode, zip.mappings.malId,
-                    card.title, card.year.toIntOrNull(), aniEpisode = episode)
+                    card.title, card.year.toIntOrNull(), aniEpisode = episode, aniListId = card.aniListId ?: card.id)
             }
         }
     }

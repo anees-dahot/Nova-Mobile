@@ -60,6 +60,37 @@ object VmHttp {
 
     suspend fun getFull(url: String, headers: Map<String, String> = commonHeaders, timeoutMs: Long = 15_000,
                         form: Map<String, String>? = null): Pair<String, String>? {
+        if (form != null) return fetch(url, headers, timeoutMs, form)
+        // Same page asked again (another source / query / mirror check): answer from memory, or join the request in flight
+        val key = url + "\u0000" + headers.entries.sortedBy { it.key }.joinToString("\u0000") { "${it.key}=${it.value}" }
+        PageCache.get(key)?.let { return it }
+        val d = inflight.computeIfAbsent(key) {
+            scope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) { fetch(url, headers, timeoutMs, null)?.also { PageCache.put(key, it) } }
+                .also { job -> job.invokeOnCompletion { inflight.remove(key, job) } }
+        }
+        d.start()
+        return d.await()
+    }
+
+    /** Recent page bodies, so one search doesn't download the same page twice. */
+    internal object PageCache {
+        private const val TTL_MS = 120_000L
+        private const val MAX_BODY = 600_000
+        private const val MAX_ENTRIES = 48
+        private val map = object : LinkedHashMap<String, Pair<Long, Pair<String, String>>>(64, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Long, Pair<String, String>>>?) = size > MAX_ENTRIES
+        }
+        @Synchronized fun get(k: String): Pair<String, String>? = map[k]?.let { if (System.currentTimeMillis() < it.first) it.second else { map.remove(k); null } }
+        @Synchronized fun put(k: String, v: Pair<String, String>) { if (v.first.length <= MAX_BODY) map[k] = (System.currentTimeMillis() + TTL_MS) to v }
+        @Synchronized fun clear() = map.clear()
+    }
+    private val inflight = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Deferred<Pair<String, String>?>>()
+    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+    /** Clients by timeout: building one per request cost an allocation storm during big searches. */
+    private val clients = java.util.concurrent.ConcurrentHashMap<Long, okhttp3.OkHttpClient>()
+
+    private suspend fun fetch(url: String, headers: Map<String, String>, timeoutMs: Long,
+                              form: Map<String, String>?): Pair<String, String>? {
         val req = runCatching {
             val hb = Headers.Builder()
             headers.forEach { (k, v) -> hb.add(k, v) }
@@ -67,7 +98,7 @@ object VmHttp {
             if (form != null) rb.post(okhttp3.FormBody.Builder().apply { form.forEach { (k, v) -> add(k, v) } }.build())
             rb.build()
         }.getOrNull() ?: return null
-        val client = RetrofitClient.base.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build()
+        val client = clients.getOrPut(timeoutMs) { RetrofitClient.base.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build() }
         return suspendCancellableCoroutine { cont ->
             val call = client.newCall(req)
             call.enqueue(object : Callback {

@@ -27,7 +27,7 @@ class ToroAnimeSource(private val name: String, seed: String) {
 
     /** Anime only (AniList cards carry a MAL id): any other title answers "not here" at once. */
     suspend fun resolve(t: StreamExtractor.Target): WebStreamSniffer.Sniffed? {
-        if (t.malId == null) return null
+        if (t.malId == null && !t.anime) return null
         val title = t.title?.trim()?.takeIf { it.isNotBlank() } ?: return null
         val hit = search(title, series = !t.isMovie) ?: return null
         val pageHtml = VmHttp.get(hit.url, headers, 10_000) ?: return null
@@ -102,7 +102,10 @@ class ToroAnimeSource(private val name: String, seed: String) {
             // The link is short-lived and signed: one fetch proves it plays before the race picks it
             val playlist = VmHttp.get(url, headers + ("Referer" to referer), 6_000) ?: continue
             if (!playlist.trimStart().startsWith("#EXTM3U")) continue
-            return WebStreamSniffer.Sniffed(url, mapOf("Referer" to referer), VmHttp.UA, emptyList())
+            // Already have the playlist: read its qualities / codecs / audio now instead of probing again
+            val hls = com.anees.novamobile.ui.player.HlsInfo.parse(playlist)
+            return WebStreamSniffer.Sniffed(url, mapOf("Referer" to referer), VmHttp.UA, emptyList(),
+                height = hls?.meta?.height, meta = (hls?.meta ?: com.anees.novamobile.ui.player.StreamMeta()).copy(server = json.optString("title").ifBlank { null }))
         }
         return null
     }

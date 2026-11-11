@@ -88,7 +88,7 @@ object HubSources {
         if (files.isEmpty()) return null
         val options = files.map { (r, f) ->
             WebStreamSniffer.Sniffed.Option(f.url, r.height.takeIf { it > 0 } ?: 1080, f.bytes ?: r.bytes,
-                (ReleaseInfo.parse(f.name ?: r.name) ?: StreamMeta()).copy(server = "HubCloud", bytes = f.bytes ?: r.bytes))
+                (ReleaseInfo.parse(f.name) ?: StreamMeta()).orElse(ReleaseInfo.parse(r.name)).copy(server = "HubCloud", bytes = f.bytes ?: r.bytes))
         }.distinctBy { it.height }.sortedBy { it.height }
         Log.i(TAG, "4khdhub: ${options.joinToString { "${it.height}p ${it.bytes}" }}")
         val top = options.lastOrNull { it.height <= 1080 } ?: options.first()

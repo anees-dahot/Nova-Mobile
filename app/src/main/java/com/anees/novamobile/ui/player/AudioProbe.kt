@@ -29,7 +29,11 @@ object AudioProbe {
                     /** Every picture height offered (HLS master variants); empty = only [height]. */
                     val heights: List<Int> = emptyList(),
                     /** Running time in seconds (HLS segment total, MP4 index, DASH duration); -1 = couldn't tell. */
-                    val durationSec: Int = -1) {
+                    val durationSec: Int = -1,
+                    /** Codec / HDR / bitrate / audio format the stream itself states (HLS master). */
+                    val meta: StreamMeta? = null,
+                    /** Picture height → that variant's details (bitrate, codec, estimated size). */
+                    val variantMeta: Map<Int, StreamMeta> = emptyMap()) {
         companion object { val UNKNOWN = Info(emptyList(), -1, -1) }
     }
 
@@ -108,7 +112,10 @@ object AudioProbe {
                 // Running time: the first variant's segment list (text only, cheap)
                 val variant = head.lineSequence().map { it.trim() }.dropWhile { !it.startsWith("#EXT-X-STREAM-INF") }
                     .drop(1).firstOrNull { it.isNotEmpty() && !it.startsWith("#") }?.let { resolve(s.url, it) }
-                i.copy(durationSec = variant?.let { hlsDuration(null, it, s) } ?: -1)
+                val dur = variant?.let { hlsDuration(null, it, s) } ?: -1
+                // Size of each quality ≈ bitrate × running time (HLS has no file size)
+                fun sized(m: StreamMeta) = if (dur > 0 && m.bitrateKbps != null) m.copy(durationSec = dur, bytes = m.bitrateKbps.toLong() * 1000 / 8 * dur) else m
+                i.copy(durationSec = dur, meta = i.meta?.let(::sized), variantMeta = i.variantMeta.mapValues { sized(it.value) })
             }
             head.contains("#EXTINF") -> (if (deep) hlsMedia(head, s.url, s) else Info.UNKNOWN).copy(durationSec = hlsDuration(head, s.url, s))
             head.contains("<MPD", true) -> dash(head)
@@ -149,6 +156,11 @@ object AudioProbe {
     }
 
     private fun hlsMaster(head: String, s: WebStreamSniffer.Sniffed, deep: Boolean): Info {
+        val hls = HlsInfo.parse(head)
+        return hlsMasterTracks(head, s, deep).copy(meta = hls?.meta, variantMeta = hls?.variants.orEmpty())
+    }
+
+    private fun hlsMasterTracks(head: String, s: WebStreamSniffer.Sniffed, deep: Boolean): Info {
         val renditions = HLS_AUDIO.findAll(head).map { it.value }.toList()
         val langs = renditions.mapNotNull { code(attr(it, "LANGUAGE")) ?: LangTags.code(attr(it, "NAME")) }.distinct()
         val all = RES.findAll(head).mapNotNull { it.groupValues[1].toIntOrNull() }.filter { it > 0 }.distinct().sorted().toList()
@@ -224,6 +236,20 @@ object AudioProbe {
         } }
         // Tracks: each TrackEntry (0xAE) → type (0x83: 1 video, 2 audio), language (0x22B59C), height (0xBA)
         val langs = mutableListOf<String>(); var audio = 0; var height = -1
+        var vCodec: String? = null; var aCodec: String? = null; var channels = 0; var subTracks = 0
+        /** CodecID (0x86): ASCII "V_MPEGH/ISO/HEVC", "A_EAC3", "S_TEXT/UTF8". */
+        fun codecId(st: Int, en: Int): String? {
+            var p = find(intArrayOf(0x86), st, en)
+            while (p >= 0 && p + 2 < en) {
+                vint(p + 1)?.let { (n, ll) ->
+                    val len = n.toInt(); val at = p + 1 + ll
+                    if (len in 3..40 && at + len <= end) String(b, at, len, Charsets.ISO_8859_1).trimEnd('\u0000')
+                        .takeIf { it.length > 2 && it[1] == '_' && it[0] in "VAS" }?.let { return it }
+                }
+                p = find(intArrayOf(0x86), p + 1, en)
+            }
+            return null
+        }
         // The first hit is often the SeekHead's pointer to Tracks (SeekID 0x53AB, size 0x84): skip those
         var i = find(intArrayOf(0x16, 0x54, 0xAE, 0x6B), 0, end)
         while (i >= 3 && u(i - 1) == 0x84 && u(i - 2) == 0xAB && u(i - 3) == 0x53) i = find(intArrayOf(0x16, 0x54, 0xAE, 0x6B), i + 4, end)
@@ -238,16 +264,36 @@ object AudioProbe {
                 val type = find(intArrayOf(0x83), st, en).takeIf { it >= 0 && it + 2 < en }?.let { p -> vint(p + 1)?.let { (n, ll) -> uint(p + 1 + ll, n.toInt().coerceIn(1, 2)) } } ?: 0
                 if (type == 2L) {
                     audio++
+                    if (aCodec == null) aCodec = codecId(st, en)?.let { mkvAudio(it) }
+                    // Channels (0x9F) inside the Audio element (0xE1)
+                    find(intArrayOf(0xE1), st, en).takeIf { it >= 0 }?.let { a -> find(intArrayOf(0x9F, 0x81), a, en).takeIf { it >= 0 && it + 2 < en }?.let { c ->
+                        u(c + 2).takeIf { it in 1..24 }?.let { channels = maxOf(channels, it) } } }
                     find(intArrayOf(0x22, 0xB5, 0x9C), st, en).takeIf { it >= 0 }?.let { p -> vint(p + 3)?.let { (n, ll) ->
                         val tag = String(b, p + 3 + ll, n.toInt().coerceIn(0, 8).coerceAtMost(end - p - 3 - ll), Charsets.ISO_8859_1).trimEnd('\u0000')
                         iso2(tag)?.let { langs += it } } } ?: langs.add("en")   // no Language element = "eng" (Matroska default)
+                } else if (type == 17L) {
+                    subTracks++
                 } else if (type == 1L) {
+                    if (vCodec == null) vCodec = codecId(st, en)?.let { mkvVideo(it) }
                     find(intArrayOf(0xBA), st, en).takeIf { it >= 0 }?.let { p -> vint(p + 1)?.let { (n, ll) -> if (n in 1..4) height = maxOf(height, uint(p + 1 + ll, n.toInt()).toInt()) } }
                 }
                 i = en
             }
         }
-        return Info(langs.distinct(), if (audio > 0) audio else -1, height, durationSec = sec)
+        val meta = StreamMeta(codec = vCodec, audio = aCodec, subs = subTracks.takeIf { it > 0 }?.let { if (it == 1) "1 sub" else "$it subs" },
+            channels = when (channels) { 1 -> "1.0"; 2 -> "2.0"; 6 -> "5.1"; 8 -> "7.1"; else -> null },
+            audioMode = langs.distinct().size.let { if (it >= 3) "Multi Audio" else if (it == 2) "Dual Audio" else null })
+        return Info(langs.distinct(), if (audio > 0) audio else -1, height, durationSec = sec,
+            meta = meta.takeIf { it != StreamMeta() })
+    }
+
+    private fun mkvVideo(id: String): String? = when {
+        id.contains("HEVC") -> "HEVC"; id.contains("AVC") -> "x264"; id.startsWith("V_AV1") -> "AV1"; id.startsWith("V_VP9") -> "VP9"; else -> null
+    }
+
+    private fun mkvAudio(id: String): String? = when {
+        id.startsWith("A_EAC3") -> "DD+"; id.startsWith("A_AC3") -> "DD"; id.startsWith("A_AAC") -> "AAC"; id.startsWith("A_TRUEHD") -> "TrueHD"
+        id.startsWith("A_DTS") -> "DTS"; id.startsWith("A_OPUS") -> "Opus"; id.startsWith("A_FLAC") -> "FLAC"; id.startsWith("A_MPEG/L3") -> "MP3"; else -> null
     }
 
     // ── MP4 ───────────────────────────────────────────────────────────────────

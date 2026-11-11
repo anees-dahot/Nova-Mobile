@@ -12,6 +12,9 @@ import android.view.MotionEvent
 import android.view.ViewGroup
 import android.webkit.*
 import android.widget.FrameLayout
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayInputStream
@@ -55,7 +58,29 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
     private val main = Handler(Looper.getMainLooper())
     private var webView: WebView? = null
 
-    suspend fun sniff(embedUrl: String, timeoutMs: Long = 15_000): Sniffed? = try {
+    /**
+     * Find the stream on [embedUrl]: the fast HTTP tier ([UniversalExtractor]) and the WebView race,
+     * first real answer wins. The WebView waits [FAST_GRACE_MS] so pages HTTP can read never pay for it.
+     */
+    suspend fun sniff(embedUrl: String, timeoutMs: Long = 15_000): Sniffed? = withTimeoutOrNull(timeoutMs) {
+        if (!UniversalExtractor.worthTrying(embedUrl)) return@withTimeoutOrNull sniffWeb(embedUrl, timeoutMs)
+        val ua = runCatching { android.webkit.WebSettings.getDefaultUserAgent(ctx) }.getOrDefault("Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile Safari/537.36")
+        kotlinx.coroutines.coroutineScope {
+            val fast = async { runCatching { UniversalExtractor.extract(embedUrl, ua) }.getOrNull() }
+            withTimeoutOrNull(FAST_GRACE_MS) { fast.await() }?.let { return@coroutineScope it }
+            val web = async { sniffWeb(embedUrl, timeoutMs) }
+            // First non-null wins; a null from one side just leaves the other running
+            val winner = kotlinx.coroutines.CompletableDeferred<Sniffed?>()
+            val left = java.util.concurrent.atomic.AtomicInteger(2)
+            listOf(fast, web).forEach { d ->
+                launch { val r = runCatching { d.await() }.getOrNull()
+                    if (r != null) winner.complete(r) else if (left.decrementAndGet() == 0) winner.complete(null) }
+            }
+            winner.await().also { fast.cancel(); web.cancel(); coroutineContext.cancelChildren() }
+        }
+    }
+
+    private suspend fun sniffWeb(embedUrl: String, timeoutMs: Long): Sniffed? = try {
         withTimeoutOrNull(timeoutMs) {
             suspendCancellableCoroutine<Sniffed?> { cont ->
                 val subs = linkedSetOf<String>()
@@ -236,6 +261,7 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
 
     companion object {
         private const val TAG = "NovaTV"
+        private const val FAST_GRACE_MS = 1_200L
         /** What the page's player knows (JW Player, hls.js, video.js, plain <video>), as JSON. */
         private val PLAYER_INFO_JS = """(function(){try{var o={src:[],tr:[],at:[]};
 var jw=window.jwplayer&&jwplayer();if(jw&&jw.getPlaylist){var pl=jw.getPlaylist()||[];var it=pl[jw.getPlaylistIndex?jw.getPlaylistIndex():0]||pl[0]||{};

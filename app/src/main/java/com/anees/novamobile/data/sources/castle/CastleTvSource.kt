@@ -138,7 +138,7 @@ object CastleTvSource {
         val meta = com.anees.novamobile.ui.player.StreamMeta(
             durationSec = listOf("duration", "videoDuration", "totalTime").firstNotNullOfOrNull { k -> data.optString(k).toDoubleOrNull()?.toInt()?.takeIf { it > 0 } }
                 ?.let { if (it > 100_000) it / 1000 else it },   // some builds answer in ms
-            subLangs = caps.map { it.second }.takeIf { l -> l.any { it.isNotEmpty() } })
+            subLangs = caps.map { it.second }.takeIf { l -> l.any { it.isNotEmpty() } }).orElse(com.anees.novamobile.ui.player.JsonMeta.from(data))
         return WebStreamSniffer.Sniffed(url, emptyMap(), "okhttp/4.9.3", subs, height = height, meta = meta)
     }
 

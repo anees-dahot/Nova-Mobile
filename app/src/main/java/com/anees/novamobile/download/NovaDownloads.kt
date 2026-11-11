@@ -161,17 +161,21 @@ object NovaDownloads {
             .dispatcher(okhttp3.Dispatcher().apply { maxRequests = 64; maxRequestsPerHost = 32 })
             // Slow links (~100 KB/s): a segment may take a while to finish, but a dead socket must not hang forever
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
+            .addNetworkInterceptor(SlowGuard)
             .addNetworkInterceptor(DebugThrottle)   // Settings speed limit (and debug.nova.throttle in debug builds)
             .addNetworkInterceptor(NetMeter)
             .build()
         val http = OkHttpDataSource.Factory(client).setUserAgent(LocalStore.downloadUserAgent())
         // Phone-to-phone transfer: while one runs, pieces come from the other phone first
         upstream = com.anees.novamobile.transfer.BeamLink.route(ResolvingDataSource.Factory(
-            DataSource.Factory { PngStripDataSource(DefaultDataSource.Factory(app, http).createDataSource()) }
+            DataSource.Factory { PngStripDataSource(RetryOpenDataSource(DefaultDataSource.Factory(app, http).createDataSource())) }
         ) { spec -> resolve(spec) }, KEYS)
         val cacheFactory = CacheDataSource.Factory().setCache(cache).setUpstreamDataSourceFactory(upstream).setCacheKeyFactory(KEYS)
+            // Default sink flushes to disk every 20 KB: at 5+ MB/s over many connections that's hundreds of small
+            // writes a second competing for the cache lock. 256 KB batches them (same files, same resume points).
+            .setCacheWriteDataSinkFactory(androidx.media3.datasource.cache.CacheDataSink.Factory().setCache(cache).setBufferSize(256 * 1024))
 
         val s = LocalStore.settings()
         val dm = DownloadManager(app, DefaultDownloadIndex(db), NovaDownloaderFactory(cacheFactory, segmentExecutor))
@@ -358,6 +362,36 @@ object NovaDownloads {
         }
     }
 
+    /**
+     * A server that keeps a connection open but sends almost nothing (a few bytes every few seconds) never
+     * trips the read timeout, which restarts on every byte: the download sat "stuck" at one size until the
+     * stall watcher stepped in 90 s later, though other traffic was flowing. Under ~2 KB/s for 15 s → the
+     * connection is cut, and RetryOpenDataSource reopens it from that byte. Off while a speed limit is set.
+     */
+    private object SlowGuard : okhttp3.Interceptor {
+        private const val WINDOW_MS = 15_000L
+        private const val MIN_BYTES = 32L * 1024
+        override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
+            val r = chain.proceed(chain.request())
+            val body = r.body ?: return r
+            if (DebugThrottle.active()) return r
+            val guarded = object : okio.ForwardingSource(body.source()) {
+                var since = System.currentTimeMillis(); var got = 0L
+                override fun read(sink: okio.Buffer, byteCount: Long): Long {
+                    val n = super.read(sink, byteCount)
+                    if (n > 0) got += n
+                    val now = System.currentTimeMillis()
+                    if (now - since >= WINDOW_MS) {
+                        if (got < MIN_BYTES && n != -1L) throw java.net.SocketTimeoutException("stream too slow (${got} B in ${(now - since) / 1000}s)")
+                        since = now; got = 0
+                    }
+                    return n
+                }
+            }.buffer()
+            return r.newBuilder().body(guarded.asResponseBody(body.contentType(), body.contentLength())).build()
+        }
+    }
+
     /** Bytes received by downloads, for [Gate]. */
     private object NetMeter : okhttp3.Interceptor {
         val bytes = java.util.concurrent.atomic.AtomicLong()
@@ -405,6 +439,7 @@ object NovaDownloads {
         private val throttler = okio.Throttler()
         private var kbps = -1L
         private var checked = 0L
+        fun active() = limit() > 0
         private fun limit(): Long {
             val now = System.currentTimeMillis()
             if (now - checked > 3_000) {
@@ -428,7 +463,7 @@ object NovaDownloads {
 
     /** Ids that failed on network trouble; retried the moment a network is back. */
     private val waitingForNetwork = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-    private const val STALL_MS = 90_000L
+    private const val STALL_MS = 45_000L
     private val lastBytes = mutableMapOf<String, Pair<Long, Long>>()   // id → (bytes, since)
 
     /** A download showing "downloading" with no new bytes for [STALL_MS] is restarted (saved data is reused). */

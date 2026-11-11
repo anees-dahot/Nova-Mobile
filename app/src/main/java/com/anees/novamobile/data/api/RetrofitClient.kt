@@ -14,6 +14,10 @@ object RetrofitClient {
      * WebView's own User-Agent.
      */
     val base: OkHttpClient = OkHttpClient.Builder()
+        // Source searches fire dozens of requests at a few hosts at once: OkHttp's default 5 per host queued them
+        .dispatcher(okhttp3.Dispatcher().apply { maxRequests = 128; maxRequestsPerHost = 16 })
+        .connectionPool(okhttp3.ConnectionPool(24, 5, TimeUnit.MINUTES))
+        .dns(FastDns)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .build()

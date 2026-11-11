@@ -86,12 +86,13 @@ object IndStreamSources {
         val url = bestMp4(chosen) ?: return null
         val arr = chosen.optJSONArray("streams")
         val options = (0 until (arr?.length() ?: 0)).mapNotNull { arr?.optJSONObject(it) }
-            .mapNotNull { o -> o.optString("url").takeIf { it.startsWith("http") }?.let { WebStreamSniffer.Sniffed.Option(it, o.optInt("resolution", 0), o.optLong("size", 0).takeIf { s -> s > 0 }) } }
+            .mapNotNull { o -> o.optString("url").takeIf { it.startsWith("http") }?.let { WebStreamSniffer.Sniffed.Option(it, o.optInt("resolution", 0), o.optLong("size", 0).takeIf { s -> s > 0 }, com.anees.novamobile.ui.player.JsonMeta.from(o)) } }
             .filter { it.height > 0 }.distinctBy { it.height }.sortedBy { it.height }
         val (subs, subLangs) = captionsWithLangs(chosen)
         val meta = com.anees.novamobile.ui.player.StreamMeta(release = chosen.optString("title").ifBlank { null },
             durationSec = listOf("duration", "runtime", "length").firstNotNullOfOrNull { k -> chosen.optInt(k, 0).takeIf { it > 0 } }?.let { if (it < 400) it * 60 else it },
             langs = lang?.let { listOf(it) }, subLangs = subLangs.takeIf { it.any { l -> l.isNotEmpty() } })
+            .orElse(com.anees.novamobile.ui.player.JsonMeta.from(chosen))
         return WebStreamSniffer.Sniffed(url, mapOf("Referer" to NM_PLAY_REFERER), UA, subs, audioLang = lang,
             height = options.firstOrNull { it.url == url }?.height, options = options.takeIf { it.size > 1 }, meta = meta)
     }
@@ -138,7 +139,10 @@ object IndStreamSources {
         val urls = data.optJSONArray("stream_urls") ?: return null
         val url = (0 until urls.length()).map { urls.optString(it) }.firstOrNull { it.startsWith("http") } ?: return null
         Log.i(TAG, "vaplayer: ${data.optString("file_name")}")
-        return WebStreamSniffer.Sniffed(url, mapOf("Referer" to VA_REFERER), UA, emptyList())
+        // Its file name is a full release name ("Movie.2023.1080p.WEB-DL.DDP5.1.H.264-GROUP.mkv")
+        val meta = com.anees.novamobile.ui.player.JsonMeta.from(data)?.copy(server = "VaPlayer")
+        return WebStreamSniffer.Sniffed(url, mapOf("Referer" to VA_REFERER), UA, emptyList(),
+            height = com.anees.novamobile.ui.player.ReleaseInfo.height(data.optString("file_name")), meta = meta)
     }
 
     /** The card's IMDB id, else one learned from NetMirror (cached, or a quick lookup). */
@@ -172,6 +176,12 @@ object IndStreamSources {
         val stream = r.optJSONObject("file")?.optString("stream")?.takeIf { it.isNotBlank() } ?: return null
         val url = if (stream.startsWith("http")) stream else BF_BASE + stream
         Log.i(TAG, "braflix: ${r.optJSONObject("source")?.optString("quality")}")
-        return WebStreamSniffer.Sniffed(url, mapOf("Referer" to "$BF_BASE/", "Origin" to BF_BASE), UA, emptyList())
+        val src = r.optJSONObject("source")
+        val meta = (com.anees.novamobile.ui.player.JsonMeta.from(r.optJSONObject("file")) ?: com.anees.novamobile.ui.player.StreamMeta())
+            .orElse(com.anees.novamobile.ui.player.JsonMeta.from(src))
+            .orElse(com.anees.novamobile.ui.player.ReleaseInfo.parse(src?.optString("quality")))
+            .copy(server = src?.optString("name")?.takeIf { it.isNotBlank() } ?: "Braflix")
+        return WebStreamSniffer.Sniffed(url, mapOf("Referer" to "$BF_BASE/", "Origin" to BF_BASE), UA, emptyList(),
+            height = com.anees.novamobile.ui.player.ReleaseInfo.height(src?.optString("quality")), meta = meta)
     }
 }

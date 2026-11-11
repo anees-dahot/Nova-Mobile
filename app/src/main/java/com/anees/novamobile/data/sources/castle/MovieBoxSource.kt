@@ -143,7 +143,7 @@ object MovieBoxSource {
                     when { c.contains("265") || c.contains("hevc", true) -> "HEVC"; c.contains("264") || c.contains("avc", true) -> "x264"; c.contains("av1", true) -> "AV1"; else -> c } },
                 durationSec = listOf("duration", "durationSeconds").firstNotNullOfOrNull { k -> o.optString(k).toDoubleOrNull()?.toInt()?.takeIf { it > 0 } },
                 bytes = o.optString("size").toLongOrNull()?.takeIf { it > 0 },
-                subLangs = caps.map { it.second }.takeIf { l -> l.any { it.isNotEmpty() } })
+                subLangs = caps.map { it.second }.takeIf { l -> l.any { it.isNotEmpty() } }).orElse(com.anees.novamobile.ui.player.JsonMeta.from(o))
             val height = best.optString("resolutions").toIntOrNull() ?: best.optInt("resolution", 0)
             // Like the MovieBox app: every quality is its own MP4 with a known size
             val options = all.mapNotNull { o ->

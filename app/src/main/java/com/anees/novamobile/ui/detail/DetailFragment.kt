@@ -74,7 +74,7 @@ class DetailFragment : Fragment() {
             val s = if (card.type == com.anees.novamobile.data.model.MediaType.MOVIE) 0 else season.coerceAtLeast(1)
             val e = if (card.type == com.anees.novamobile.data.model.MediaType.MOVIE) 0 else episode.coerceAtLeast(1)
             com.anees.novamobile.ui.sources.SourcesPage(act, card, s, e, com.anees.novamobile.ui.sources.SourcesPage.Mode.STREAM, expectedMinutes(s, e)) {
-                PlayerActivity.launch(requireContext(), card, s, e)
+                PlayerActivity.launch(act, card, s, e)   // the sheet can outlive this fragment
             }.show()
         }
         listBtn.setOnClickListener { com.anees.novamobile.ui.common.Ui.confirm(it); LocalStore.toggleWatchlist(card); updateListLabel() }
@@ -324,9 +324,12 @@ class DetailFragment : Fragment() {
         loadSeason(view, season, chips, keepEpisode = true)
     }
 
+    private var seasonJob: kotlinx.coroutines.Job? = null
+
     private fun loadSeason(view: View, s: Int, chips: LinearLayout, keepEpisode: Boolean = false) {
         for (i in 0 until chips.childCount) chips.getChildAt(i).isSelected = (chips.getChildAt(i) as TextView).text == "Season $s"
-        viewLifecycleOwner.lifecycleScope.launch {
+        seasonJob?.cancel()   // a slow earlier season must not render over the one just tapped
+        seasonJob = viewLifecycleOwner.lifecycleScope.launch {
             val eps = repo.getSeasonEpisodes(card.id, s)
             if (!keepEpisode) { season = s; episode = 1; updatePlayLabel() }
             showEpisodes(view, eps)

@@ -30,8 +30,11 @@ object AniListQueries {
             bannerImage episodes status averageScore genres isAdult
         }}}""".trimIndent())
 
+    /** Text for inside a GraphQL "string": a quote or backslash typed in the search box broke the whole query (no anime results). */
+    private fun quoted(s: String) = s.replace("\\", "\\\\").replace("\"", "\\\"").replace(Regex("[\\r\\n\\t]"), " ")
+
     fun search(query: String) = mapOf("query" to """
-        { Page(page: 1, perPage: 20) { media(type: ANIME, isAdult: false, genre_not_in: ["Hentai"], search: "$query") {
+        { Page(page: 1, perPage: 20) { media(type: ANIME, isAdult: false, genre_not_in: ["Hentai"], search: "${quoted(query)}") {
             id title { english romaji } description coverImage { large extraLarge }
             bannerImage episodes status averageScore genres isAdult
         }}}""".trimIndent())

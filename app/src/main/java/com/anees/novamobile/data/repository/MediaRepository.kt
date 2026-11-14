@@ -254,7 +254,9 @@ class MediaRepository {
         .filterNot { it.isAdult == true || it.genres?.any { g -> g.equals("Hentai", true) } == true || !SafeFilter.titleOk(it.title?.english ?: it.title?.romaji) }
         .map { it.toCard() }
 
-    private inline fun <T> safe(block: () -> List<T>): List<T> = runCatching(block).getOrDefault(emptyList())
+    // Not runCatching: a screen that was left must see its cancellation, not an empty list it then shows (or keeps) as "no results"
+    private inline fun <T> safe(block: () -> List<T>): List<T> =
+        try { block() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Throwable) { emptyList() }
 
     companion object {
         // Shared by every MediaRepository and hit from several threads (parallel download lookups, home rows)

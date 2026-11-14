@@ -150,10 +150,19 @@ object LocalStore {
     fun episodeProgress(showKey: String): Map<String, Float> = prefs.getString("epp_$showKey", null)
         ?.let { runCatching { gson.fromJson<Map<String, Float>>(it, object : TypeToken<Map<String, Float>>() {}.type) }.getOrNull() } ?: emptyMap()
 
-    fun setEpisodeProgress(showKey: String, season: Int, episode: Int, progress: Float) {
+    // Locked: the player (main thread) and account sync (background) both read, change and write the same map
+    @Synchronized fun setEpisodeProgress(showKey: String, season: Int, episode: Int, progress: Float) {
         val m = episodeProgress(showKey).toMutableMap()
         val k = "$season:$episode"
         if (progress >= (m[k] ?: 0f) || progress >= 0.9f || (m[k] ?: 0f) < 0.9f) m[k] = progress   // once watched, stays watched
+        prefs.edit().putString("epp_$showKey", gson.toJson(m)).apply()
+    }
+
+    /** Episodes 1..[upTo] of a season watched, in one write (account sync: a long anime was one read and write per episode). */
+    @Synchronized fun setEpisodesWatched(showKey: String, season: Int, upTo: Int) {
+        if (upTo <= 0) return
+        val m = episodeProgress(showKey).toMutableMap()
+        for (e in 1..upTo.coerceAtMost(5000)) m["$season:$e"] = 1f
         prefs.edit().putString("epp_$showKey", gson.toJson(m)).apply()
     }
 

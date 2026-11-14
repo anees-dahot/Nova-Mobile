@@ -42,7 +42,12 @@ object Prefetcher {
             val key = StreamExtractor.embedUrl(p, target)
             val t0 = System.currentTimeMillis()
             Log.i(TAG, "prefetch ${card.title} via ${p.name}")
-            val d = async { WebStreamSniffer(appCtx, h).sniff(key, p.timeoutMs) }
+            // Child of this launch: an escaping exception would cancel it and crash the app, so catch here
+            val d = async {
+                try { WebStreamSniffer(appCtx, h).sniff(key, p.timeoutMs) }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) { Log.w(TAG, "prefetch failed: ${e.message}"); null }
+            }
             pendingKey = key; pending = d; claimed = false
             val r = runCatching { d.await() }.getOrNull()
             if (r != null) {

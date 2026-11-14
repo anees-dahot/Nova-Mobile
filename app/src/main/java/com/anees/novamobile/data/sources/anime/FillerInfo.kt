@@ -49,7 +49,7 @@ object FillerInfo {
     fun applies(card: MediaCard) = card.type == MediaType.ANIME || (card.type == MediaType.SERIES && card.lang == "ja")
 
     private lateinit var prefs: android.content.SharedPreferences
-    private val mem = HashMap<String, Show>()
+    private val mem = java.util.concurrent.ConcurrentHashMap<String, Show>()   // read from the UI thread while a refresh fills it
     private val lock = Mutex()
     private val http by lazy { RetrofitClient.base.newBuilder().callTimeout(15, TimeUnit.SECONDS).build() }
 

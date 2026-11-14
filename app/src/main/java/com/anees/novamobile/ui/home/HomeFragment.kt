@@ -90,6 +90,7 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
 
     override fun onHiddenChanged(hidden: Boolean) {
         super.onHiddenChanged(hidden)
+        if (view == null) return   // hide/show can fire before the view exists
         if (!hidden) { render(); startRotation(); (activity as? MainActivity)?.setTopBarSolid(rows.computeVerticalScrollOffset() > 400) }
         else rotateJob?.cancel()
     }

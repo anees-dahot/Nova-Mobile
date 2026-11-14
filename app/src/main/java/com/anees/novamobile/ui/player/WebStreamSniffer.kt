@@ -83,9 +83,11 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
     private suspend fun sniffWeb(embedUrl: String, timeoutMs: Long): Sniffed? = try {
         withTimeoutOrNull(timeoutMs) {
             suspendCancellableCoroutine<Sniffed?> { cont ->
+                // Written from WebView IO threads, read on main: guarded / atomic
                 val subs = linkedSetOf<String>()
+                fun subList() = synchronized(subs) { subs.toList() }
                 var requests = 0
-                var hit: Sniffed? = null
+                val hitRef = java.util.concurrent.atomic.AtomicReference<Sniffed?>(null)
                 val embedHost = Uri.parse(embedUrl).host ?: ""
 
                 fun finish(value: Sniffed?) {
@@ -117,15 +119,16 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
                         if (isBlocked(lower)) return EMPTY()
 
                         if (SUB_RE.containsMatchIn(lower)) {
-                            subs.add(url)
+                            synchronized(subs) { subs.add(url) }
                             // Stream already found and waiting only for subtitles: done now
-                            hit?.let { h -> main.post { finish(h.copy(subtitles = subs.toList())) } }
+                            hitRef.get()?.let { h -> main.post { finish(h.copy(subtitles = subList())) } }
                         }
 
-                        if (hit == null && MEDIA_RE.containsMatchIn(lower) && !isBlocked(lower) && !AD_VIDEO_RE.containsMatchIn(lower)) {
+                        if (hitRef.get() == null && MEDIA_RE.containsMatchIn(lower) && !isBlocked(lower) && !AD_VIDEO_RE.containsMatchIn(lower)) {
                             val referer = req.requestHeaders["Referer"] ?: req.requestHeaders["referer"] ?: embedUrl
                             val origin = Uri.parse(referer).let { "${it.scheme}://${it.host}" }
-                            hit = Sniffed(url, mapOf("Referer" to referer, "Origin" to origin), ua, emptyList())
+                            // Requests arrive on several threads: only the first capture wins
+                            if (!hitRef.compareAndSet(null, Sniffed(url, mapOf("Referer" to referer, "Origin" to origin), ua, emptyList()))) return null
                             Log.i(TAG, "captured from $embedHost: ${url.take(100)}")
                             // Wait at most 0.5s for subtitle files (was a fixed 1.5s); a subtitle arriving ends it sooner.
                             // Meanwhile ask the page's own player what it knows: source labels ("Hindi"), audio
@@ -134,7 +137,7 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
                                 if (!cont.isActive) return@postDelayed
                                 var done = false
                                 val give = { info: String? -> if (!done) { done = true
-                                    finish(enrich(hit!!.copy(subtitles = subs.toList()), listOfNotNull(info?.let { decodeJs(it) }) + synchronized(frameInfo) { frameInfo.toList() })) } }
+                                    finish(enrich(hitRef.get()!!.copy(subtitles = subList()), listOfNotNull(info?.let { decodeJs(it) }) + synchronized(frameInfo) { frameInfo.toList() })) } }
                                 runCatching { wv.evaluateJavascript(PLAYER_INFO_JS) { r -> give(r) } }.onFailure { give(null) }
                                 main.postDelayed({ give(null) }, 700)
                             }, 500)
@@ -154,6 +157,17 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
                         Log.i(TAG, "page loaded ($requests requests so far): ${url.take(80)}")
                         view.evaluateJavascript(MUTE_JS, null)
                     }
+
+                    // Renderer killed (low RAM) or crashed: unhandled, Android kills the whole app.
+                    // The dead WebView can't be reused, so tear it down here and give up on this page.
+                    override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                        Log.w(TAG, "renderer gone on $embedHost (crashed=${detail.didCrash()})")
+                        // Pending tap/JS callbacks check cont.isActive, which finish() clears
+                        if (webView === view) webView = null
+                        runCatching { host.removeView(view); view.destroy() }
+                        finish(null)
+                        return true
+                    }
                 }
 
                 wv.webChromeClient = object : WebChromeClient() {
@@ -163,7 +177,7 @@ class WebStreamSniffer(private val ctx: Context, private val host: FrameLayout) 
                 // Many players wait for a click on their big play button: tap the centre every 2.5s
                 val tapper = object : Runnable {
                     override fun run() {
-                        if (!cont.isActive || hit != null) return
+                        if (!cont.isActive || hitRef.get() != null) return
                         tap(wv)
                         main.postDelayed(this, 2500)
                     }

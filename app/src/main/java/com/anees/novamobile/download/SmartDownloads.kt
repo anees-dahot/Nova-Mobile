@@ -22,13 +22,19 @@ object SmartDownloads {
     private const val TAG = "NovaDL"
     private val scope = MainScope()
     private val repo = MediaRepository()
-    private val handled = mutableSetOf<String>()
+    /** Episode id to when it was handled. Called from more than one thread. */
+    private val handled = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     fun onWatched(ctx: Context, card: MediaCard, season: Int, episode: Int) {
         val id = DownloadMeta.id(card, season, episode)
-        if (!handled.add(id)) return
+        val dl = NovaDownloads.get(ctx, id)
+        val prev = handled[id]
+        // Handled already, unless the episode was downloaded again since then
+        if (prev != null && (dl == null || dl.startTimeMs <= prev)) return
+        val now = System.currentTimeMillis()
+        if (if (prev == null) handled.putIfAbsent(id, now) != null else !handled.replace(id, prev, now)) return
         val s = LocalStore.settings()
-        val watchedMeta = NovaDownloads.get(ctx, id)?.let { DownloadMeta.of(it) }
+        val watchedMeta = dl?.let { DownloadMeta.of(it) }
         if (s.dlAutoDeleteWatched || s.smartDownloads) {
             DownloadService.sendRemoveDownload(ctx, NovaDownloadService::class.java, id, false)
             NovaDownloads.get(ctx, id)?.let { NovaDownloads.deleteSubtitles(it) }

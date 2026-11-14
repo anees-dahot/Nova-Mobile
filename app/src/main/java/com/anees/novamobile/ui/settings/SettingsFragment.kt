@@ -181,12 +181,13 @@ class SettingsFragment : Fragment(), TabPage {
                 var sheet: android.app.Dialog? = null
                 com.anees.novamobile.sync.TraktSync.startDeviceLogin(
                     show = { code, url ->
+                        if (!isAdded) return@startDeviceLogin   // user already left Settings
                         sheet = ActionSheet.show(ctx, "Connect Trakt", listOf(ActionSheet.Item("Open $url") {
                             startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)))
                         }), subtitle = "Go to $url and enter:   $code")
                     },
                     done = { ok ->
-                        sheet?.dismiss()
+                        runCatching { sheet?.dismiss() }
                         android.widget.Toast.makeText(ctx, if (ok) "Trakt connected" else "Trakt login didn't finish", android.widget.Toast.LENGTH_SHORT).show()
                         if (ok) com.anees.novamobile.sync.Sync.syncNow(ctx) { if (isAdded) render() } else if (isAdded) render()
                     })

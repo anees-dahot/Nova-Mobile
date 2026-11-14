@@ -85,6 +85,8 @@ object BeamHotspot {
                     override fun onUnavailable() { if (k.isActive) k.resume(null) }
                 }
                 callback = cb
+                // Screen closed while joining: drop the request, or the phone stays on (or keeps asking for) that hotspot
+                k.invokeOnCancellation { release(ctx) }
                 runCatching { cm.requestNetwork(req, cb) }.onFailure { if (k.isActive) k.resume(null) }
             }
         } ?: run { release(ctx); throw IOException("Couldn't join the other phone's hotspot") }

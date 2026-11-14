@@ -67,7 +67,8 @@ object SubText {
         return ((h * 60 + m) * 60 + s) * 1000 + frac.padEnd(3, '0').take(3).toLong()
     }
 
-    private fun srtTime(ms: Long) = "%02d:%02d:%02d,%03d".format(ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+    // ROOT: the default locale can give non-ASCII digits (ar/fa/bn), which players can't parse
+    private fun srtTime(ms: Long) = "%02d:%02d:%02d,%03d".format(java.util.Locale.ROOT, ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
 
     private fun broken(cues: List<Cue>): Boolean {
         if (cues.size < 20) return false

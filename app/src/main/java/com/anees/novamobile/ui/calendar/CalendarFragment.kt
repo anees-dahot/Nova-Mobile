@@ -67,7 +67,7 @@ class CalendarFragment : Fragment() {
         // Show the cached week instantly, then refresh
         show(LocalStore.airingCache(), loading = true)
         viewLifecycleOwner.lifecycleScope.launch {
-            val eps = runCatching { AiringCalendar.load() }.getOrNull()
+            val eps = runCatching { AiringCalendar.load() }.onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrNull()
             if (eps != null) {
                 show(eps, loading = false)
                 if (AiringCalendar.lastLoadPartial) status.append("  ·  some shows couldn't refresh")

@@ -169,10 +169,17 @@ class DownloadsShowFragment : Fragment() {
         .mapNotNull { d -> DownloadMeta.of(d)?.takeIf { it.card.id == card.id && it.card.type == card.type }?.let { Ep(d, it, DownloadUi.watched(it)) } }
         .sortedWith(compareBy({ it.m.season }, { it.m.episode }))
 
+    private var popped = false
+
     private fun load() {
         val ctx = context ?: return
         val eps = episodes()
-        if (eps.isEmpty()) { parentFragmentManager.popBackStack(); return }
+        if (eps.isEmpty()) {
+            // Last episode swiped away: stay until Undo expires; pop once (tick + listener both land here)
+            if (pendingRemoval.isEmpty()) { if (!popped && isAdded) { popped = true; parentFragmentManager.popBackStack() } }
+            else adapter.submitList(emptyList())
+            return
+        }
         val seasons = eps.map { it.m.season }.distinct()
         if (season !in seasons) season = seasons.first()
         // Season chips only when there's more than one
@@ -253,7 +260,7 @@ class DownloadsShowFragment : Fragment() {
             override fun onMove(rv: RecyclerView, a: RecyclerView.ViewHolder, b: RecyclerView.ViewHolder) = false
             override fun onSwiped(vh: RecyclerView.ViewHolder, dir: Int) {
                 val e = adapter.currentList.getOrNull(vh.bindingAdapterPosition) ?: return
-                DownloadUi.confirmDelete(requireContext(), listOf(e.d), onCancel = { adapter.notifyItemChanged(vh.bindingAdapterPosition) }) { phone -> swipeRemove(e, phone) }
+                DownloadUi.confirmDelete(requireContext(), listOf(e.d), onCancel = { vh.bindingAdapterPosition.let { if (it >= 0) adapter.notifyItemChanged(it) } }) { phone -> swipeRemove(e, phone) }
             }
             private fun swipeRemove(e: Ep, phone: Boolean) {
                 pendingRemoval += e.key

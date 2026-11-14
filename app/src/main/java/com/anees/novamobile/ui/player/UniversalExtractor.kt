@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.net.URI
@@ -49,7 +50,10 @@ object UniversalExtractor {
 
     suspend fun extract(pageUrl: String, userAgent: String): WebStreamSniffer.Sniffed? = withContext(Dispatchers.IO) {
         val t0 = System.currentTimeMillis()
-        val r = runCatching { crawl(pageUrl, pageUrl, userAgent, 0, HashSet()) }.getOrNull()
+        val r = runCatching { crawl(pageUrl, pageUrl, userAgent, 0, HashSet()) }
+            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it }.getOrNull()
+        // Lost the race (cancelled): says nothing about the host, so record no miss
+        ensureActive()
         noteResult(pageUrl, r != null)
         log("fast extract ${if (r != null) "HIT" else "miss"} ${host(pageUrl)} in ${System.currentTimeMillis() - t0}ms: ${r?.url?.take(90)}")
         r

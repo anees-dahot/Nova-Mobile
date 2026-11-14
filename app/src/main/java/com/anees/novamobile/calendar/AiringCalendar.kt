@@ -104,7 +104,10 @@ object AiringCalendar {
     }
 
     /** GET → JSON; 404 = "no such season" (null), anything else non-2xx is a failure. */
-    private fun get(url: String): JSONObject? = RetrofitClient.base.newCall(Request.Builder().url(url).build()).execute().use {
+    /** Capped per request: the shared client only limits connect and read, so a server trickling bytes could hold a refresh (and the boot receiver waiting on it) without end. */
+    private val http by lazy { RetrofitClient.base.newBuilder().callTimeout(12, java.util.concurrent.TimeUnit.SECONDS).build() }
+
+    private fun get(url: String): JSONObject? = http.newCall(Request.Builder().url(url).build()).execute().use {
         when {
             it.isSuccessful -> JSONObject(it.body?.string() ?: "{}")
             it.code == 404 -> null
@@ -147,7 +150,7 @@ object AiringCalendar {
             val vars = JSONObject().put("ids", JSONArray(ids)).put("page", page)
                 .put("from", ((now - WINDOW_BACK) / 1000).toInt()).put("to", ((now + WINDOW_AHEAD) / 1000).toInt())
             val body = JSONObject().put("query", q).put("variables", vars).toString().toRequestBody("application/json".toMediaType())
-            val json = RetrofitClient.base.newCall(Request.Builder().url("https://graphql.anilist.co").post(body).build()).execute().use {
+            val json = http.newCall(Request.Builder().url("https://graphql.anilist.co").post(body).build()).execute().use {
                 if (!it.isSuccessful) throw IOException("AniList HTTP ${it.code}")
                 JSONObject(it.body?.string() ?: "{}")
             }

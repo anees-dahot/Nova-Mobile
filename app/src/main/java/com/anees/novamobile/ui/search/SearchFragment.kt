@@ -103,7 +103,7 @@ class SearchFragment : Fragment(), TabPage {
             delay(debounce)
             title.text = "Searching…"
             val cards = repo.search(q)
-            cache[q.lowercase()] = cards
+            if (cards.isNotEmpty()) cache[q.lowercase()] = cards   // empty is also what a network failure returns
             showCards(if (cards.isEmpty()) "No results for “$q”" else "Results", cards)
         }
     }

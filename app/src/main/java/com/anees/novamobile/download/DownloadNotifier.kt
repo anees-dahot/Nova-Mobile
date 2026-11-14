@@ -35,9 +35,19 @@ object DownloadNotifier {
     fun poster(ctx: Context, card: MediaCard): Bitmap? {
         val url = card.posterUrl ?: card.backdropUrl ?: return null
         posters[url]?.let { return it }
-        scope.launch { NotifyChannels.bitmap(ctx, url, 256)?.let { posters[url] = it } }
+        // Called about once a second while downloading: one fetch at a time, and a failed one waits before retrying
+        if (System.currentTimeMillis() - (posterFailedAt[url] ?: 0L) < 5 * 60_000L) return null
+        if (posterLoading.putIfAbsent(url, true) != null) return null
+        scope.launch {
+            try {
+                val b = runCatching { NotifyChannels.bitmap(ctx, url, 256) }.getOrNull()
+                if (b != null) { posters[url] = b; posterFailedAt.remove(url) } else posterFailedAt[url] = System.currentTimeMillis()
+            } finally { posterLoading.remove(url) }
+        }
         return null
     }
+    private val posterLoading = ConcurrentHashMap<String, Boolean>()
+    private val posterFailedAt = ConcurrentHashMap<String, Long>()
 
     private fun openDownloads(ctx: Context, code: Int) = PendingIntent.getActivity(ctx, code,
         Intent(ctx, MainActivity::class.java).putExtra("open", "downloads").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),

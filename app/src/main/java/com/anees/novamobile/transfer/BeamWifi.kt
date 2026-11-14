@@ -114,7 +114,9 @@ object BeamWifi {
     /** Keeps Wi-Fi at full speed and the CPU awake while bytes move (screen may be off). */
     class Locks(ctx: Context) {
         private val wifi = (ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
-            .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "nova:beam").apply { setReferenceCounted(false) }
+            // Android 8–9 don't know the low-latency mode: acquiring it there failed quietly and Wi-Fi was left in power save
+            .createWifiLock(if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY else @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF, "nova:beam")
+            .apply { setReferenceCounted(false) }
         private val cpu = (ctx.getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "nova:beam").apply { setReferenceCounted(false) }
         fun hold() = apply { runCatching { wifi.acquire() }; runCatching { cpu.acquire(6 * 60 * 60 * 1000L) } }

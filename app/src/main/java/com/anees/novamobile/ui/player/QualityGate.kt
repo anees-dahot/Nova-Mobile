@@ -21,6 +21,8 @@ object QualityGate {
     private const val PEEK_BYTES = 256 * 1024L
     private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Safari/537.36"
     private val RES_RE = Regex("""RESOLUTION=\d+x(\d+)""", RegexOption.IGNORE_CASE)
+    // base allows 15s connect + 20s read: a stalled host would hold the source search far too long
+    private val client by lazy { RetrofitClient.base.newBuilder().callTimeout(4, java.util.concurrent.TimeUnit.SECONDS).build() }
 
     /** Highest variant height in the master playlist, or -1 when it can't be told (media playlist, mp4, error). */
     fun maxHeight(s: WebStreamSniffer.Sniffed): Int = maxHeightBlocking(s)
@@ -30,7 +32,7 @@ object QualityGate {
             header("User-Agent", s.userAgent.ifBlank { UA })
             s.headers.forEach { (k, v) -> header(k, v) }
         }.build()
-        RetrofitClient.base.newCall(req).execute().use { r ->
+        client.newCall(req).execute().use { r ->
             if (!r.isSuccessful) return -1
             // Peek instead of reading it all: a media playlist for a long VOD can be large
             val src = r.body?.source() ?: return -1

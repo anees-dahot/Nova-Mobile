@@ -71,6 +71,8 @@ object PublicExport {
     private class Request(val id: String, val tree: Uri?, val auto: Boolean = false) {
         val callbacks = mutableListOf<(Boolean, String) -> Unit>()
         var note: SaveProgress? = null
+        /** The download was deleted while this was running: its copy must not stay published. */
+        @Volatile var cancelled = false
         fun done(ok: Boolean, msg: String) {
             note?.done(); note = null
             callbacks.forEach { it(ok, msg) }
@@ -181,7 +183,12 @@ object PublicExport {
         queue.removeAll { req ->
             (req.id == id).also { if (it) req.done(false, "Cancelled") }
         }
+        running?.takeIf { it.id == id }?.cancelled = true
         prefs(ctx).edit().remove(id).remove("v_$id").apply()
+        return deleteFiles(ctx, id, m)
+    }
+
+    private fun deleteFiles(ctx: Context, id: String, m: DownloadMeta): Boolean {
         val (folder, base) = place(m)
         var removed = 0
         if (Build.VERSION.SDK_INT >= 29) {
@@ -245,14 +252,15 @@ object PublicExport {
                 return@Thread
             }
             val plan = FastExport.plan(ctx, d)
+            var written = -1   // audio tracks really muxed (unsupported codecs are dropped); -1 = unknown
             val ok = plan != null && runCatching {
-                val produce: (FileOutputStream) -> Unit = { out -> FastExport.write(ctx, plan, out) { note.update(it) } }
+                val produce: (FileOutputStream) -> Unit = { out -> written = FastExport.write(ctx, plan, out) { note.update(it) } }
                 if (req.tree != null) writeTree(ctx, req.tree, m, null, produce) else publish(ctx, m, null, produce)
             }.onFailure { Log.w(TAG, "${req.id}: fast save failed", it) }.isSuccess
             main.post {
                 if (ok) {
                     Log.i(TAG, "${req.id}: fast save done in ${System.currentTimeMillis() - t0} ms (${(plan!!.bytes shr 20)} MB)")
-                    val langs = langList.size
+                    val langs = if (written >= 0) written else langList.size
                     finish(ctx, job, true, "Saved ${DownloadNotifier.name(m)}" + if (langs > 1) " · $langs audio languages" else "")
                 } else {
                     // Slow path re-encodes through temp files: needs about twice the space
@@ -306,6 +314,11 @@ object PublicExport {
     }
 
     private fun finish(ctx: Context, job: Job, ok: Boolean, msg: String) {
+        if (job.req.cancelled) {
+            // Deleted while saving: removeCopy ran before this copy existed, so remove it now
+            if (ok && job.req.tree == null) runCatching { deleteFiles(ctx, job.req.id, job.meta) }
+            fail(ctx, job.req, "Cancelled"); return
+        }
         if (ok && job.req.tree == null) markExported(ctx, job.req.id)
         SaveProgress.result(ctx, ok, msg)
         job.req.done(ok, msg)
@@ -626,7 +639,15 @@ object PublicExport {
         }
     }
 
-    private fun clean(s: String) = s.replace(Regex("[\\\\/:*?\"<>|]"), " ").replace(Regex("\\s+"), " ").trim().ifEmpty { "Untitled" }
+    /** Safe file/folder name. Names that were already fine come out unchanged (earlier copies are found by name). */
+    private fun clean(s: String): String {
+        // Leading dots go: ".." would climb out of the folder, and a dot-folder is hidden from the gallery.
+        // Trailing ones stay ("S.W.A.T."): copies saved under those names must still be found.
+        var c = s.replace(Regex("[\\\\/:*?\"<>|\\p{Cntrl}]"), " ").replace(Regex("\\s+"), " ").trim().trimStart('.').trim()
+        // A file name tops out at 255 bytes: the title keeps under 200 (UTF-8), cut at a character boundary
+        while (c.toByteArray().size > 200) c = c.dropLast(if (c.last().isLowSurrogate()) 2 else 1)
+        return c.trim().ifEmpty { "Untitled" }
+    }
 
     /** Relative folder under Movies/ and the base file name (no extension). */
     private fun place(m: DownloadMeta): Pair<String, String> {
@@ -638,7 +659,8 @@ object PublicExport {
         } else {
             val kind = if (c.type == MediaType.ANIME) "Anime" else "Shows"
             val s = m.season.coerceAtLeast(1)
-            "$ROOT/$kind/$title/Season %02d".format(s) to "$title S%02dE%02d".format(s, m.episode)
+            // ROOT: ASCII digits whatever the phone's language, so names stay the same between saves
+            "$ROOT/$kind/$title/Season %02d".format(java.util.Locale.ROOT, s) to "$title S%02dE%02d".format(java.util.Locale.ROOT, s, m.episode)
         }
     }
 
@@ -758,13 +780,15 @@ object PublicExport {
                 else r.openOutputStream(uri)!!.use { out -> src!!.inputStream().use { it.copyTo(out, 1 shl 20) } }
                 after?.let { a -> r.openFileDescriptor(uri, "rw")!!.use { a(it.fileDescriptor) } }
                 r.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
-            } catch (e: Exception) { r.delete(uri, null, null); throw e }
+            } catch (e: Throwable) { runCatching { r.delete(uri, null, null) }; throw e }   // no IS_PENDING row left behind
         } else {
             @Suppress("DEPRECATION")
             val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), folder).apply { mkdirs() }
             val out = File(dir, name)
-            if (produce != null) FileOutputStream(out).use(produce) else src!!.copyTo(out, overwrite = true)
-            after?.let { a -> java.io.RandomAccessFile(out, "rw").use { a(it.fd) } }
+            try {
+                if (produce != null) FileOutputStream(out).use(produce) else src!!.copyTo(out, overwrite = true)
+                after?.let { a -> java.io.RandomAccessFile(out, "rw").use { a(it.fd) } }
+            } catch (e: Throwable) { out.delete(); throw e }   // a cut-short file would pass copyExists() as a finished copy
             android.media.MediaScannerConnection.scanFile(ctx, arrayOf(out.absolutePath), null, null)
         }
     }

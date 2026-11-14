@@ -67,7 +67,9 @@ class MainActivity : AppCompatActivity() {
         com.anees.novamobile.ui.player.Prefetcher.host = findViewById(R.id.sniff_host)
         handler.postDelayed({ runCatching { android.webkit.WebSettings.getDefaultUserAgent(this) } }, 4000)
         com.anees.novamobile.update.UpdateJob.schedule(this)
-        if (intent?.getStringExtra("open") == "update") handler.postDelayed(updateFromNote, 800)
+        // Recreation (rotation, process death) replays the launch intent; only act on it the first time
+        val fresh = savedInstanceState == null
+        if (fresh && intent?.getStringExtra("open") == "update") handler.postDelayed(updateFromNote, 800)
 
         val nav = findViewById<LinearLayout>(R.id.bottom_nav)
         val dp = resources.displayMetrics.density
@@ -117,15 +119,15 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.btn_settings).setOnClickListener { openOverlay(SettingsFragment()) }
         // Rebuild new-episode reminders in the background
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) { kotlinx.coroutines.delay(10_000); runCatching { com.anees.novamobile.calendar.AiringCalendar.reschedule(this@MainActivity) } }
-        handlePlayIntent(intent)
+        if (fresh) handlePlayIntent(intent)
         // Downloads: start the manager (restores the queue) and finish resolving any pending items
         com.anees.novamobile.download.NovaDownloads.manager(this)
         handler.postDelayed({ com.anees.novamobile.download.DownloadStarter.resume(this) }, 3000)
-        if (intent?.getStringExtra("open") == "downloads") handler.post { openDownloads() }
-        if (intent?.getStringExtra("open") == "beam_send") handler.postDelayed({ openDownloads(); com.anees.novamobile.transfer.BeamUi.send(this) }, 600)
-        if (BuildConfig.DEBUG) intent?.getStringExtra("beam_invite")?.let { inv -> handler.postDelayed({ openDownloads(); com.anees.novamobile.transfer.BeamUi.receiveText(this, inv) }, 600) }
-        openShowFromIntent(intent)
-        intent?.data?.let { com.anees.novamobile.sync.Sync.handleRedirect(this, it) }
+        if (fresh && intent?.getStringExtra("open") == "downloads") handler.post { openDownloads() }
+        if (fresh && intent?.getStringExtra("open") == "beam_send") handler.postDelayed({ openDownloads(); com.anees.novamobile.transfer.BeamUi.send(this) }, 600)
+        if (fresh && BuildConfig.DEBUG) intent?.getStringExtra("beam_invite")?.let { inv -> handler.postDelayed({ openDownloads(); com.anees.novamobile.transfer.BeamUi.receiveText(this, inv) }, 600) }
+        if (fresh) openShowFromIntent(intent)
+        if (fresh) intent?.data?.let { com.anees.novamobile.sync.Sync.handleRedirect(this, it) }
         handler.postDelayed({ com.anees.novamobile.sync.Sync.syncNow(this) }, 6000)
 
         pages.indices.forEach { i -> fragments[i] = supportFragmentManager.findFragmentByTag("tab_$i") }
@@ -210,6 +212,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         // The hidden-WebView host belongs to this window; downloads fall back to plain-HTTP sources without it
         if (com.anees.novamobile.ui.player.Prefetcher.host === findViewById<android.widget.FrameLayout>(R.id.sniff_host)) com.anees.novamobile.ui.player.Prefetcher.host = null
+        handler.removeCallbacksAndMessages(null)
         super.onDestroy()
     }
 

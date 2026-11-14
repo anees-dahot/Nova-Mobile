@@ -51,6 +51,9 @@ object BeamLink {
         val ids = mutableSetOf<String>()
         val startedAt = System.currentTimeMillis()
         @Volatile var allAdded = false
+        @Volatile var allAddedAt = 0L
+        /** The sender stopped answering: pieces go straight to the internet until this time, instead of each waiting out a connect timeout. */
+        @Volatile var downUntil = 0L
         /** HTTP bound to the link's network (needed for the hotspot, harmless otherwise). */
         val http: OkHttpClient = BeamLink.http.newBuilder().apply { network?.let { socketFactory(it.socketFactory) } }.build()
         val how get() = when { direct -> "direct link"; network != null -> "hotspot"; else -> "same Wi-Fi" }
@@ -95,6 +98,7 @@ object BeamLink {
             } catch (e: Exception) {
                 Log.w(TAG, "wifi direct failed: ${e.message}")
                 BeamWifi.teardown()
+                if (e is kotlinx.coroutines.CancellationException) throw e   // screen closed: don't go on to the next link
             }
         }
         status("Looking for the other phone…")
@@ -102,14 +106,19 @@ object BeamLink {
         if (inv.hasHotspot && Build.VERSION.SDK_INT >= 29) {
             status("Joining the other phone's hotspot…")
             val net = BeamHotspot.join(app, inv.hsSsid, inv.hsPass)
-            val deadline = System.currentTimeMillis() + 15_000
-            while (System.currentTimeMillis() < deadline) {
-                // The hotspot's own address is usually the gateway; the QR also lists the sender's addresses
-                val hosts = (listOfNotNull(gateway(app, net)) + inv.ips).distinct()
-                for (h in hosts) probe(h, inv, net, 1500)?.let { Log.i(TAG, "hotspot link up: $h"); return@withContext it }
-                kotlinx.coroutines.delay(700)
+            var linked = false
+            try {
+                val deadline = System.currentTimeMillis() + 15_000
+                while (System.currentTimeMillis() < deadline) {
+                    // The hotspot's own address is usually the gateway; the QR also lists the sender's addresses
+                    val hosts = (listOfNotNull(gateway(app, net)) + inv.ips).distinct()
+                    for (h in hosts) probe(h, inv, net, 1500)?.let { Log.i(TAG, "hotspot link up: $h"); linked = true; return@withContext it }
+                    kotlinx.coroutines.delay(700)
+                }
+            } finally {
+                // Nobody answered, or the screen was closed meanwhile: don't leave the phone on the other one's hotspot
+                if (!linked) BeamHotspot.release(app)
             }
-            BeamHotspot.release(app)
         }
         throw IOException(when {
             inv.hasDirect || inv.hasHotspot -> "Couldn't connect to the other phone. Keep both phones close with Wi-Fi on, then scan again."
@@ -204,14 +213,18 @@ object BeamLink {
                 Log.w(TAG, "fast copy of ${o.id} failed, the download fetches it", e)
             }
             // Everything copied is in the cache now: the download completes from it (gaps: other phone, then internet)
-            val request = DownloadRequest.Builder(o.id, Uri.parse(o.uri))
-                .setMimeType(o.mimeType)
-                .setStreamKeys(o.streamKeys.map { StreamKey(it[0], it[1], it[2]) })
-                .setCustomCacheKey(o.customCacheKey)
-                .setData(meta?.toBytes() ?: o.data.toByteArray())
-                .build()
-            DownloadService.sendAddDownload(app, NovaDownloadService::class.java, request, false)
+            // A damaged offer (other app version, cut-off list) is skipped and counted as not received, not a crash on this thread
+            runCatching {
+                val request = DownloadRequest.Builder(o.id, Uri.parse(o.uri))
+                    .setMimeType(o.mimeType)
+                    .setStreamKeys(o.streamKeys.map { StreamKey(it[0], it[1], it[2]) })
+                    .setCustomCacheKey(o.customCacheKey)
+                    .setData(meta?.toBytes() ?: o.data.toByteArray())
+                    .build()
+                DownloadService.sendAddDownload(app, NovaDownloadService::class.java, request, false)
+            }.onFailure { Log.w(TAG, "can't add ${o.id}", it) }
         }
+        p.allAddedAt = System.currentTimeMillis()
         p.allAdded = true
         main.post { check(app, NovaDownloads.manager(app)) }
     }
@@ -224,9 +237,13 @@ object BeamLink {
 
     /** Sidecar subtitle files; returns the meta pointing at this phone's copies. */
     private fun subtitles(p: Peer, o: Beam.Offer, meta: DownloadMeta?): DownloadMeta? {
-        if (meta == null || o.subtitles == 0) return meta
-        val subDir = File(NovaDownloads.dir, "subtitles").apply { mkdirs() }
-        val files = (0 until o.subtitles).mapNotNull { i ->
+        if (meta == null) return null
+        // Nothing to fetch: the sender's own file paths must not stay in the meta (they'd point at files of this phone)
+        if (o.subtitles <= 0) return meta.copy(subtitles = null, subtitle = null, subtitleLangs = null)
+        // Same folder as downloaded subtitles, so leftovers of a broken transfer are swept with the other orphans
+        val subDir = File(NovaDownloads.dir, "subs").apply { mkdirs() }
+        // Index = the sender's index; null = that file didn't arrive
+        val files = (0 until o.subtitles.coerceAtMost(64)).map { i ->
             runCatching {
                 p.http.newCall(req(p, "/f?id=${Uri.encode(o.id)}&i=$i")).execute().use { r ->
                     if (!r.isSuccessful) return@use null
@@ -237,12 +254,20 @@ object BeamLink {
                 }
             }.getOrNull()
         }
-        // Same order as the sender's list: subtitles first, then the single legacy "subtitle"
-        val n = meta.subtitles.orEmpty().size
-        return meta.copy(subtitles = files.take(n).ifEmpty { null }, subtitle = if (meta.subtitle != null) (files.getOrNull(n) ?: files.firstOrNull()) else null)
+        // Same order as the sender's list: subtitles first, then the single legacy "subtitle" (when it isn't one of them).
+        // A file that didn't arrive drops out together with its language, so the two lists stay in step.
+        val theirs = meta.subtitles.orEmpty()
+        val kept = theirs.indices.filter { files.getOrNull(it) != null }
+        val single = meta.subtitle?.let { s -> files.getOrNull(theirs.indexOf(s).takeIf { it >= 0 } ?: theirs.size) ?: files.firstOrNull { it != null } }
+        return meta.copy(
+            subtitles = kept.map { files[it]!! }.ifEmpty { null },
+            subtitleLangs = meta.subtitleLangs?.takeIf { kept.isNotEmpty() }?.let { l -> kept.map { l.getOrElse(it) { "" } } },
+            subtitle = single)
     }
 
     private var listener: DownloadManager.Listener? = null
+    private const val ADD_GRACE_MS = 8_000L
+    private val RECHECK = Any()
 
     private fun watch(app: Context, dm: DownloadManager) {
         listener?.let { dm.removeListener(it) }
@@ -258,8 +283,17 @@ object BeamLink {
         val p = peer ?: return
         if (!p.allAdded) return
         val states = p.ids.map { id -> NovaDownloads.get(app, id)?.state }
-        val open = states.count { it != null && it != Download.STATE_COMPLETED && it != Download.STATE_FAILED }
-        if (open > 0) return
+        // An add travels service → manager thread → index, so for a moment the last items are nowhere yet. Counted
+        // as "not received" they ended the transfer before it began (a single item most of all): wait for them.
+        val settling = System.currentTimeMillis() - p.allAddedAt < ADD_GRACE_MS
+        val open = states.count { if (it == null) settling else it != Download.STATE_COMPLETED && it != Download.STATE_FAILED }
+        if (open > 0) {
+            if (settling && states.any { it == null }) {
+                main.removeCallbacksAndMessages(RECHECK)
+                main.postAtTime({ check(app, dm) }, RECHECK, android.os.SystemClock.uptimeMillis() + 1_000)
+            }
+            return
+        }
         val done = states.count { it == Download.STATE_COMPLETED }
         val failed = p.ids.size - done
         Log.i(TAG, "transfer finished: $done done, $failed not, ${p.bytes.get() shr 20} MB in ${(System.currentTimeMillis() - p.startedAt) / 1000}s")
@@ -283,6 +317,7 @@ object BeamLink {
     fun finish(app: Context) {
         val p = peer ?: return
         peer = null
+        main.removeCallbacksAndMessages(RECHECK)
         main.post {
             val dm = NovaDownloads.manager(app)
             listener?.let { dm.removeListener(it) }; listener = null
@@ -315,10 +350,12 @@ object BeamLink {
         override fun open(spec: DataSpec): Long {
             uri = spec.uri
             val p = peer
-            if (p != null) {
+            if (p != null && System.currentTimeMillis() >= p.downUntil) {
                 val key = spec.key ?: keys.buildCacheKey(spec)
                 val url = "${p.base}/c?k=${Uri.encode(key)}&p=${spec.position}&l=${spec.length}"
-                val r = runCatching { p.http.newCall(Request.Builder().url(url).header("X-Beam-Token", p.token).build()).execute() }.getOrNull()
+                val r = runCatching { p.http.newCall(Request.Builder().url(url).header("X-Beam-Token", p.token).build()).execute() }
+                    // Unreachable (walked away, app closed): every piece asking first would wait out the connect timeout
+                    .onFailure { p.downUntil = System.currentTimeMillis() + 20_000 }.getOrNull()
                 if (r != null && r.isSuccessful) {
                     transferInitializing(spec)
                     response = r

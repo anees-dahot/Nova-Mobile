@@ -429,9 +429,11 @@ object AudioProbe {
     }
 
     /** MP4 with its index at the end: MediaExtractor reads it by range over HTTP, abandoned after 6s. */
-    private fun extractUrl(s: WebStreamSniffer.Sniffed): Info = runCatching {
-        extractorPool.submit<Info> { tracks { it.setDataSource(s.url, headers(s)) } }.get(6, TimeUnit.SECONDS)
-    }.getOrDefault(Info.UNKNOWN)
+    private fun extractUrl(s: WebStreamSniffer.Sniffed): Info {
+        val job = extractorPool.submit<Info> { tracks { it.setDataSource(s.url, headers(s)) } }
+        // Abandoned probes are interrupted, not left holding a pool thread per hung host
+        return runCatching { job.get(6, TimeUnit.SECONDS) }.onFailure { job.cancel(true) }.getOrDefault(Info.UNKNOWN)
+    }
 
     private fun tracks(open: (MediaExtractor) -> Unit): Info {
         val ex = MediaExtractor()

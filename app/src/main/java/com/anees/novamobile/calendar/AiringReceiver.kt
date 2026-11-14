@@ -48,7 +48,12 @@ class AiringReceiver : BroadcastReceiver() {
             Intent.ACTION_TIME_CHANGED, Intent.ACTION_TIMEZONE_CHANGED, EXACT_CHANGED -> {
                 val done = goAsync()
                 CoroutineScope(Dispatchers.IO).launch {
-                    try { AiringCalendar.reschedule(ctx.applicationContext) }
+                    try {
+                        // A broadcast gets under a minute, and a reboot wiped every reminder: a refresh hanging on a bad
+                        // network must not cost them, so past 20 s they are rebuilt from the saved schedule
+                        val fresh = withTimeoutOrNull(20_000) { runCatching { AiringCalendar.load() }.getOrNull() }
+                        AiringCalendar.reschedule(ctx.applicationContext, fresh ?: LocalStore.airingCache())
+                    }
                     catch (t: Throwable) { Log.w(TAG, "reschedule failed", t) }
                     finally { done.finish() }
                 }

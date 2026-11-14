@@ -151,7 +151,8 @@ object FastExport {
         }
     }.onFailure { Log.w(TAG, "stream subtitles not read: ${it.message}") }.getOrDefault(emptyList())
 
-    fun write(ctx: Context, plan: Plan, out: FileOutputStream, onProgress: (Float) -> Unit) {
+    /** Returns the number of audio tracks written, or -1 when unknown (progressive copy). */
+    fun write(ctx: Context, plan: Plan, out: FileOutputStream, onProgress: (Float) -> Unit): Int {
         val total = plan.bytes.coerceAtLeast(1)
         var done = 0L
         fun progress(n: Long) { done += n; onProgress((done.toFloat() / total).coerceAtMost(0.99f)) }
@@ -162,13 +163,14 @@ object FastExport {
                 val b = ByteArray(1 shl 20)
                 while (true) { val n = ds.read(b, 0, b.size); if (n == C.RESULT_END_OF_INPUT) break; out.write(b, 0, n); progress(n.toLong()) }
             } finally { ds.close() }
-            onProgress(1f); return
+            onProgress(1f); return -1
         }
         @Suppress("UNCHECKED_CAST") val parts = plan.parts as List<Part>
         val fast = runCatching { Media3Mux(ctx, parts, ::progress).prime() }
             .onFailure { Log.w(TAG, "fast save: Media3 extractor failed, using MediaExtractor: ${it.message}") }.getOrNull()
-        if (fast != null) fast.writeTo(out) else { done = 0; mux(ctx, parts, out, ::progress) }
+        val audio = if (fast != null) fast.writeTo(out) else { done = 0; mux(ctx, parts, out, ::progress) }
         onProgress(1f)
+        return audio
     }
 
     /**
@@ -272,7 +274,15 @@ object FastExport {
                 sinks.values.filter { it.keep }.all { it.firstUs != Long.MIN_VALUE }
         }
 
-        private val srcs = parts.map { Src(it, CacheSource(ctx, it.segs, progress)) }
+        // A part that can't be opened must not leak the extractors / sources of the parts before it
+        private val srcs = ArrayList<Src>(parts.size).also { l ->
+            try {
+                parts.forEach { p ->
+                    val cs = CacheSource(ctx, p.segs, progress)
+                    l += try { Src(p, cs) } catch (e: Throwable) { cs.close(); throw e }
+                }
+            } catch (e: Throwable) { l.forEach { runCatching { it.extractor.release() }; it.cs.close() }; throw e }
+        }
         private var muxer: Mp4Muxer? = null
         private var base = 0L
         private val buf = ByteBuffer.allocateDirect(8 * 1024 * 1024)
@@ -290,7 +300,8 @@ object FastExport {
             return this
         }
 
-        fun writeTo(out: FileOutputStream) {
+        /** Returns the number of audio tracks written. */
+        fun writeTo(out: FileOutputStream): Int {
             val t0 = System.nanoTime()
             val m = Mp4Muxer.Builder(out).setSampleCopyingEnabled(true).setSampleBatchingEnabled(true).build()
             muxer = m
@@ -300,6 +311,7 @@ object FastExport {
                     s.sinks.values.forEach { k -> while (k.pending.isNotEmpty()) { val p = k.pending.removeFirst(); write(k.muxId, p.bytes, 0, p.bytes.size, p.timeUs, p.flags) } }
                     while (s.step()) {}
                 }
+                return srcs.sumOf { s -> s.sinks.values.count { it.keep && it.type == C.TRACK_TYPE_AUDIO } }
             } finally {
                 val tc = System.nanoTime(); m.close(); writeNs += System.nanoTime() - tc
                 close()
@@ -319,11 +331,13 @@ object FastExport {
     }
 
     /** Each part read once by one extractor (all its tracks), samples written as they come. */
-    private fun mux(ctx: Context, parts: List<Part>, out: FileOutputStream, progress: (Long) -> Unit) {
+    private fun mux(ctx: Context, parts: List<Part>, out: FileOutputStream, progress: (Long) -> Unit): Int {
         class Src(val ex: MediaExtractor, val src: CacheSource, val tracks: Map<Int, Format>)
-        val srcs = parts.map { p ->
+        // Parts opened before a failing one are released on the way out (see the catch below)
+        val opened = mutableListOf<Pair<MediaExtractor, CacheSource>>()
+        val srcs = try { parts.map { p ->
             val cs = CacheSource(ctx, p.segs, progress)
-            val ex = MediaExtractor().apply { setDataSource(cs) }
+            val ex = MediaExtractor().also { opened += it to cs }.apply { setDataSource(cs) }
             val tracks = HashMap<Int, Format>()
             for (t in 0 until ex.trackCount) {
                 val mf = ex.getTrackFormat(t)
@@ -338,8 +352,9 @@ object FastExport {
                 ex.selectTrack(t); tracks[t] = fmt
             }
             Src(ex, cs, tracks)
-        }
-        require(srcs.any { s -> s.tracks.values.any { it.sampleMimeType?.startsWith("video/") == true } }) { "no video track" }
+        }.also { srcs ->
+            require(srcs.any { s -> s.tracks.values.any { it.sampleMimeType?.startsWith("video/") == true } }) { "no video track" }
+        } } catch (e: Throwable) { opened.forEach { runCatching { it.first.release() }; it.second.close() }; throw e }
         // Shared clock: TS timestamps don't start at 0
         val base = srcs.mapNotNull { s -> s.ex.sampleTime.takeIf { it >= 0 } }.minOrNull() ?: 0L
         // Copying: the read buffer is reused. Batching: many samples per write, far fewer (slow) storage calls
@@ -366,6 +381,7 @@ object FastExport {
                     s.ex.advance()
                 }
             }
+            return srcs.sumOf { s -> s.tracks.values.count { it.sampleMimeType?.startsWith("audio/") == true } }
         } finally {
             val tc = System.nanoTime()
             muxer.close()

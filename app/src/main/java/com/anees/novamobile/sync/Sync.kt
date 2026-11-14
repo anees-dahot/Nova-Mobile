@@ -36,7 +36,9 @@ interface SyncService {
 
 object Sync {
     private const val TAG = "NovaSync"
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Calls here throw when offline: one left uncaught on this scope used to take the whole app down
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, e -> Log.w(TAG, "sync task failed: $e") })
+    private val queueLock = Any()
     val repo = MediaRepository()
     val services: List<SyncService> = listOf(TraktSync, AniListSync, MalSync)
 
@@ -50,7 +52,7 @@ object Sync {
 
     private fun push(p: Pending) {
         if (services.none { it.loggedIn() }) return
-        scope.launch { if (!send(p)) LocalStore.saveSyncQueue((LocalStore.syncQueue() + p).takeLast(300)) }
+        scope.launch { if (!send(p)) synchronized(queueLock) { LocalStore.saveSyncQueue((LocalStore.syncQueue() + p).takeLast(300)) } }
     }
 
     // Every account gets the update even when an earlier one fails (AniList down must not hold back MAL)
@@ -63,9 +65,10 @@ object Sync {
 
     /** App start / "Sync now": retry the queue, then import from every connected account. */
     fun syncNow(ctx: Context, done: (() -> Unit)? = null) = scope.launch {
-        val queue = LocalStore.syncQueue()
-        val left = queue.filterNot { send(it) }
-        LocalStore.saveSyncQueue(left)
+        val sent = LocalStore.syncQueue().filter { send(it) }
+        // Take out only what went through: a push that failed while this ran has queued itself meanwhile, and
+        // writing back the list read at the start dropped it
+        if (sent.isNotEmpty()) synchronized(queueLock) { LocalStore.saveSyncQueue(LocalStore.syncQueue().toMutableList().apply { sent.forEach { remove(it) } }) }
         services.filter { it.loggedIn() }.forEach { s -> runCatching { s.pull(ctx) }.onFailure { Log.w(TAG, "${s.name} pull: ${it.message}") } }
         LocalStore.setLastSync(System.currentTimeMillis())
         withContext(Dispatchers.Main) { done?.invoke() }
@@ -119,20 +122,27 @@ object TraktSync : SyncService {
 
     /** Starts device login; [show] receives (code, url) to display; polls until approved. */
     fun startDeviceLogin(show: (String, String) -> Unit, done: (Boolean) -> Unit) = Sync.scope.launch {
+        // Offline, or an answer that isn't what Trakt documents: "didn't work", not an exception on the sync scope
+        val ok = try { deviceLogin(show) } catch (e: CancellationException) { throw e } catch (e: Exception) { Log.w("NovaSync", "Trakt login: $e"); false }
+        withContext(Dispatchers.Main) { done(ok) }
+    }
+
+    private suspend fun deviceLogin(show: (String, String) -> Unit): Boolean {
         val (code, body) = Sync.http(req("/oauth/device/code").post(Sync.json(JSONObject().put("client_id", BuildConfig.TRAKT_ID))).build())
-        if (code != 200) { withContext(Dispatchers.Main) { done(false) }; return@launch }
+        if (code != 200) return false
         val o = JSONObject(body)
         withContext(Dispatchers.Main) { show(o.getString("user_code"), o.getString("verification_url")) }
         val deadline = System.currentTimeMillis() + o.getLong("expires_in") * 1000
-        while (isActive && System.currentTimeMillis() < deadline) {
+        while (System.currentTimeMillis() < deadline) {
             delay(o.optLong("interval", 5) * 1000)
-            val (c, b) = Sync.http(req("/oauth/device/token").post(Sync.json(JSONObject()
+            // One dropped poll (a network blip while the code is being typed in) isn't the end of the login
+            val (c, b) = runCatching { Sync.http(req("/oauth/device/token").post(Sync.json(JSONObject()
                 .put("code", o.getString("device_code")).put("client_id", BuildConfig.TRAKT_ID)
-                .apply { if (BuildConfig.TRAKT_SECRET.isNotEmpty()) put("client_secret", BuildConfig.TRAKT_SECRET) })).build())
-            if (c == 200) { LocalStore.setSyncToken("trakt", JSONObject(b).getString("access_token")); withContext(Dispatchers.Main) { done(true) }; return@launch }
+                .apply { if (BuildConfig.TRAKT_SECRET.isNotEmpty()) put("client_secret", BuildConfig.TRAKT_SECRET) })).build()) }.getOrNull() ?: continue
+            if (c == 200) { LocalStore.setSyncToken("trakt", JSONObject(b).getString("access_token")); return true }
             if (c == 404 || c == 409 || c == 410 || c == 418) break
         }
-        withContext(Dispatchers.Main) { done(false) }
+        return false
     }
 
     override fun login(activity: Activity) {}   // device flow is started from Settings (shows the code)
@@ -157,9 +167,14 @@ object TraktSync : SyncService {
     override suspend fun pull(ctx: Context) {
         val (c, b) = Sync.http(req("/sync/watchlist").get().build())
         if (c == 200) JSONArray(b).let { arr ->
+            val have = LocalStore.watchlist().map { it.type to it.id }.toSet()
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i); val type = o.optString("type")
-                val tmdb = o.optJSONObject(type)?.optJSONObject("ids")?.optInt("tmdb") ?: continue
+                // A listed season or episode carries its own id, not the show's: looked up as a show it added some other title
+                if (type != "movie" && type != "show") continue
+                val tmdb = o.optJSONObject(type)?.optJSONObject("ids")?.optInt("tmdb")?.takeIf { it > 0 } ?: continue   // no TMDB id reads as 0
+                // Already in My List: its details were fetched again on every sync
+                if ((if (type == "movie") MediaType.MOVIE else MediaType.SERIES) to tmdb in have) continue
                 val card = if (type == "movie") Sync.repo.getMovieDetail(tmdb) else Sync.repo.getSeriesDetail(tmdb)?.first
                 if (card != null && !LocalStore.inWatchlist(card)) LocalStore.toggleWatchlist(card, notify = false)
             }
@@ -168,7 +183,7 @@ object TraktSync : SyncService {
         if (c2 == 200) JSONArray(b2).let { arr ->
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                val tmdb = o.optJSONObject("show")?.optJSONObject("ids")?.optInt("tmdb") ?: continue
+                val tmdb = o.optJSONObject("show")?.optJSONObject("ids")?.optInt("tmdb")?.takeIf { it > 0 } ?: continue
                 val seasons = o.optJSONArray("seasons") ?: continue
                 for (s in 0 until seasons.length()) {
                     val so = seasons.getJSONObject(s); val eps = so.getJSONArray("episodes")
@@ -223,7 +238,7 @@ object AniListSync : SyncService {
             for (e in 0 until entries.length()) {
                 val en = entries.getJSONObject(e); val id = en.getJSONObject("media").getInt("id")
                 if (en.getString("status") == "PLANNING") Sync.repo.getAnimeDetail(id)?.let { if (!LocalStore.inWatchlist(it)) LocalStore.toggleWatchlist(it, notify = false) }
-                else for (ep in 1..en.optInt("progress")) LocalStore.setEpisodeProgress("ANIME:$id", 1, ep, 1f)
+                else LocalStore.setEpisodesWatched("ANIME:$id", 1, en.optInt("progress"))
             }
         }
     }
@@ -237,7 +252,10 @@ object MalSync : SyncService {
     override fun logout() = LocalStore.setSyncToken("mal", null)
 
     override fun login(activity: Activity) {
-        val verifier = (1..96).map { "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~".random() }.joinToString("")
+        // The verifier is this login's secret (plain PKCE), so not from a guessable generator
+        val abc = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+        val rnd = java.security.SecureRandom()
+        val verifier = (1..96).map { abc[rnd.nextInt(abc.length)] }.joinToString("")
         LocalStore.setSyncToken("mal_verifier", verifier)
         Sync.open(activity, "https://myanimelist.net/v1/oauth2/authorize?response_type=code&client_id=${BuildConfig.MAL_ID}" +
             "&code_challenge=$verifier&code_challenge_method=plain&redirect_uri=novamobile://mal&state=${Sync.newState("mal")}")

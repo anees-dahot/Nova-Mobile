@@ -145,10 +145,13 @@ class ParallelProgressiveDownloader(request: DownloadRequest, private val factor
                             done.addAndGet(newBytes)
                             window.addAndGet(newBytes)
                             val now = System.currentTimeMillis()
-                            val span = now - windowStart.get()
-                            if (span >= 4_000) {
+                            val since = windowStart.get()
+                            val span = now - since
+                            // Only one worker closes a window: two at the same instant measured the second "window" at
+                            // ~0 bytes and retired connections on a fast link
+                            if (span >= 4_000 && windowStart.compareAndSet(since, now)) {
                                 val speed = window.getAndSet(0) * 1000 / span
-                                bps.set(speed); windowStart.set(now)
+                                bps.set(speed)
                                 if (speed < SLOW_BPS && now - startedAt > 15_000) for (i in MIN_CONNS until conns) if (!retired[i]) {
                                     retired[i] = true; current[i]?.cancel()
                                     Log.i(TAG, "slow link (${speed / 1024} KB/s): connection $i retired")

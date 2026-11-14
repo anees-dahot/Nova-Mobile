@@ -292,9 +292,13 @@ object StreamExtractor {
             val all = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }.filter { it.optString("media", "TV") in setOf("TV", "ONA", "") || it.has("themoviedb-season") }
             val e = all.firstOrNull { it.optInt("themoviedb-season", -1) == season } ?: all.singleOrNull() ?: all.firstOrNull { season == 1 && !it.has("themoviedb-season") }
             e?.let { it.optInt("myanimelist", 0).takeIf { v -> v > 0 } to it.optInt("anilist", 0).takeIf { v -> v > 0 } }
-        }.getOrNull()
-        synchronized(armCache) { armCache[key] = r }
-        return r
+        }
+        // Cache real answers only ("no entry" included): a failure or cancelled race retries next time
+        val e = r.exceptionOrNull()
+        if (e is kotlinx.coroutines.CancellationException) throw e
+        if (e != null) return null
+        synchronized(armCache) { armCache[key] = r.getOrNull() }
+        return r.getOrNull()
     }
 
     private suspend fun resolveTarget0(card: MediaCard, season: Int, episode: Int, repo: MediaRepository): Target? = when (card.type) {

@@ -161,6 +161,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private var offlineSubFiles: List<Triple<String, String?, java.io.File>> = emptyList()
 
     private var streamJob: Job? = null
+    /** Offline playback's target + extras lookup; separate from [streamJob] so switchSource doesn't drop it. */
+    private var extrasJob: Job? = null
     private var tickJob: Job? = null
     private var readyTimeout: Job? = null
 
@@ -323,6 +325,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         outroRange = null
         skipShownAt = 0
         nextEpisode = null
+        filler = null   // may be another show now (onNewIntent); loadExtras refills it
         nextDismissed = false
         nextDeadline = 0
         nextPrefetched = false
@@ -356,6 +359,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
         offlineItem = null
         streamJob?.cancel()
+        extrasJob?.cancel()   // a late answer for the previous episode must not overwrite this one's
         // Downloaded? Play the saved copy: no search, works offline
         val dl = com.anees.novamobile.download.NovaDownloads.get(this, com.anees.novamobile.download.DownloadMeta.id(card, s, e))
         if (dl?.state == androidx.media3.exoplayer.offline.Download.STATE_COMPLETED) { playOffline(dl); return }
@@ -543,7 +547,11 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             .setMediaMetadata(metadata())
             .build()
         Log.i(TAG, "offline: playing saved download")
-        lifecycleScope.launch { runCatching { target = StreamExtractor.resolveTarget(card, season, episode, repo); loadExtras() } }
+        extrasJob = lifecycleScope.launch {
+            try { target = StreamExtractor.resolveTarget(card, season, episode, repo); loadExtras() }
+            catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { Log.w(TAG, "offline extras failed: ${e.message}") }
+        }
         play(WebStreamSniffer.Sniffed(d.request.uri.toString(), emptyMap(), "", emptyList()), bypassProxy = false)
     }
 

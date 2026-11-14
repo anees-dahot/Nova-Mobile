@@ -25,6 +25,12 @@ class BeamBulk(private val peer: BeamLink.Peer, private val cache: SimpleCache) 
     private class Job(val key: String, val pos: Long, val len: Long)
 
     val done = AtomicLong()
+    /** Open connections, for the watchdog in [copy]. */
+    private val live = java.util.concurrent.ConcurrentHashMap.newKeySet<Conn>()
+    /** Connects that failed in a row, over all workers: at [GONE_AFTER] the sender is gone and the rest is left to the download. */
+    private val connectFails = java.util.concurrent.atomic.AtomicInteger()
+
+    private fun connect(): Conn = try { Conn(peer).also { connectFails.set(0) } } catch (e: IOException) { connectFails.incrementAndGet(); throw e }
 
     /**
      * Copies every span of [pieces] this phone doesn't have yet. Returns bytes that could not be copied
@@ -52,16 +58,19 @@ class BeamBulk(private val peer: BeamLink.Peer, private val cache: SimpleCache) 
                 try {
                     while (true) {
                         if (BeamLink.peer !== peer) break       // cancelled
+                        // The sender can't be reached at all (left, app closed): without this every span waited out three connect timeouts
+                        if (connectFails.get() >= GONE_AFTER) break
                         val j = queue.poll() ?: break
                         var tries = 0
                         while (true) {
                             try {
-                                if (conn == null) conn = Conn(peer)
+                                if (conn == null) conn = connect()
                                 fetch(conn, j)
                                 break
                             } catch (e: IOException) {
                                 runCatching { conn?.close() }; conn = null
-                                if (++tries >= 3) { failed.addAndGet(j.len); Log.w(TAG, "span ${j.key}@${j.pos} not copied: ${e.message}"); break }
+                                val stop = BeamLink.peer !== peer || connectFails.get() >= GONE_AFTER
+                                if (stop || ++tries >= 3) { failed.addAndGet(j.len); if (!stop) Log.w(TAG, "span ${j.key}@${j.pos} not copied: ${e.message}"); break }
                             }
                         }
                     }
@@ -72,7 +81,16 @@ class BeamBulk(private val peer: BeamLink.Peer, private val cache: SimpleCache) 
                 }
             }, "beam-bulk-$i").apply { start() }
         }
-        threads.forEach { it.join() }
+        // A blocking channel read has no timeout of its own (SO_TIMEOUT only covers stream reads), so a sender that went
+        // quiet without closing (out of range, asleep) held these threads, and the cache ranges they had locked, for
+        // good. Close what has been silent for STALL_MS, and everything on cancel.
+        while (threads.any { it.isAlive }) {
+            threads.firstOrNull { it.isAlive }?.join(1_000)
+            val now = System.currentTimeMillis()
+            val cancelled = BeamLink.peer !== peer
+            live.forEach { c -> if (cancelled || now - c.lastIo > STALL_MS) c.close() }
+        }
+        if (connectFails.get() >= GONE_AFTER) Log.w(TAG, "sender unreachable, bulk copy stopped")
         fatal.get()?.let { Log.w(TAG, "bulk copy stopped", it) }
         return failed.get() + queue.sumOf { it.len }
     }
@@ -103,13 +121,17 @@ class BeamBulk(private val peer: BeamLink.Peer, private val cache: SimpleCache) 
 
     /** Persistent connection to the sender speaking the same small HTTP as [BeamServer]. */
     private inner class Conn(p: BeamLink.Peer) {
-        val ch: SocketChannel = SocketChannel.open().apply {
-            socket().receiveBufferSize = 4 shl 20
-            socket().tcpNoDelay = true
-            p.network?.bindSocket(socket())
-            socket().connect(InetSocketAddress(p.host, p.port), 6000)
-            socket().soTimeout = 60_000
+        val ch: SocketChannel = SocketChannel.open().also { c ->
+            try {
+                c.socket().receiveBufferSize = 4 shl 20
+                c.socket().tcpNoDelay = true
+                p.network?.bindSocket(c.socket())
+                c.socket().connect(InetSocketAddress(p.host, p.port), 6000)
+            } catch (t: Throwable) { runCatching { c.close() }; throw t }   // a failed connect must not leak its socket
         }
+        /** Last time bytes moved (the watchdog in [copy] closes a connection that went silent). */
+        @Volatile var lastIo = System.currentTimeMillis()
+        init { live += this }
         private val token = p.token
         private val head = ByteBuffer.allocate(64 * 1024)
         private var leftover: ByteBuffer? = null
@@ -118,12 +140,14 @@ class BeamBulk(private val peer: BeamLink.Peer, private val cache: SimpleCache) 
         fun request(j: Job): Long {
             val q = "GET /span?k=${Uri.encode(j.key)}&p=${j.pos} HTTP/1.1\r\nHost: beam\r\nX-Beam-Token: $token\r\n\r\n"
             val b = ByteBuffer.wrap(q.toByteArray())
+            lastIo = System.currentTimeMillis()
             while (b.hasRemaining()) ch.write(b)
             head.clear()
             // Read until the blank line; whatever follows belongs to the body
             while (true) {
                 if (!head.hasRemaining()) throw IOException("response headers too long")
                 if (ch.read(head) < 0) throw IOException("connection closed")
+                lastIo = System.currentTimeMillis()
                 val end = indexOfBlankLine(head.array(), head.position())
                 if (end >= 0) {
                     val text = String(head.array(), 0, end, Charsets.ISO_8859_1)
@@ -153,6 +177,7 @@ class BeamBulk(private val peer: BeamLink.Peer, private val cache: SimpleCache) 
                 if (len - w < buf.capacity()) buf.limit((len - w).toInt())
                 val n = ch.read(buf)
                 if (n < 0) throw IOException("the other phone stopped sending")
+                lastIo = System.currentTimeMillis()
                 buf.flip()
                 while (buf.hasRemaining()) w += fc.write(buf, w)
                 count(n.toLong())
@@ -165,10 +190,10 @@ class BeamBulk(private val peer: BeamLink.Peer, private val cache: SimpleCache) 
         fun skip(len: Long) {
             if (len < 0) { close(); throw IOException("connection reset") }
             var left = len - (leftover?.remaining() ?: 0).toLong().also { leftover = null }
-            while (left > 0) { buf.clear(); buf.limit(minOf(buf.capacity().toLong(), left).toInt()); val n = ch.read(buf); if (n < 0) break; left -= n }
+            while (left > 0) { buf.clear(); buf.limit(minOf(buf.capacity().toLong(), left).toInt()); val n = ch.read(buf); if (n < 0) break; lastIo = System.currentTimeMillis(); left -= n }
         }
 
-        fun close() = runCatching { ch.close() }
+        fun close() { live -= this; runCatching { ch.close() } }
     }
 
     private fun indexOfBlankLine(a: ByteArray, n: Int): Int {
@@ -179,5 +204,7 @@ class BeamBulk(private val peer: BeamLink.Peer, private val cache: SimpleCache) 
     companion object {
         private const val TAG = "Beam"
         const val CONNECTIONS = 6
+        private const val STALL_MS = 60_000L
+        private const val GONE_AFTER = 12   // two rounds of every worker's connect timing out
     }
 }

@@ -46,6 +46,7 @@ class BeamServer(private val ctx: Context, private val token: String) {
     @Volatile var lastRequestAt = 0L; private set
 
     private var server: ServerSocketChannel? = null
+    private val tokenBytes = token.toByteArray()
     private val pool = Executors.newCachedThreadPool { r -> Thread(r, "beam-conn").apply { isDaemon = true } }
     private val gson = Gson()
     /** Piece lists per download id: working them out walks the whole playlist, so do it once. */
@@ -85,7 +86,8 @@ class BeamServer(private val ctx: Context, private val token: String) {
             while (ch.isOpen) {
                 val req = readRequest(input) ?: break
                 lastRequestAt = System.currentTimeMillis()
-                if (req.headers["x-beam-token"] != token) { respond(out, 403, "text/plain", "bad token".toByteArray()); out.flush(); break }
+                // Compared in constant time: the answer's timing must not tell a guesser how much of the token was right
+                if (!java.security.MessageDigest.isEqual(req.headers["x-beam-token"].orEmpty().toByteArray(), tokenBytes)) { respond(out, 403, "text/plain", "bad token".toByteArray()); out.flush(); break }
                 val u = Uri.parse("http://x" + req.path)
                 when (u.path) {
                     "/hello" -> respond(out, 200, "application/json", gson.toJson(mapOf("app" to "nova", "count" to offers().size)).toByteArray())
@@ -226,6 +228,7 @@ class BeamServer(private val ctx: Context, private val token: String) {
         while (true) {
             val h = readLine(input) ?: return null
             if (h.isEmpty()) break
+            if (headers.size >= 64) return null   // read before the token is checked: no endless header list from a stranger on the network
             val c = h.indexOf(':')
             if (c > 0) headers[h.substring(0, c).trim().lowercase()] = h.substring(c + 1).trim()
         }

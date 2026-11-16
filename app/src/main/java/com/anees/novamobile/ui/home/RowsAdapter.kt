@@ -18,6 +18,8 @@ sealed class HomeItem {
     abstract val key: String
     object Hero : HomeItem() { override val key = "hero" }
     data class Skeleton(override val key: String, val wide: Boolean = false) : HomeItem()
+    /** Nothing loaded (offline / sources down): a message with a tap-to-retry instead of endless skeletons. */
+    data class Message(override val key: String, val text: String) : HomeItem()
     data class Row(
         override val key: String,
         val title: String,
@@ -37,6 +39,7 @@ interface RowCallbacks {
     fun onCardClick(row: HomeItem.Row, index: Int, card: MediaCard)
     fun onCardLongClick(row: HomeItem.Row, index: Int, card: MediaCard)
     fun onRowMore(row: HomeItem.Row) {}
+    fun onRetry() {}
 }
 
 /**
@@ -52,6 +55,7 @@ class RowsAdapter(private val cb: RowCallbacks) : ListAdapter<HomeItem, Recycler
         is HomeItem.Hero -> 0
         is HomeItem.Row -> 1
         is HomeItem.Skeleton -> 2
+        is HomeItem.Message -> 3
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
@@ -63,6 +67,14 @@ class RowsAdapter(private val cb: RowCallbacks) : ListAdapter<HomeItem, Recycler
                 it.layoutParams = RecyclerView.LayoutParams(RecyclerView.LayoutParams.MATCH_PARENT, minOf((dm.widthPixels * 1.5f).toInt(), (dm.heightPixels * 0.76f).toInt()))
             }) {}
             1 -> RowVH(inf.inflate(R.layout.item_row, parent, false))
+            3 -> object : RecyclerView.ViewHolder(TextView(parent.context).apply {
+                val dp = parent.resources.displayMetrics.density
+                layoutParams = RecyclerView.LayoutParams(RecyclerView.LayoutParams.MATCH_PARENT, RecyclerView.LayoutParams.WRAP_CONTENT)
+                gravity = android.view.Gravity.CENTER
+                setPadding((32 * dp).toInt(), (120 * dp).toInt(), (32 * dp).toInt(), (32 * dp).toInt())
+                setTextColor(0xCCFFFFFF.toInt()); textSize = 15f
+                setOnClickListener { cb.onRetry() }
+            }) {}
             else -> SkeletonVH(inf.inflate(R.layout.item_row, parent, false))
         }
     }
@@ -72,6 +84,7 @@ class RowsAdapter(private val cb: RowCallbacks) : ListAdapter<HomeItem, Recycler
             is HomeItem.Hero -> cb.bindHero(holder.itemView)
             is HomeItem.Row -> (holder as RowVH).bind(item)
             is HomeItem.Skeleton -> (holder as SkeletonVH).bind(item)
+            is HomeItem.Message -> (holder.itemView as TextView).text = item.text
         }
     }
 

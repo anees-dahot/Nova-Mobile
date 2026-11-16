@@ -234,7 +234,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
-        if (intent.hasExtra("open")) skipPlayerReturn = true
+        if (intent.hasExtra("open") || intent.hasExtra("play_card")) skipPlayerReturn = true   // alert → show page, not the old player
         if (intent.getStringExtra("open") == "update") handler.postDelayed(updateFromNote, 300)
         if (intent.getStringExtra("open") == "downloads") openDownloads()
         if (intent.getStringExtra("open") == "beam_send") { openDownloads(); com.anees.novamobile.transfer.BeamUi.send(this) }
@@ -285,12 +285,13 @@ class MainActivity : AppCompatActivity() {
         handler.postDelayed(hideBanner, 4500)
     }
 
-    /** "S2 E5 is out — tap to play" notification. */
+    /** "S2 E5 is out" notification: open the show's page on that episode (Play is one tap from there). */
     private fun handlePlayIntent(i: android.content.Intent?) {
         val json = i?.getStringExtra("play_card") ?: return
         i.removeExtra("play_card")
         val card = runCatching { com.google.gson.Gson().fromJson(json, MediaCard::class.java) }.getOrNull() ?: return
-        com.anees.novamobile.ui.player.PlayerActivity.launch(this, card, i.getIntExtra("play_s", 1), i.getIntExtra("play_e", 1))
+        val s = i.getIntExtra("play_s", 1); val e = i.getIntExtra("play_e", 1)
+        handler.post { openDetail(card, s, e) }
     }
 
     @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
@@ -337,9 +338,9 @@ class MainActivity : AppCompatActivity() {
             requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), 8)
     }
 
-    fun openDetail(card: MediaCard) {
+    fun openDetail(card: MediaCard, season: Int = 0, episode: Int = 0) {
         com.anees.novamobile.ui.player.Prefetcher.cancel()
-        openOverlay(DetailFragment.newInstance(card))
+        openOverlay(DetailFragment.newInstance(card, season, episode))
     }
 
     fun openPerson(id: Int, name: String, photo: String?) =

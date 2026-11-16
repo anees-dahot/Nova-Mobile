@@ -145,6 +145,19 @@ class ScraperInfoTest {
         FastDns.system = Dns.SYSTEM
     }
 
+    @Test fun carrierBlockPageSwitchesHostToDoh() {
+        val forged = InetAddress.getByAddress("forged.test", byteArrayOf(203.toByte(), 0, 113, 9))   // public block page
+        val real = InetAddress.getByAddress("forged.test", byteArrayOf(104, 16, 2, 2))
+        FastDns.system = object : Dns { override fun lookup(hostname: String) = listOf(forged) }
+        FastDns.dohLookup = { listOf(real) }
+        assertEquals(forged, FastDns.lookup("forged.test").first())     // looks fine to the resolver
+        assertTrue(FastDns.suspectBlock("forged.test"))                 // TLS failed → retry once
+        assertEquals(real, FastDns.lookup("forged.test").first())       // now via DoH
+        assertFalse(FastDns.suspectBlock("forged.test"))                // no endless retries
+        assertFalse(FastDns.suspectBlock("10.0.0.1"))                   // raw IPs never
+        FastDns.system = Dns.SYSTEM
+    }
+
     // ── Page cache / in-flight dedupe ─────────────────────────────────────────
 
     @Test fun sameGetIsFetchedOnce() = runBlocking {

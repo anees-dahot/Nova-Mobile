@@ -113,6 +113,8 @@ object NovaDownloads {
     private const val SEGMENT_THREADS = 24
     private val main = Handler(Looper.getMainLooper())
     @Volatile var storageFull = false; private set
+    /** Whole queue paused ("Pause all", or storage full). */
+    val allPaused: Boolean get() = manager?.downloadsPaused == true
 
     /** Tokens that change on every fresh link; dropping them from cache keys lets a refreshed link reuse saved data. */
     private val VOLATILE = setOf("token", "exp", "expires", "expiry", "e", "st", "sig", "signature", "hash", "_t", "t", "ts", "verify", "auth", "md5")
@@ -265,6 +267,11 @@ object NovaDownloads {
 
     private class Policy(private val ctx: Context) : DownloadManager.Listener {
         override fun onIdle(dm: DownloadManager) { Locks.update(ctx, false) }
+        // Resumed from anywhere (notification button included): the storage-full state and its notice go too
+        override fun onDownloadsPausedChanged(dm: DownloadManager, paused: Boolean) {
+            if (!paused && storageFull) { storageFull = false
+                runCatching { androidx.core.app.NotificationManagerCompat.from(ctx).cancel(4001) } }
+        }
         override fun onDownloadChanged(dm: DownloadManager, d: Download, finalException: Exception?) {
             val id = d.request.id
             registerKey(d.request)
@@ -282,9 +289,14 @@ object NovaDownloads {
             }
         }
 
+        private val lastFailBytes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
         private fun handleFailure(dm: DownloadManager, d: Download, e: Exception?) {
             val id = d.request.id
-            val n = LocalStore.dlAttempts(id) + 1
+            // Count failures in a row without progress: a big file on a flaky line that keeps moving must never hit the cap
+            val grew = d.bytesDownloaded > (lastFailBytes[id] ?: -1L) + 1024 * 1024
+            lastFailBytes[id] = d.bytesDownloaded
+            val n = if (grew && LocalStore.dlAttempts(id) > 0) 1 else LocalStore.dlAttempts(id) + 1
             LocalStore.setDlAttempts(id, n)
             val code = generateSequence(e as Throwable?) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode
             val msg = generateSequence(e as Throwable?) { it.cause }.mapNotNull { it.message }.joinToString(" ")

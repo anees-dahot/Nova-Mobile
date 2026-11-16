@@ -307,7 +307,8 @@ object PublicExport {
 
     private fun fail(ctx: Context, req: Request, msg: String) {
         Log.w(TAG, "${req.id}: $msg")
-        if (msg != "Cancelled") SaveProgress.result(ctx, false, "Couldn't save: $msg")
+        // Automatic gallery copies retry on every launch: a notice each time would nag; manual saves still say why
+        if (msg != "Cancelled" && !req.auto) SaveProgress.result(ctx, false, "Couldn't save: $msg")
         req.done(false, msg)
         if (running === req) running = null
         next(ctx)

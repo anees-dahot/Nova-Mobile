@@ -19,7 +19,6 @@ import com.anees.novamobile.calendar.AiringEp
 import com.anees.novamobile.calendar.AiringReceiver
 import com.anees.novamobile.notify.NotifyChannels
 import com.anees.novamobile.data.local.LocalStore
-import com.anees.novamobile.ui.player.PlayerActivity
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -207,10 +206,8 @@ class CalendarFragment : Fragment() {
                         setTextColor(if (aired) Color.BLACK else Color.WHITE)
                         setBackgroundResource(if (aired) R.drawable.btn_play_hero else R.drawable.btn_secondary)
                     }
-                    v.setOnClickListener {
-                        if (aired) PlayerActivity.launch(requireContext(), e.card, e.season, e.episode)
-                        else (activity as? MainActivity)?.openDetail(e.card)
-                    }
+                    // Show page first (on that episode): play, download or read about it from there
+                    v.setOnClickListener { (activity as? MainActivity)?.openDetail(e.card, e.season, e.episode) }
                 }
             }
         }

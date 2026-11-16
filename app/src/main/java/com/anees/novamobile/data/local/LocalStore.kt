@@ -175,6 +175,13 @@ object LocalStore {
     fun saveScheduledReminders(ids: List<Int>) = write("airing_ids", ids)
     /** Episode keys already announced, so a caught-up reminder never shows twice. */
     fun notifiedEpisodes(): Set<String> = read("airing_notified", object : TypeToken<List<String>>() {}).toSet()
+    /** Atomically: false if [key] was already alerted, else marks it and returns true (alarm + catch-ups race). */
+    @Synchronized fun claimNotified(key: String): Boolean {
+        val list = read("airing_notified", object : TypeToken<List<String>>() {})
+        if (key in list) return false
+        write("airing_notified", (list + key).takeLast(300)); return true
+    }
+    @Synchronized fun unmarkNotified(key: String) = write("airing_notified", read("airing_notified", object : TypeToken<List<String>>() {}) - key)
     @Synchronized fun markNotified(key: String) = write("airing_notified", (read("airing_notified", object : TypeToken<List<String>>() {}) - key + key).takeLast(300))
 
     // ── Account sync ──────────────────────────────────────────────────────────

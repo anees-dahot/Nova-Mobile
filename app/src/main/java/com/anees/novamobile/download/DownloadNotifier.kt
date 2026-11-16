@@ -59,6 +59,7 @@ object DownloadNotifier {
 
     fun done(ctx: Context, d: Download) {
         if (!LocalStore.settings().notifyDownloadDone) return
+        clear(ctx, d.request.id, keepDone = true)   // an old "Couldn't download" for it is stale now
         val meta = DownloadMeta.of(d) ?: return
         val id = d.request.id
         val nid = id.hashCode()
@@ -95,6 +96,13 @@ object DownloadNotifier {
                     .setAutoCancel(true).build())
             }
         }
+    }
+
+    /** Deleted (or finished after a failure): its "Ready to watch" / "Couldn't download" notices go too. */
+    fun clear(ctx: Context, id: String, keepDone: Boolean = false) = runCatching {
+        val nm = NotificationManagerCompat.from(ctx)
+        nm.cancel(("fail:$id").hashCode())
+        if (!keepDone) nm.cancel(id.hashCode())
     }
 
     /** A download gave up (or no source had it): tap Retry right from the notification. */

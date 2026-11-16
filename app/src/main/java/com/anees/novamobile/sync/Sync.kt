@@ -217,13 +217,37 @@ object AniListSync : SyncService {
 
     private const val SAVE = "mutation(\$id:Int,\$p:Int,\$s:MediaListStatus){SaveMediaListEntry(mediaId:\$id,progress:\$p,status:\$s){id}}"
 
-    override suspend fun markWatched(card: MediaCard, season: Int, episode: Int): Boolean {
-        val done = card.episodes != null && episode >= card.episodes!!
-        return gql(SAVE, JSONObject().put("id", card.aniListId ?: card.id).put("p", episode).put("s", if (done) "COMPLETED" else "CURRENT")).first == 200
+    private class Entry(val id: Int, val status: String, val progress: Int)
+
+    /** The user's list entry for [mediaId]; null when it isn't on their list. Throws on a network/auth failure. */
+    private fun entry(mediaId: Int): Entry? {
+        val (vc, vb) = gql("{Viewer{id}}", JSONObject())
+        if (vc != 200) throw java.io.IOException("AniList $vc")
+        val uid = JSONObject(vb).getJSONObject("data").getJSONObject("Viewer").getInt("id")
+        val (c, b) = gql("query(\$u:Int,\$m:Int){MediaList(userId:\$u,mediaId:\$m){id status progress}}", JSONObject().put("u", uid).put("m", mediaId))
+        if (c == 404) return null   // AniList answers "not found" for media not on the list
+        if (c != 200) throw java.io.IOException("AniList $c")
+        val ml = JSONObject(b).optJSONObject("data")?.optJSONObject("MediaList") ?: return null
+        return Entry(ml.getInt("id"), ml.optString("status"), ml.optInt("progress"))
     }
 
-    override suspend fun setListed(card: MediaCard, listed: Boolean): Boolean =
-        if (!listed) true else gql(SAVE, JSONObject().put("id", card.aniListId ?: card.id).put("s", "PLANNING")).first == 200
+    override suspend fun markWatched(card: MediaCard, season: Int, episode: Int): Boolean {
+        val id = card.aniListId ?: card.id
+        // Rewatching an earlier episode must not lower progress or reopen a completed show
+        val cur = runCatching { entry(id) }.getOrElse { return false }
+        if (cur != null && (cur.status == "COMPLETED" || cur.progress >= episode)) return true
+        val done = card.episodes != null && episode >= card.episodes!!
+        return gql(SAVE, JSONObject().put("id", id).put("p", episode).put("s", if (done) "COMPLETED" else "CURRENT")).first == 200
+    }
+
+    override suspend fun setListed(card: MediaCard, listed: Boolean): Boolean {
+        val id = card.aniListId ?: card.id
+        if (listed) return gql(SAVE, JSONObject().put("id", id).put("s", "PLANNING")).first == 200
+        // Removed from My List: drop the Planning entry, or the next pull brings it straight back (watching ones stay)
+        val cur = runCatching { entry(id) }.getOrElse { return false } ?: return true
+        if (cur.status != "PLANNING") return true
+        return gql("mutation(\$id:Int){DeleteMediaListEntry(id:\$id){deleted}}", JSONObject().put("id", cur.id)).first == 200
+    }
 
     /** Planning list → My List; watching progress → episode progress. */
     override suspend fun pull(ctx: Context) {
@@ -276,15 +300,32 @@ object MalSync : SyncService {
     private fun put(id: Int, form: okhttp3.FormBody) = Sync.http(Request.Builder().url("https://api.myanimelist.net/v2/anime/$id/my_list_status")
         .header("Authorization", "Bearer ${LocalStore.syncToken("mal")}").put(form).build()).first == 200
 
+    /** (status, watched episodes) on the user's list; null = not listed. Throws on a network/auth failure. */
+    private fun listStatus(id: Int): Pair<String, Int>? {
+        val (c, b) = Sync.http(Request.Builder().url("https://api.myanimelist.net/v2/anime/$id?fields=my_list_status")
+            .header("Authorization", "Bearer ${LocalStore.syncToken("mal")}").build())
+        if (c != 200) throw java.io.IOException("MAL $c")
+        val st = JSONObject(b).optJSONObject("my_list_status") ?: return null
+        return st.optString("status") to st.optInt("num_episodes_watched")
+    }
+
     override suspend fun markWatched(card: MediaCard, season: Int, episode: Int): Boolean {
         val id = malId(card) ?: return true
+        // Rewatching an earlier episode must not lower progress or reopen a completed show
+        val cur = runCatching { listStatus(id) }.getOrElse { return false }
+        if (cur != null && (cur.first == "completed" || cur.second >= episode)) return true
         val done = card.episodes != null && episode >= card.episodes!!
         return put(id, okhttp3.FormBody.Builder().add("status", if (done) "completed" else "watching").add("num_watched_episodes", episode.toString()).build())
     }
 
     override suspend fun setListed(card: MediaCard, listed: Boolean): Boolean {
-        if (!listed) return true
         val id = malId(card) ?: return true
-        return put(id, okhttp3.FormBody.Builder().add("status", "plan_to_watch").build())
+        if (listed) return put(id, okhttp3.FormBody.Builder().add("status", "plan_to_watch").build())
+        // Removed from My List: drop a Plan to Watch entry so a pull can't bring it back (watching ones stay)
+        val cur = runCatching { listStatus(id) }.getOrElse { return false } ?: return true
+        if (cur.first != "plan_to_watch") return true
+        val c = Sync.http(Request.Builder().url("https://api.myanimelist.net/v2/anime/$id/my_list_status")
+            .header("Authorization", "Bearer ${LocalStore.syncToken("mal")}").delete().build()).first
+        return c == 200 || c == 404
     }
 }

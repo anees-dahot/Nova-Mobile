@@ -162,6 +162,13 @@ class BrowseFragment : Fragment() {
         loading = viewLifecycleOwner.lifecycleScope.launch {
             val next = repo.browse(asked, page + 1)
             if (asked != filter) return@launch
+            // Offline / failed request: not the end — keep the page, offer a retry
+            if (next.isEmpty() && context?.getSystemService(android.net.ConnectivityManager::class.java)?.let { cm ->
+                    cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) != true } == true) {
+                status.text = "You're offline · tap to retry"; status.visibility = View.VISIBLE
+                status.setOnClickListener { status.setOnClickListener(null); status.text = "Loading…"; loadMore() }
+                return@launch
+            }
             page++
             // TMDB caps discover at 500 pages; an empty page is the end (or a failed request)
             if (next.isEmpty() || page >= 500) ended = true

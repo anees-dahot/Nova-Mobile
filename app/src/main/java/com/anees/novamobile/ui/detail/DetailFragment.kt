@@ -28,8 +28,11 @@ class DetailFragment : Fragment() {
 
     companion object {
         private const val ARG_CARD = "card_json"
-        fun newInstance(card: MediaCard) = DetailFragment().apply {
-            arguments = Bundle().apply { putString(ARG_CARD, Gson().toJson(card)) }
+        private const val ARG_S = "focus_s"
+        private const val ARG_E = "focus_e"
+        /** [season]/[episode] > 0: open on that episode (new-episode alert, calendar) instead of the history one. */
+        fun newInstance(card: MediaCard, season: Int = 0, episode: Int = 0) = DetailFragment().apply {
+            arguments = Bundle().apply { putString(ARG_CARD, Gson().toJson(card)); putInt(ARG_S, season); putInt(ARG_E, episode) }
         }
     }
 
@@ -59,8 +62,8 @@ class DetailFragment : Fragment() {
         view.findViewById<TextView>(R.id.detail_overview).text = card.overview
         renderMeta(view, card)
 
-        // Resume from history if present
-        LocalStore.historyFor(card)?.let { h -> season = h.season.coerceAtLeast(1); episode = h.episode.coerceAtLeast(1) }
+        // Resume from history if present; a new-episode alert / calendar tap opens on that episode instead
+        applyHistory()
         updatePlayLabel()
         updateListLabel()
 
@@ -115,10 +118,12 @@ class DetailFragment : Fragment() {
                 MediaType.SERIES -> repo.getSeriesDetail(card.id)?.let { (c, raw) ->
                     card = card.copy(imdbId = c.imdbId, totalSeasons = raw.numberOfSeasons)
                     renderMeta(view, card)
-                    val seasons = raw.seasons?.filter { it.seasonNumber > 0 && it.episodeCount > 0 }?.map { it.seasonNumber } ?: listOf(1)
-                    setupSeasons(view, seasons)
                     launch { loadImdb(view) }
-                }
+                    // New / unaired shows list no season with episodes yet: still show season 1
+                    val seasons = raw.seasons?.filter { it.seasonNumber > 0 && it.episodeCount > 0 }?.map { it.seasonNumber }
+                        ?.takeIf { it.isNotEmpty() } ?: listOf(1)
+                    setupSeasons(view, seasons)
+                } ?: setupSeasons(view, (1..(card.totalSeasons ?: 1).coerceAtLeast(1)).toList())   // offline: episodes say so + retry
                 MediaType.ANIME -> {
                     val full = repo.getAnimeDetail(card.id)
                     if (full != null) card = card.copy(episodes = full.episodes ?: card.episodes)
@@ -145,7 +150,7 @@ class DetailFragment : Fragment() {
         super.onResume()
         dlTick.postDelayed(dlRunnable, 1000)
         if (!::playBtn.isInitialized) return
-        LocalStore.historyFor(card)?.let { h -> season = h.season.coerceAtLeast(1); episode = h.episode.coerceAtLeast(1) }
+        applyHistory()
         updatePlayLabel()
         view?.findViewById<RecyclerView>(R.id.episode_list)?.adapter?.notifyDataSetChanged()
     }
@@ -298,6 +303,16 @@ class DetailFragment : Fragment() {
             .onFailure { Toast.makeText(ctx, "Install SmartTube to watch trailers", Toast.LENGTH_SHORT).show() }
     }
 
+    /** History's episode, unless a focused episode (alert / calendar) is newer than it: that one stays picked. */
+    private fun applyHistory() {
+        val fs = arguments?.getInt(ARG_S) ?: 0
+        val fe = arguments?.getInt(ARG_E) ?: 0
+        val h = LocalStore.historyFor(card)
+        val hs = h?.season?.coerceAtLeast(1); val he = h?.episode?.coerceAtLeast(1)
+        if (fs > 0 && fe > 0 && (hs == null || he == null || hs < fs || (hs == fs && he < fe))) { season = fs; episode = fe; return }
+        if (hs != null && he != null) { season = hs; episode = he }
+    }
+
     // ── Seasons / episodes ────────────────────────────────────────────────────
 
     private fun setupSeasons(view: View, seasons: List<Int>) {
@@ -332,7 +347,27 @@ class DetailFragment : Fragment() {
         seasonJob = viewLifecycleOwner.lifecycleScope.launch {
             val eps = repo.getSeasonEpisodes(card.id, s)
             if (!keepEpisode) { season = s; episode = 1; updatePlayLabel() }
-            showEpisodes(view, eps)
+            if (eps.isEmpty()) showEpisodesFailed(view, s, chips, keepEpisode) else showEpisodes(view, eps)
+        }
+    }
+
+    /** Season didn't load (offline / TMDB error): one tappable line instead of a blank list. */
+    private fun showEpisodesFailed(view: View, s: Int, chips: LinearLayout, keepEpisode: Boolean) {
+        val ctx = context ?: return
+        val dp = resources.displayMetrics.density
+        val list = view.findViewById<RecyclerView>(R.id.episode_list)
+        list.layoutManager = LinearLayoutManager(ctx)
+        list.adapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+            override fun getItemCount() = 1
+            override fun onCreateViewHolder(p: ViewGroup, t: Int) = object : RecyclerView.ViewHolder(TextView(p.context).apply {
+                layoutParams = RecyclerView.LayoutParams(RecyclerView.LayoutParams.MATCH_PARENT, RecyclerView.LayoutParams.WRAP_CONTENT)
+                gravity = Gravity.CENTER
+                setPadding(0, (24 * dp).toInt(), 0, (24 * dp).toInt())
+                setTextColor(0xCCFFFFFF.toInt()); textSize = 14f
+                text = "Couldn't load episodes · tap to retry"
+                setOnClickListener { text = "Loading…"; loadSeason(view, s, chips, keepEpisode) }
+            }) {}
+            override fun onBindViewHolder(h: RecyclerView.ViewHolder, p: Int) {}
         }
     }
 

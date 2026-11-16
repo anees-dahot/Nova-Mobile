@@ -125,7 +125,7 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
         if (view == null) return
         val content = sections(data)
         // Nothing from the network (offline, all sources down): Home still shows what's on the device
-        if (content.isEmpty() && tabIndex != 0) return
+        if (content.isEmpty() && tabIndex != 0) { showLoadFailed(); return }
         content.firstOrNull()?.let { featured = it.second.filter { c -> c.backdropUrl != null }.take(6) }
 
         val items = mutableListOf<HomeItem>()
@@ -152,7 +152,7 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
         content.forEach { (title, cards) ->
             items += HomeItem.Row(title, title, cards, browse = genreType?.let { t -> genreIds[title]?.let { t to it } })
         }
-        if (items.isEmpty()) return  // keep skeletons until something arrives
+        if (items.isEmpty()) { showLoadFailed(); return }  // data came back empty: say so instead of endless skeletons
         // No banner (offline): first row would sit under the top bar
         val top = if (items.first() == HomeItem.Hero) 0 else (activity as? MainActivity)?.topBarHeight() ?: 0
         if (rows.paddingTop != top) { rows.clipToPadding = false; rows.setPadding(rows.paddingLeft, top, rows.paddingRight, rows.paddingBottom) }
@@ -194,6 +194,22 @@ class HomeFragment : Fragment(), RowCallbacks, TabPage {
             val h = LocalStore.history().getOrNull(index) ?: return
             PlayerActivity.launch(requireContext(), h.card, h.season, h.episode)
         } else (activity as? MainActivity)?.openDetail(card)
+    }
+
+    override fun onRetry() {
+        adapter.submitList(listOf(HomeItem.Hero) + (1..3).map { HomeItem.Skeleton("sk$it", wide = it == 1 && tabIndex == 0) })
+        viewModel.refresh()
+        // Still nothing once the refresh ends: back to the message
+        viewModel.refreshing.observe(viewLifecycleOwner, object : androidx.lifecycle.Observer<Boolean> {
+            override fun onChanged(value: Boolean) { if (!value) { viewModel.refreshing.removeObserver(this); render() } }
+        })
+    }
+
+    private fun showLoadFailed() {
+        val text = if (offline()) "You're offline\nConnect to the internet, then tap to retry"
+            else "Couldn't load titles\nTap to retry"
+        if (rows.paddingTop != 0) rows.setPadding(rows.paddingLeft, 0, rows.paddingRight, rows.paddingBottom)
+        adapter.submitList(listOf(HomeItem.Message("load_failed", text)))
     }
 
     override fun onRowMore(row: HomeItem.Row) {

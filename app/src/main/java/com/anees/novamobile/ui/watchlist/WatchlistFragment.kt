@@ -62,6 +62,7 @@ class WatchlistFragment : Fragment(), com.anees.novamobile.ui.common.TabPage {
         if (all.isEmpty()) return empty(rows, R.drawable.ic_bookmark, "Nothing saved yet",
             "Tap “My List” on any movie, series or anime to keep it here.")
         val types = all.map { it.type }.distinct()
+        if (filter != null && filter !in types) filter = null   // last of that type removed: show everything again
         if (types.size > 1) rows.addView(HorizontalScrollView(ctx).apply {
             isHorizontalScrollBarEnabled = false; clipToPadding = false; setPadding(px(16), 0, px(16), 0)
             addView(LinearLayout(ctx).apply {

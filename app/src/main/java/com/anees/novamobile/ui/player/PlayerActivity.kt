@@ -306,6 +306,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         }
         resumeOnReturn = false
         saveProgress()
+        finishOfflineIfWatched(); offlineItem = null   // before card changes: the finished copy is the old title's
         card = Gson().fromJson(json, MediaCard::class.java)
         target = null
         seasonEpisodes = emptyList()
@@ -317,6 +318,9 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     private fun startEpisode(s: Int, e: Int) {
         playPressedAt = SystemClock.elapsedRealtime()
+        // Watched-download cleanup must see the episode that was playing, not the one about to start
+        finishOfflineIfWatched(); offlineItem = null
+        savedPickTried = false
         season = s; episode = e
         providers = StreamExtractor.ordered()
         providerIndex = 0
@@ -358,14 +362,16 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         }
 
         offlineItem = null
+        offlineRetries = 0
         streamJob?.cancel()
         extrasJob?.cancel()   // a late answer for the previous episode must not overwrite this one's
         // Downloaded? Play the saved copy: no search, works offline
         val dl = com.anees.novamobile.download.NovaDownloads.get(this, com.anees.novamobile.download.DownloadMeta.id(card, s, e))
         if (dl?.state == androidx.media3.exoplayer.offline.Download.STATE_COMPLETED) { playOffline(dl); return }
         // Still downloading (MovieBox-style "watch while downloading"): play the same file from what's saved,
-        // fetching the rest as needed — starts instantly, no source search. A dead link falls back to streaming.
-        if (dl != null && dl.state != androidx.media3.exoplayer.offline.Download.STATE_FAILED && dl.bytesDownloaded > 8L * 1024 * 1024 && online()) {
+        // fetching the rest as needed — starts instantly, no source search. Offline too: the saved part plays.
+        // A hiccup retries the download's (fresh) link first; only a truly dead copy falls back to streaming.
+        if (dl != null && dl.state != androidx.media3.exoplayer.offline.Download.STATE_FAILED && dl.bytesDownloaded > 8L * 1024 * 1024) {
             Log.i(TAG, "watching while downloading (${dl.percentDownloaded.toInt()}%)"); playOffline(dl); return
         }
         streamJob = lifecycleScope.launch {
@@ -396,7 +402,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private fun sourceLabel(p: StreamExtractor.Provider) = "${p.name}  ·  source ${providers.indexOf(p) + 1} of ${providers.size}"
 
     private suspend fun findSource() {
-        val t = target ?: return
+        val t = target ?: run { showRetry("Couldn't look up this title · check your connection and retry"); return }
         OpenSubs.prefetch(t, repo, subLangs())
         // An instant start gives the search a moment; a race takes longer than the search anyway
         if (providers.any { StreamExtractor.cached(it, t) != null }) OpenSubs.await(t, repo, subLangs(), 1_500)
@@ -525,6 +531,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     /** Watching while it still downloads (label says so; the rest streams in). */
     private var offlinePartial = false
+    /** Times the saved copy was re-opened after a network hiccup before giving up on it. */
+    private var offlineRetries = 0
 
     private fun playOffline(d: androidx.media3.exoplayer.offline.Download) {
         offlinePartial = d.state != androidx.media3.exoplayer.offline.Download.STATE_COMPLETED
@@ -547,6 +555,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             .setMediaMetadata(metadata())
             .build()
         Log.i(TAG, "offline: playing saved download")
+        extrasJob?.cancel()
         extrasJob = lifecycleScope.launch {
             try { target = StreamExtractor.resolveTarget(card, season, episode, repo); loadExtras() }
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
@@ -700,6 +709,21 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         Log.w(TAG, "source failed: $reason")
         // Saved download broken or gone: stream it instead (once), never replay the broken file
         if (offlineItem != null) {
+            if (offlinePartial) {
+                // Watching while downloading: a stall or a dropped/expired link must not throw away the saved copy
+                if (!online()) { player?.currentPosition?.takeIf { it > 0 }?.let { resumeMs = it }; releasePlayer()
+                    showRetry("No connection · the rest plays once you're back online"); return }
+                val dl = com.anees.novamobile.download.NovaDownloads.get(this, com.anees.novamobile.download.DownloadMeta.id(card, season, episode))
+                if (offlineRetries < 2 && dl != null && dl.state != androidx.media3.exoplayer.offline.Download.STATE_FAILED) {
+                    offlineRetries++
+                    player?.currentPosition?.takeIf { it > 0 }?.let { resumeMs = it }
+                    releasePlayer()
+                    loadingLayer.alpha = 1f; loadingLayer.visibility = View.VISIBLE
+                    showStatus("Reconnecting to the download…")
+                    playOffline(dl)
+                    return
+                }
+            }
             offlineItem = null
             usedCache = false
             showStatus("Downloaded copy didn't play · streaming instead")
@@ -765,8 +789,11 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                     if (ep.name.isNotBlank()) { episodeLine = "E$episode  ·  ${ep.name}"; updateTimes() }
                 }
                 val seasons = card.totalSeasons ?: repo.getSeriesDetail(card.id)?.second?.numberOfSeasons ?: season
+                // Episode numbers, not list size (gaps happen); an empty list is a failed fetch, not "last episode"
+                val last = eps.maxOfOrNull { it.episodeNumber }
                 when {
-                    episode < eps.size -> season to episode + 1
+                    last == null -> season to episode + 1
+                    episode < last -> season to episode + 1
                     season < seasons -> season + 1 to 1
                     else -> null
                 }
@@ -816,7 +843,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         // Stream tokens are often locked to the IP family the WebView used (usually IPv6)
         val preferV6 = tokenPrefersV6(s.url)
         val client = com.anees.novamobile.data.api.RetrofitClient.base.newBuilder()   // shares warm connections
-            .dns(object : Dns { override fun lookup(hostname: String) = Dns.SYSTEM.lookup(hostname).sortedBy { if ((it is Inet6Address) == preferV6) 0 else 1 } })
+            .dns(object : Dns { override fun lookup(hostname: String) = com.anees.novamobile.data.api.FastDns.lookup(hostname).sortedBy { if ((it is Inet6Address) == preferV6) 0 else 1 } })
             .build()
         val http = OkHttpDataSource.Factory(client).setUserAgent(s.userAgent).setDefaultRequestProperties(s.headers)
         val dataSource = if (offlineItem != null) com.anees.novamobile.download.NovaDownloads.playbackFactory(this)
@@ -977,10 +1004,15 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         exo.setMediaItem(item, resumeMs)
         exo.setPlaybackSpeed(speed)
         exo.prepare()
-        exo.playWhenReady = !awaitingResumeChoice
+        // Search finished after the user left (Home / lock): load paused, carry on when they come back
+        val visible = inPip || lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+        exo.playWhenReady = !awaitingResumeChoice && visible
+        if (!visible && !awaitingResumeChoice) resumeOnReturn = true
 
         readyTimeout?.cancel()
-        readyTimeout = lifecycleScope.launch { delay(25_000); if (exo.playbackState != Player.STATE_READY) fallback("not ready in 25s") }
+        // Watching while downloading shares the line with the download itself: give it longer
+        val readyMs = if (offlineItem != null && offlinePartial) 60_000L else 25_000L
+        readyTimeout = lifecycleScope.launch { delay(readyMs); if (exo.playbackState != Player.STATE_READY) fallback("not ready in ${readyMs / 1000}s") }
         startTicker()
         Log.i(TAG, if (offlineItem != null) "playing saved download" else "playing via ${providers.getOrNull(providerIndex)?.name}, subs=${subs.size}")
     }
@@ -1241,6 +1273,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 val creditsAt = outro?.first ?: (dur - 20_000)
                 if (next != null && !nextDismissed && pos >= creditsAt && remaining > 0 && nextCard.visibility != View.VISIBLE && !inPip)
                     showNextCard(countdown = settings.autoplayNext)
+                // Seeked back out of the credits: no surprise jump to the next episode
+                else if (nextCard.visibility == View.VISIBLE && pos < creditsAt - 5_000) hideNextCard()
 
                 if (n % 20 == 0) saveProgress()
             }
@@ -1850,6 +1884,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     private fun showStatus(msg: String) {
         loadingBar.visibility = View.VISIBLE
+        retryBtn.visibility = View.GONE; pickSourceBtn.visibility = View.GONE   // working again: no stale error buttons
         statusText.text = msg
     }
 

@@ -19,7 +19,9 @@ import com.anees.novamobile.download.NovaDownloads
 @UnstableApi
 object DownloadUi {
 
-    fun paused(d: Download) = d.state == Download.STATE_STOPPED || d.stopReason != Download.STOP_REASON_NONE
+    // "Pause all" / storage full pause the whole manager: those downloads stay QUEUED, so check that too
+    fun paused(d: Download) = d.state == Download.STATE_STOPPED || d.stopReason != Download.STOP_REASON_NONE ||
+        (d.state == Download.STATE_QUEUED && NovaDownloads.allPaused)
 
     fun ring(d: Download?): ProgressRing.State = when {
         d == null -> ProgressRing.State.IDLE
@@ -42,7 +44,7 @@ object DownloadUi {
     /** One line, never wraps: what's happening right now. */
     fun status(ctx: Context, d: Download): String = when {
         d.state == Download.STATE_COMPLETED -> Formatter.formatShortFileSize(ctx, d.bytesDownloaded)
-        !online(ctx) && !paused(d) -> "Waiting for network · resumes by itself"
+        !online(ctx) && !paused(d) && d.state != Download.STATE_FAILED -> "Waiting for network · resumes by itself"
         !paused(d) && d.state == Download.STATE_QUEUED && notMet(ctx, androidx.media3.exoplayer.scheduler.Requirements.DEVICE_CHARGING) -> "Waiting for the charger"
         !paused(d) && d.state == Download.STATE_QUEUED && notMet(ctx, androidx.media3.exoplayer.scheduler.Requirements.NETWORK_UNMETERED) -> "Waiting for Wi-Fi"
         !paused(d) && d.state == Download.STATE_QUEUED && notMet(ctx, androidx.media3.exoplayer.scheduler.Requirements.DEVICE_STORAGE_NOT_LOW) -> "Phone storage low · free up space"
@@ -72,9 +74,14 @@ object DownloadUi {
             .setMessage("The current copy (${m.quality?.let { "${it}p, " } ?: ""}${size(act, d.bytesDownloaded)}) is deleted, then you pick the new source and quality.")
             .setPositiveButton("Continue") { _, _ ->
                 remove(act, d)
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                // Open the picker only once the old download is really gone: a new one with the same id is skipped otherwise
+                val h = android.os.Handler(android.os.Looper.getMainLooper())
+                var tries = 0
+                h.post(object : Runnable { override fun run() {
+                    if (act.isFinishing || act.isDestroyed) return
+                    if (NovaDownloads.get(act, d.request.id) != null && ++tries < 40) { h.postDelayed(this, 250); return }
                     DownloadSheet.show(act, listOf(com.anees.novamobile.download.DownloadStarter.Item(m.card, m.season, m.episode)), onChange)
-                }, 500)
+                } })
             }
             .setNegativeButton("Cancel", null).show()
     }
@@ -111,6 +118,7 @@ object DownloadUi {
     fun remove(ctx: Context, d: Download, alsoPhone: Boolean = false) {
         if (alsoPhone) com.anees.novamobile.download.PublicExport.removeCopy(ctx, d)
         NovaDownloads.deleteSubtitles(d)
+        com.anees.novamobile.download.DownloadNotifier.clear(ctx, d.request.id)
         DownloadService.sendRemoveDownload(ctx, NovaDownloadService::class.java, d.request.id, false)
     }
 

@@ -68,7 +68,8 @@ class AiringReceiver : BroadcastReceiver() {
         val title = i.getStringExtra("title") ?: return
         val key = i.getStringExtra("key")
         val test = i.getBooleanExtra("test", false)
-        if (!test && key != null && key in LocalStore.notifiedEpisodes()) return     // alarm + catch-up: show once
+        // Alarm + catch-ups (app start, Calendar, boot) can arrive together: claim the key before any async work
+        if (!test && key != null && !LocalStore.claimNotified(key)) return
         val nid = (key ?: "$s:$e:$title").hashCode()
         val done = goAsync()
         CoroutineScope(Dispatchers.Main).launch {
@@ -85,10 +86,15 @@ class AiringReceiver : BroadcastReceiver() {
                     .setContentText(listOfNotNull(if (test) "Test alert — new episodes will look like this" else "S$s · E$e is out", name.takeIf { !test }).joinToString("  ·  "))
                     .setContentIntent(open).setAutoCancel(true)
                     .setCategory(NotificationCompat.CATEGORY_EVENT)
+                    .setOnlyAlertOnce(true)
                     .setPriority(NotificationCompat.PRIORITY_HIGH)
                     .setGroup(NotifyChannels.GROUP_EPISODES)
                     .setColor(com.anees.novamobile.ui.common.Ui.ACCENT)
-                    .addAction(R.drawable.ic_play, "Play", open)
+                    // Tap = show page on that episode; "Play" = straight into the player
+                    .addAction(R.drawable.ic_play, "Play", card?.takeIf { it.id != 0 }?.let {
+                        PendingIntent.getActivity(ctx, nid + 2, com.anees.novamobile.ui.player.PlayerActivity.intent(ctx, it, s, e),
+                            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                    } ?: open)
                 if (card != null && card.id != 0) {
                     // Poster: never let a slow network hold the broadcast (and the alert) hostage
                     withTimeoutOrNull(6_000) { runCatching { NotifyChannels.bitmap(ctx, card.posterUrl, 256) }.getOrNull() }?.let { b.setLargeIcon(it) }
@@ -102,12 +108,12 @@ class AiringReceiver : BroadcastReceiver() {
                     if (!test && LocalStore.settings().smartDownloads) com.anees.novamobile.download.DownloadActionReceiver.queueEpisode(ctx, card, s, e)
                 }
                 val why = blocker(ctx)?.takeIf { it != Blocker.SETTING_OFF || !test }
-                if (why != null) Log.w(TAG, "alert for $title S$s E$e not shown: $why")
+                if (why != null) { Log.w(TAG, "alert for $title S$s E$e not shown: $why")
+                    if (!test && key != null) LocalStore.unmarkNotified(key) }   // notifications allowed later: catch-up can still show it
                 else {
                     try { NotificationManagerCompat.from(ctx).notify(nid, b.build()) }
                     catch (se: SecurityException) { Log.w(TAG, "notify denied", se) }
                 }
-                if (!test && key != null) LocalStore.markNotified(key)
             } finally { done.finish() }
         }
     }

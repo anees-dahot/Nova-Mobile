@@ -255,15 +255,16 @@ class PlayerGestures(
             }
             scale.onTouchEvent(e)
             detector.onTouchEvent(e)
-            if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) finish()
+            if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) finish(e.actionMasked == MotionEvent.ACTION_CANCEL)
             true
         }
     }
 
-    private fun finish() {
+    /** [cancelled]: the system took the touch (notification pull, edge gesture): drop a half-done seek. */
+    private fun finish(cancelled: Boolean = false) {
         if (holding) { holding = false; host.setTempSpeed(null); host.hideHud() }
         when (mode) {
-            Mode.SEEK -> { host.seekTo(seekTo); host.hideHud() }
+            Mode.SEEK -> { if (!cancelled) host.seekTo(seekTo); host.hideHud() }
             Mode.BRIGHTNESS, Mode.VOLUME -> view.postDelayed({ host.hideHud() }, 500)
             Mode.SUBTITLE -> host.moveSubtitles(subTo, done = true)
             Mode.NONE -> {}

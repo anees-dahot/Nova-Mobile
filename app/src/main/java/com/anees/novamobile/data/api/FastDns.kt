@@ -36,17 +36,37 @@ object FastDns : Dns {
     internal var dohLookup: (String) -> List<InetAddress> = ::dohResolve
     internal var now: () -> Long = System::currentTimeMillis
 
+    /** Hosts whose carrier answer led to a failed/forged connection (block page on a public IP): DoH first. */
+    private val preferDoh = ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * A connection to [hostname] failed in a way a carrier DNS block causes (refused, reset, wrong
+     * certificate). Returns true the first time, after switching the host to DoH, so the caller retries once.
+     */
+    fun suspectBlock(hostname: String): Boolean {
+        if (!isName(hostname) || !preferDoh.add(hostname)) return false
+        cache.remove(hostname)
+        return true
+    }
+
+    private fun isName(h: String) = h.contains('.') && !h.all { it.isDigit() || it == '.' || it == ':' }
+
     override fun lookup(hostname: String): List<InetAddress> {
         val t = now()
         cache[hostname]?.let { if (t < it.until) return it.ips.ifEmpty { throw UnknownHostException(hostname) } }
-        val sys = runCatching { system.lookup(hostname) }.getOrDefault(emptyList())
+        if (hostname in preferDoh) runCatching { dohLookup(hostname) }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
+            cache[hostname] = Entry(t + TTL_MS, it); return it
+        }
+        val sysResult = runCatching { system.lookup(hostname) }
+        val sys = sysResult.getOrDefault(emptyList())
         val ips = sys.filterNot { blocked(it) }.ifEmpty {
             // Nothing usable from the ISP resolver: try DoH (skip for local names / raw IPs)
-            if (hostname.contains('.') && !hostname.all { it.isDigit() || it == '.' || it == ':' }) runCatching { dohLookup(hostname) }.getOrDefault(emptyList()) else sys
+            if (isName(hostname)) runCatching { dohLookup(hostname) }.getOrDefault(emptyList()) else sys
         }
         if (ips.isEmpty()) {
             cache[hostname]?.ips?.takeIf { it.isNotEmpty() }?.let { return it }   // stale beats nothing
-            cache[hostname] = Entry(t + FAIL_TTL_MS, emptyList())
+            // Lookup itself threw (offline / network switching): don't remember the failure, retry next call
+            if (sysResult.isSuccess) cache[hostname] = Entry(t + FAIL_TTL_MS, emptyList())
             throw UnknownHostException(hostname)
         }
         val sorted = ips.sortedBy { if (it is Inet4Address) 0 else 1 }

@@ -23,6 +23,8 @@ class NovaApp : Application(), ImageLoaderFactory {
         // Small memory cache + 16-bit bitmaps: posters look the same on a TV, at half the RAM
         .memoryCache { MemoryCache.Builder(this).maxSizePercent(0.12).build() }
         .diskCache { DiskCache.Builder().directory(cacheDir.resolve("img")).maxSizeBytes(80L * 1024 * 1024).build() }
+        // Same DNS as the rest of the app: carriers that block image hosts by DNS still show posters
+        .okHttpClient { com.anees.novamobile.data.api.RetrofitClient.base }
         .allowRgb565(true)
         .crossfade(true)
         .respectCacheHeaders(false)

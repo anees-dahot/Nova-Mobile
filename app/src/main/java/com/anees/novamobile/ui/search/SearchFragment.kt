@@ -104,7 +104,9 @@ class SearchFragment : Fragment(), TabPage {
             title.text = "Searching…"
             val cards = repo.search(q)
             if (cards.isNotEmpty()) cache[q.lowercase()] = cards   // empty is also what a network failure returns
-            showCards(if (cards.isEmpty()) "No results for “$q”" else "Results", cards)
+            val offline = cards.isEmpty() && requireContext().getSystemService(android.net.ConnectivityManager::class.java)?.let { cm ->
+                cm.getNetworkCapabilities(cm.activeNetwork)?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET) != true } == true
+            showCards(when { offline -> "You're offline · connect and search again"; cards.isEmpty() -> "No results for “$q”"; else -> "Results" }, cards)
         }
     }
 

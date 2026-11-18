@@ -65,15 +65,15 @@ object StreamExtractor {
     val RESOLVERS = listOf(
         // HDHub4u: huge Hindi + Hollywood catalogue, 480p→4K with sizes (exact IMDb match), direct files via HubCloud
         Provider("HDHub4u", { "hdhub4u://movie/$it" }, { id, s, e -> "hdhub4u://tv/$id/$s/$e" },
-            timeoutMs = 25_000, multiAudio = true,
+            timeoutMs = 30_000, multiAudio = true,
             resolver = { t -> com.anees.novamobile.data.sources.hub.HubSources.hdHub4u(t) }),
         // MoviesDrive: IMDb-exact, 480p→4K with sizes, direct files via HubCloud
         Provider("MoviesDrive", { "moviesdrive://movie/$it" }, { id, s, e -> "moviesdrive://tv/$id/$s/$e" },
-            timeoutMs = 25_000, multiAudio = true,
+            timeoutMs = 30_000, multiAudio = true,
             resolver = { t -> com.anees.novamobile.data.sources.hub.HubSources.moviesDrive(t) }),
         // 4KHDHub: real releases (WEB-DL/BluRay/REMUX, x265 10-bit, DV/HDR, Hindi+English), direct MKVs via HubCloud
         Provider("4KHDHub", { "4khdhub://movie/$it" }, { id, s, e -> "4khdhub://tv/$id/$s/$e" },
-            timeoutMs = 25_000, multiAudio = true,
+            timeoutMs = 30_000, multiAudio = true,
             resolver = { t -> com.anees.novamobile.data.sources.hub.HubSources.fourKHdHub(t) }),
         // VixSrc over HTTP (API → embed → token-signed master): tagged audio languages, many subtitles, 1080p
         Provider("VixSrc", { "vixsrc://movie/$it" }, { id, s, e -> "vixsrc://tv/$id/$s/$e" },

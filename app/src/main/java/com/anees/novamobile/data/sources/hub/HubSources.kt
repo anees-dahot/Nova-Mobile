@@ -2,6 +2,7 @@ package com.anees.novamobile.data.sources.hub
 
 import android.util.Base64
 import android.util.Log
+import com.anees.novamobile.data.sources.LinkProbe
 import com.anees.novamobile.data.sources.vegamovies.VmHttp
 import com.anees.novamobile.data.sources.vegamovies.matchScore
 import com.anees.novamobile.ui.player.ReleaseInfo
@@ -88,7 +89,7 @@ object HubSources {
         val picks = rels.filter { it.height > 0 }.groupBy { it.height }.map { (_, l) -> l.minBy { it.bytes ?: Long.MAX_VALUE } }
             .ifEmpty { listOf(rels.minBy { it.bytes ?: Long.MAX_VALUE }) }.sortedBy { it.height }.take(4)
         val files = coroutineScope {
-            picks.map { r -> async { withTimeoutOrNull(12_000) { runCatching { hubCloud(resolveRedirect(r.link)) }.getOrNull() }?.let { r to it } } }.awaitAll().filterNotNull()
+            picks.map { r -> async { withTimeoutOrNull(20_000) { runCatching { hubCloud(resolveRedirect(r.link)) }.getOrNull() }?.let { r to it } } }.awaitAll().filterNotNull()
         }
         if (files.isEmpty()) return null
         val options = files.map { (r, f) ->
@@ -143,24 +144,33 @@ object HubSources {
         // Movies: one link per quality heading. Episodes: "E01 | Watch" rows carry no quality — read it from the file
         val rels = if (t.isMovie) anchors.filter { Regex("""(?i)480|720|1080|2160|4K""").containsMatchIn(it.first) && !it.first.contains("zip", true) }
             .map { (l, u) -> Rel(l, u, ReleaseInfo.height(l) ?: 0, sizeOf(l)) }.filter { it.height > 0 }
-            else anchors.filter { !it.second.contains("hubstream") && !it.first.contains("zip", true) }.distinctBy { it.second }
+            else anchors.filter { !it.second.contains("hubstream") && !it.second.contains("hdstream4u") && !it.first.contains("zip", true) }.distinctBy { it.second }
                 .map { (l, u) -> Rel(l, u, ReleaseInfo.height(l) ?: 0, sizeOf(l)) }
-        if (rels.isEmpty()) return null
+        // "WATCH" player (hdstream4u): a multi-quality HLS of the same release, used when the files are dead and kept as a spare
+        val watchUrl = anchors.map { it.second }.firstOrNull { it.contains("hdstream4u") }
         val picks = if (t.isMovie) rels.groupBy { it.height }.map { (_, l) -> l.minBy { it.bytes ?: Long.MAX_VALUE } }.sortedBy { it.height }.take(4) else rels.take(3)
         val pageMeta = ReleaseInfo.parse(best.title)
-        val files = coroutineScope {
-            picks.map { r -> async { withTimeoutOrNull(14_000) { runCatching { hubLink(r.link, h) }.getOrNull() }?.let { r to it } } }.awaitAll().filterNotNull()
+        val (files, watch) = coroutineScope {
+            val w = async { watchUrl?.let { hdStream(it, pageMeta) } }
+            picks.map { r -> async { withTimeoutOrNull(20_000) { runCatching { hubLink(r.link, h) }.getOrNull() }?.let { r to it } } }.awaitAll().filterNotNull() to w.await()
         }
-        if (files.isEmpty()) return null
+        if (files.isEmpty()) return watch?.also { Log.i(TAG, "hdhub4u: files dead, WATCH stream for \"${best.title.take(60)}\"") }
         val options = files.map { (r, f) ->
             val m = (ReleaseInfo.parse("${f.name ?: ""} ${r.label}") ?: StreamMeta()).orElse(pageMeta).copy(server = "HubCloud", bytes = f.bytes ?: r.bytes)
             val height = r.height.takeIf { it > 0 } ?: ReleaseInfo.height(f.name) ?: ReleaseInfo.height(best.title)?.coerceAtMost(1080) ?: 720
             WebStreamSniffer.Sniffed.Option(f.url, height, f.bytes ?: r.bytes, m)
         }.distinctBy { it.height }.sortedBy { it.height }
-        Log.i(TAG, "hdhub4u: \"${best.title.take(60)}\" ${options.joinToString { "${it.height}p" }}")
+        Log.i(TAG, "hdhub4u: \"${best.title.take(60)}\" ${options.joinToString { "${it.height}p" }}${if (watch != null) " + WATCH" else ""}")
         val top = options.lastOrNull { it.height <= 1080 } ?: options.first()
         return WebStreamSniffer.Sniffed(top.url, emptyMap(), UA, emptyList(), height = top.height,
-            options = options.takeIf { it.size > 1 }, meta = top.meta)
+            options = options.takeIf { it.size > 1 }, meta = top.meta, variants = watch?.let { listOf(it) })
+    }
+
+    /** hdstream4u embed (packed JS → jwplayer HLS), only if its playlist answers. */
+    private suspend fun hdStream(url: String, pageMeta: StreamMeta?): WebStreamSniffer.Sniffed? = withTimeoutOrNull(12_000) {
+        val s = runCatching { com.anees.novamobile.ui.player.UniversalExtractor.extract(url, UA) }.getOrNull() ?: return@withTimeoutOrNull null
+        if (!LinkProbe.alive(s.url, s.headers)) return@withTimeoutOrNull null
+        s.copy(meta = (pageMeta ?: StreamMeta()).copy(server = "HDStream"))
     }
 
     // ── MoviesDrive ──────────────────────────────────────────────────────────
@@ -198,7 +208,7 @@ object HubSources {
         val picks = rels.groupBy { it.height }.map { (_, l) -> l.minBy { it.bytes ?: Long.MAX_VALUE } }.sortedBy { it.height }.take(4)
         val pageMeta = ReleaseInfo.parse(hit.optString("post_title"))
         val files = coroutineScope {
-            picks.map { r -> async { withTimeoutOrNull(14_000) { runCatching {
+            picks.map { r -> async { withTimeoutOrNull(20_000) { runCatching {
                 if (r.link.contains("hubcloud")) hubCloud(r.link)
                 else VmHttp.get(r.link, h, 10_000)?.let { Regex("""https?://[^"'\s]*hubcloud[^"'\s]*/drive/[^"'\s]+""").find(it)?.value }?.let { hubCloud(it) }
             }.getOrNull() }?.let { r to it } } }.awaitAll().filterNotNull()
@@ -223,7 +233,7 @@ object HubSources {
             val inner = runCatching { b64(enc) }.getOrNull() ?: return null
             val direct = Regex("""link=(https?://\S+)""").find(inner)?.groupValues?.get(1) ?: inner
             val file = runCatching { java.net.URLDecoder.decode(direct, "UTF-8") }.getOrNull()?.takeIf { it.startsWith("http") } ?: return null
-            return HubFile(file, null, null)
+            return if (LinkProbe.alive(file)) HubFile(file, null, null) else null
         }
         val u = resolveRedirect(url)
         if (u.contains("hubcloud")) return hubCloud(u)
@@ -252,7 +262,11 @@ object HubSources {
 
     data class HubFile(val url: String, val bytes: Long?, val name: String?)
 
-    /** HubCloud drive page → its links page → the best direct file (R2 "FSL", then PixelDrain, then 10Gbps). */
+    /**
+     * HubCloud drive page → its links page → the first direct file that actually answers: R2 "FSL", then PixelDrain,
+     * then 10Gbps. Listed links are often dead (PixelDrain decoys shared by every quality, 10Gbps workers answering
+     * 500), so each is probed; a page with no live link is "no file", and the next quality or source is used.
+     */
     suspend fun hubCloud(url: String): HubFile? {
         if (!url.contains("hubcloud")) return null
         val first = VmHttp.get(url, headers + ("Referer" to url), 10_000) ?: return null
@@ -262,16 +276,19 @@ object HubSources {
         val bytes = sizeOf(doc.select("#size").text())
         val name = doc.title().trim().ifBlank { null }
         val links = doc.select("a[href]").map { it.text().trim() to it.absUrl("href") }
-        val fsl = links.firstOrNull { it.first.contains("FSL") || it.second.contains("r2.cloudflarestorage.com") || it.second.contains("r2.dev") }?.second
-        val pixel = links.firstOrNull { it.second.contains("pixeldrain") }?.second
-            ?.let { u -> Regex("""/u/([A-Za-z0-9]+)""").find(u)?.groupValues?.get(1)?.let { "https://pixeldrain.dev/api/file/$it" } }
-        // 10Gbps: a redirect chain ending at ".../dl.php?link=<direct Google file>"
-        val fast = if (fsl != null || pixel != null) null else links.firstOrNull { it.first.contains("10Gbps", true) }?.second?.let { f ->
+        val fsl = links.filter { it.first.contains("FSL") || it.second.contains("r2.cloudflarestorage.com") || it.second.contains("r2.dev") }.map { it.second }
+        val pixel = links.filter { it.second.contains("pixeldrain") }
+            .mapNotNull { (_, u) -> Regex("""/u/([A-Za-z0-9]+)""").find(u)?.groupValues?.get(1)?.let { "https://pixeldrain.dev/api/file/$it" } }
+        val quick = (fsl + pixel).distinct().take(4)
+        // Probed together; the first live one in preference order wins
+        val live = coroutineScope { quick.map { u -> async { u.takeIf { LinkProbe.alive(it) } } }.awaitAll() }.firstOrNull { it != null }
+        if (live != null) return HubFile(live, bytes, name)
+        // 10Gbps: a redirect chain ending at ".../dl.php?link=<direct Google file>" (only walked when the rest are dead)
+        val fast = links.firstOrNull { it.first.contains("10Gbps", true) }?.second?.let { f ->
             val final = redirectTarget(f, next) ?: return@let null
             final.substringAfter("link=", "").takeIf { it.startsWith("http") }?.let { java.net.URLDecoder.decode(it, "UTF-8") } ?: final.takeIf { !it.contains("hubcloud") }
-        }
-        val file = fsl ?: pixel ?: fast ?: return null
-        return HubFile(file, bytes, name)
+        }?.takeIf { LinkProbe.alive(it) } ?: return null
+        return HubFile(fast, bytes, name)
     }
 
     /** Walks redirects (bodies never read) until one carries "link=" or the chain ends; the last URL. */

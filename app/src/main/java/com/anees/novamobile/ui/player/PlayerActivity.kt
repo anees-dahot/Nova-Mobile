@@ -116,6 +116,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private val langSources = mutableListOf<Triple<StreamExtractor.Provider, WebStreamSniffer.Sniffed, List<String>>>()
     private var langJob: kotlinx.coroutines.Job? = null
     private var usedCache = false
+    /** The playing source was chosen by hand (Sources page / Source list): if it dies, say so and reopen the page instead of switching silently. */
+    private var userPicked = false
     /** Sources already searched for this episode, so later waves don't repeat them. */
     private val raced = mutableSetOf<StreamExtractor.Provider>()
     private var resumeMs = 0L
@@ -318,6 +320,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     private fun startEpisode(s: Int, e: Int) {
         playPressedAt = SystemClock.elapsedRealtime()
+        userPicked = false
         // Watched-download cleanup must see the episode that was playing, not the one about to start
         finishOfflineIfWatched(); offlineItem = null
         savedPickTried = false
@@ -739,6 +742,18 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         }
         val t = target
         val p = providers.getOrNull(providerIndex)
+        // A source picked by hand is dead (error, or stuck at 0 B): say which, and hand the choice back
+        if (userPicked && t != null && p != null) {
+            userPicked = false
+            StreamExtractor.forget(p, t)
+            LocalStore.reportProvider(p.name, false)
+            player?.currentPosition?.takeIf { it > 0 }?.let { resumeMs = it }
+            readyTimeout?.cancel()
+            releasePlayer()
+            showRetry("${p.name} isn't working right now · pick another source")
+            serverSheet()
+            return
+        }
         if (t != null && p != null) {
             StreamExtractor.forget(p, t)
             if (!usedCache) { LocalStore.reportProvider(p.name, false); providerIndex++ }
@@ -755,6 +770,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         }
         usedCache = false
         switchSource(providerIndex)
+        if (p != null) showStatus("${p.name} isn't working · trying the next source")
     }
 
     /** Stop the current stream and search again from source [index], keeping the position. */
@@ -1152,7 +1168,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         unlockBtn.setOnClickListener { setLocked(false) }
         skipBtn.setOnClickListener { skip() }
         retryBtn.setOnClickListener { startEpisode(season, episode) }
-        pickSourceBtn.setOnClickListener { sourceSheet() }
+        pickSourceBtn.setOnClickListener { serverSheet() }
         findViewById<View>(R.id.next_play).setOnClickListener { playNext() }
         findViewById<View>(R.id.next_dismiss).setOnClickListener { nextDismissed = true; hideNextCard() }
         drawerScrim.setOnClickListener { closeDrawer() }
@@ -1818,8 +1834,9 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val movie = card.type == MediaType.MOVIE || t.isMovie
         com.anees.novamobile.ui.sources.SourcesPage(this, card, season, episode, com.anees.novamobile.ui.sources.SourcesPage.Mode.STREAM,
             expected, playingUrl = current?.url) { pick ->
-            if (pick == null) return@SourcesPage   // Auto: keep what plays; the next search goes by your settings
+            if (pick == null) { userPicked = false; return@SourcesPage }   // Auto: keep what plays; the next search goes by your settings
             usedCache = false
+            userPicked = true
             val (name, v) = StreamExtractor.splitPick(pick.provider)
             val p = providers.firstOrNull { it.name == name } ?: return@SourcesPage
             val s = pick.stream?.let { StreamExtractor.variant(it, null) } ?: StreamExtractor.cached(p, t)?.let { StreamExtractor.variant(it, v) }
@@ -1834,7 +1851,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             val ms = LocalStore.providerSpeed(p.name)
             ActionSheet.Item(p.name + (if (ms > 0) "  ·  ~${(ms + 500) / 1000}s" else "") + (if (p.multiAudio) "  ·  multi-audio" else ""),
                 checked = i == providerIndex && player != null) {
-                if (i != providerIndex || player == null) { usedCache = false; switchSource(i) }
+                if (i != providerIndex || player == null) { usedCache = false; userPicked = true; switchSource(i) }
             }
         }, subtitle = "If a stream stutters or lacks your language, try another")
     }

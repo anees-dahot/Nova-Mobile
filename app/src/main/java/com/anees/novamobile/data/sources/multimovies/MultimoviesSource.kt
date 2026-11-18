@@ -235,8 +235,9 @@ object MultimoviesSource {
 
     /** One fetch of the playlist: token-locked or dead links (403, HTML error page) are dropped here. */
     private suspend fun playable(url: String, referer: String): Boolean {
-        if (!url.contains("m3u8", ignoreCase = true)) return true    // mp4: the player's own retry covers it
         val h = headers + ("Referer" to referer)
+        // mp4: one ranged fetch (a dead file played as is sat at 0 B forever)
+        if (!url.contains("m3u8", ignoreCase = true)) return com.anees.novamobile.data.sources.LinkProbe.alive(url, mapOf("Referer" to referer))
         var playlist = url
         var body = VmHttp.get(playlist, h, 6_000) ?: return false
         if (!body.trimStart().startsWith("#EXTM3U")) return false

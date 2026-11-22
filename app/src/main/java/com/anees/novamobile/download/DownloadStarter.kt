@@ -323,7 +323,7 @@ object DownloadStarter {
                 .ifEmpty {
                     val dir = File(NovaDownloads.dir, "subs").apply { mkdirs() }
                     val langs = listOfNotNull(LocalStore.subtitleFor("${item.card.type}:${item.card.id}")?.takeIf { it != "off" }, "en").distinct()
-                    runCatching { com.anees.novamobile.ui.player.OpenSubs.await(target, repo, langs, 8_000) }.getOrDefault(emptyList()).take(3).mapIndexedNotNull { i, sub ->
+                    runCatching { com.anees.novamobile.ui.player.OpenSubs.await(target, repo, langs, 15_000) }.getOrDefault(emptyList()).take(3).mapIndexedNotNull { i, sub ->
                         val out = File(dir, "${id.hashCode()}_os$i.vtt")
                         withContext(Dispatchers.IO) { SubtitleCleaner.saveTo(ctx, sub.url, RetrofitClient.base, emptyMap(), out) }
                             .takeIf { it }?.let { out.absolutePath to sub.lang }

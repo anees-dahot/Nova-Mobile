@@ -352,7 +352,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         loadingLayer.alpha = 1f
 
         val saved = LocalStore.historyFor(card)
-        resumeMs = if (saved != null && saved.season == s && saved.episode == e && saved.positionMs > 30_000 && saved.progress < 0.95f)
+        resumeMs = if (saved != null && (card.type == MediaType.MOVIE || (saved.season == s && saved.episode == e)) && saved.positionMs > 30_000 && saved.progress < 0.95f)
             saved.positionMs else 0L
 
         // Ask Resume / Start Over while the source search runs in the background (no extra wait)
@@ -369,7 +369,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         streamJob?.cancel()
         extrasJob?.cancel()   // a late answer for the previous episode must not overwrite this one's
         // Downloaded? Play the saved copy: no search, works offline
-        val dl = com.anees.novamobile.download.NovaDownloads.get(this, com.anees.novamobile.download.DownloadMeta.id(card, s, e))
+        val dl = savedDownload(s, e)
         if (dl?.state == androidx.media3.exoplayer.offline.Download.STATE_COMPLETED) { playOffline(dl); return }
         // Still downloading (MovieBox-style "watch while downloading"): play the same file from what's saved,
         // fetching the rest as needed — starts instantly, no source search. Offline too: the saved part plays.
@@ -542,29 +542,86 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val meta = com.anees.novamobile.download.DownloadMeta.of(d)
         val paths = meta?.subtitles ?: listOfNotNull(meta?.subtitle)
         val langs = meta?.subtitleLangs
-        val subs = paths.mapIndexedNotNull { i, path ->
-            val f = java.io.File(path)
-            if (!f.exists()) return@mapIndexedNotNull null
-            SubtitleCleaner.fixFile(f)
-            val lang = langs?.getOrNull(i)?.takeIf { it.isNotBlank() } ?: if (i == 0) "en" else null
-            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(f)).setMimeType(MimeTypes.TEXT_VTT)
-                .setId("nsub:$i")
-                .setLanguage(lang)
-                .setLabel(lang?.let { Locale(it).displayLanguage } ?: "Subtitles ${i + 1}").build()
-        }
+        val saved = paths.mapIndexed { i, path -> java.io.File(path) to langs?.getOrNull(i) }.filter { it.first.exists() && it.first.length() > 20 }
+            // None saved with it: ones found on an earlier play
+            .ifEmpty { com.anees.novamobile.download.NovaDownloads.lateSubtitles(d.request.id).map { it.first to it.second } }
+        val subs = offlineSubConfigs(saved)
         offlineSubFiles = subs.mapIndexedNotNull { i, c -> c.id?.let { id -> Triple(id, c.label, java.io.File(c.uri.path ?: return@mapIndexedNotNull null)) } }
         offlineItem = d.request.toMediaItem().buildUpon()
             .setSubtitleConfigurations(subs)
             .setMediaMetadata(metadata())
             .build()
-        Log.i(TAG, "offline: playing saved download")
+        Log.i(TAG, "offline: playing saved download (${subs.size} subtitle files)")
         extrasJob?.cancel()
         extrasJob = lifecycleScope.launch {
-            try { target = StreamExtractor.resolveTarget(card, season, episode, repo); loadExtras() }
+            try {
+                target = StreamExtractor.resolveTarget(card, season, episode, repo)
+                // Saved without subtitles (source had none, OpenSubtitles was slow): look again now, keep what's found
+                if (subs.isEmpty() && online()) target?.let { addLateSubs(d.request.id, it) }
+                loadExtras()
+            }
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
             catch (e: Exception) { Log.w(TAG, "offline extras failed: ${e.message}") }
         }
         play(WebStreamSniffer.Sniffed(d.request.uri.toString(), emptyMap(), "", emptyList()), bypassProxy = false)
+    }
+
+    private fun offlineSubConfigs(files: List<Pair<java.io.File, String?>>): List<MediaItem.SubtitleConfiguration> =
+        files.mapIndexedNotNull { i, (f, l) ->
+            if (!f.exists()) return@mapIndexedNotNull null
+            SubtitleCleaner.fixFile(f)
+            val lang = l?.takeIf { it.isNotBlank() } ?: if (i == 0) "en" else null
+            MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(f)).setMimeType(MimeTypes.TEXT_VTT)
+                .setId("nsub:$i")
+                .setLanguage(lang)
+                .setLabel(lang?.let { Locale(it).displayLanguage } ?: "Subtitles ${i + 1}").build()
+        }
+
+    /** OpenSubtitles for a saved copy that has none: saved beside the download, added to the playing item in place. */
+    private suspend fun addLateSubs(dlId: String, t: StreamExtractor.Target) {
+        val langs = listOfNotNull(LocalStore.subtitleFor(key())?.takeIf { it != "off" }, "en").distinct()
+        val found = runCatching { OpenSubs.await(t, repo, langs, 20_000) }.getOrDefault(emptyList()).take(3)
+        if (found.isEmpty()) { Log.i(TAG, "offline: no subtitles found online either"); return }
+        val files = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            found.mapIndexedNotNull { i, sub ->
+                val out = com.anees.novamobile.download.NovaDownloads.lateSubtitleFile(dlId, i, sub.lang)
+                if (SubtitleCleaner.saveTo(this@PlayerActivity, sub.url, com.anees.novamobile.data.api.RetrofitClient.base, emptyMap(), out)) out to sub.lang else null
+            }
+        }
+        val p = player ?: return
+        val item = offlineItem ?: return
+        if (files.isEmpty()) return
+        val subs = offlineSubConfigs(files.map { it.first to it.second })
+        offlineSubFiles = subs.mapIndexedNotNull { i, c -> c.id?.let { id -> Triple(id, c.label, java.io.File(c.uri.path ?: return@mapIndexedNotNull null)) } }
+        val updated = item.buildUpon().setSubtitleConfigurations(subs).build()
+        offlineItem = updated
+        val pos = p.currentPosition
+        p.setMediaItem(updated, pos)   // local file: re-opens in a blink, keeps the position
+        p.prepare()
+        offlineSubFiles.forEach { (id, label, f) -> subSync.register(id, label, { f }) }
+        applyTrackPrefs(p)
+        Log.i(TAG, "offline: added ${subs.size} subtitle files from OpenSubtitles")
+    }
+
+    /**
+     * The saved copy of this title, if any. Movies are saved as 0/0, but some screens (Detail's Play,
+     * history from older versions) open them as 1/1: try both. Opened from another catalog (another id):
+     * match by TMDB / IMDb id.
+     */
+    private fun savedDownload(s: Int, e: Int): androidx.media3.exoplayer.offline.Download? {
+        val nd = com.anees.novamobile.download.NovaDownloads
+        val dm = com.anees.novamobile.download.DownloadMeta
+        val movie = card.type == MediaType.MOVIE
+        val ids = (if (movie) listOf(dm.id(card, 0, 0), dm.id(card, s, e)) else listOf(dm.id(card, s, e))).distinct()
+        val direct = ids.mapNotNull { nd.get(this, it) }
+        direct.firstOrNull { it.state != androidx.media3.exoplayer.offline.Download.STATE_FAILED }?.let { return it }
+        fun same(c: com.anees.novamobile.data.model.MediaCard) = c.type == card.type &&
+            ((card.tmdbId != null && c.tmdbId == card.tmdbId) || (!card.imdbId.isNullOrBlank() && c.imdbId == card.imdbId))
+        val other = nd.all(this).firstOrNull { d ->
+            d.state != androidx.media3.exoplayer.offline.Download.STATE_FAILED &&
+                dm.of(d)?.let { m -> same(m.card) && (movie || (m.season == s && m.episode == e)) } == true
+        }
+        return other ?: direct.firstOrNull()
     }
 
     /** "…/api/robot-proxy?url=https://origin/…" → "origin". */
@@ -716,7 +773,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 // Watching while downloading: a stall or a dropped/expired link must not throw away the saved copy
                 if (!online()) { player?.currentPosition?.takeIf { it > 0 }?.let { resumeMs = it }; releasePlayer()
                     showRetry("No connection · the rest plays once you're back online"); return }
-                val dl = com.anees.novamobile.download.NovaDownloads.get(this, com.anees.novamobile.download.DownloadMeta.id(card, season, episode))
+                val dl = savedDownload(season, episode)
                 if (offlineRetries < 2 && dl != null && dl.state != androidx.media3.exoplayer.offline.Download.STATE_FAILED) {
                     offlineRetries++
                     player?.currentPosition?.takeIf { it > 0 }?.let { resumeMs = it }

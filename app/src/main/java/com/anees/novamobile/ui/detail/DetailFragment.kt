@@ -67,7 +67,11 @@ class DetailFragment : Fragment() {
         updatePlayLabel()
         updateListLabel()
 
-        playBtn.setOnClickListener { PlayerActivity.launch(requireContext(), card, season, episode) }
+        playBtn.setOnClickListener {
+            // Movies are saved as 0/0: open them the same way so a downloaded copy is found
+            if (card.type == MediaType.MOVIE) PlayerActivity.launch(requireContext(), card, 0, 0)
+            else PlayerActivity.launch(requireContext(), card, season, episode)
+        }
         // Every stream from every source, grouped by cut and quality; the pick plays and sticks to the title
         view.findViewById<TextView>(R.id.detail_sources).apply {
             val d = compoundDrawablesRelative[0]?.mutate()?.apply { val px = (18 * resources.displayMetrics.density).toInt(); setBounds(0, 0, px, px) }

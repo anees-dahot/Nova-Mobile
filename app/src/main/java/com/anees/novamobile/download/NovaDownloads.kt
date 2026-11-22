@@ -529,14 +529,27 @@ object NovaDownloads {
     fun deleteSubtitles(d: Download) {
         val m = DownloadMeta.of(d) ?: return
         (m.subtitles.orEmpty() + listOfNotNull(m.subtitle)).distinct().forEach { runCatching { File(it).delete() } }
+        lateSubtitles(d.request.id).forEach { runCatching { it.first.delete() } }
     }
+
+    /**
+     * Subtitles found after the download finished (the source and OpenSubtitles had none at the time):
+     * "<id hash>_late<i>_<lang>.vtt" next to the others. Kept with the download, deleted with it.
+     */
+    fun lateSubtitleFile(id: String, i: Int, lang: String) = File(File(dir, "subs").apply { mkdirs() }, "${id.hashCode()}_late${i}_$lang.vtt")
+    fun lateSubtitles(id: String): List<Pair<File, String>> = runCatching {
+        val prefix = "${id.hashCode()}_late"
+        File(dir, "subs").listFiles()?.filter { it.name.startsWith(prefix) && it.name.endsWith(".vtt") && it.length() > 20 }
+            ?.sortedBy { it.name }?.map { it to it.name.removeSuffix(".vtt").substringAfterLast('_') }.orEmpty()
+    }.getOrDefault(emptyList())
 
     fun clearStorageFull(ctx: Context) { storageFull = false; manager(ctx).resumeDownloads() }
 
     fun retry(ctx: Context, d: Download) { LocalStore.setDlAttempts(d.request.id, 0); manager(ctx).addDownload(d.request) }
 
     private fun cleanOrphans(ctx: Context) {
-        val keep = all(ctx).flatMap { d -> DownloadMeta.of(d)?.let { it.subtitles.orEmpty() + listOfNotNull(it.subtitle) }.orEmpty() }.toSet()
+        val keep = all(ctx).flatMap { d -> DownloadMeta.of(d)?.let { it.subtitles.orEmpty() + listOfNotNull(it.subtitle) }.orEmpty() +
+            lateSubtitles(d.request.id).map { it.first.absolutePath } }.toSet()
         val old = System.currentTimeMillis() - 3_600_000   // files from a download being set up right now are kept
         File(dir, "subs").listFiles()?.filter { it.absolutePath !in keep && it.lastModified() < old }?.forEach { it.delete() }
     }

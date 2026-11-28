@@ -16,6 +16,7 @@ import android.graphics.Outline
 import android.graphics.Rect
 import android.graphics.drawable.Icon
 import android.net.Uri
+import android.widget.Toast
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -134,6 +135,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private var loudness: android.media.audiofx.LoudnessEnhancer? = null
     private var boost = 0
     private var audioPicked = false
+    /** Saved copy's built-in subtitles were checked once (they match the file; downloaded ones may be another cut). */
+    private var textPicked = false
     private var nextPrefetched = false
     private var syncedWatched = false
     private var playPressedAt = 0L
@@ -539,13 +542,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
 
     private fun playOffline(d: androidx.media3.exoplayer.offline.Download) {
         offlinePartial = d.state != androidx.media3.exoplayer.offline.Download.STATE_COMPLETED
-        val meta = com.anees.novamobile.download.DownloadMeta.of(d)
-        val paths = meta?.subtitles ?: listOfNotNull(meta?.subtitle)
-        val langs = meta?.subtitleLangs
-        val saved = paths.mapIndexed { i, path -> java.io.File(path) to langs?.getOrNull(i) }.filter { it.first.exists() && it.first.length() > 20 }
-            // None saved with it: ones found on an earlier play
-            .ifEmpty { com.anees.novamobile.download.NovaDownloads.lateSubtitles(d.request.id).map { it.first to it.second } }
-        val subs = offlineSubConfigs(saved)
+        offlineDlId = d.request.id
+        val subs = offlineSubConfigs(savedSubs(d.request.id))
         offlineSubFiles = subs.mapIndexedNotNull { i, c -> c.id?.let { id -> Triple(id, c.label, java.io.File(c.uri.path ?: return@mapIndexedNotNull null)) } }
         offlineItem = d.request.toMediaItem().buildUpon()
             .setSubtitleConfigurations(subs)
@@ -558,12 +556,72 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 target = StreamExtractor.resolveTarget(card, season, episode, repo)
                 // Saved without subtitles (source had none, OpenSubtitles was slow): look again now, keep what's found
                 if (subs.isEmpty() && online()) target?.let { addLateSubs(d.request.id, it) }
+                // Not matched to this file's audio yet (downloaded before, or still running): do it now, swap in when done
+                if (!offlinePartial && !com.anees.novamobile.download.SubAligner.done(this@PlayerActivity, d.request.id)) {
+                    val id = d.request.id
+                    com.anees.novamobile.download.SubAligner.enqueue(this@PlayerActivity, id) { changed ->
+                        if (changed && !isDestroyed && offlineDlId == id) reloadOfflineSubs()
+                    }
+                }
                 loadExtras()
             }
             catch (e: kotlinx.coroutines.CancellationException) { throw e }
             catch (e: Exception) { Log.w(TAG, "offline extras failed: ${e.message}") }
         }
         play(WebStreamSniffer.Sniffed(d.request.uri.toString(), emptyMap(), "", emptyList()), bypassProxy = false)
+    }
+
+    /** Download being played (offline), for its subtitle files. */
+    private var offlineDlId: String? = null
+
+    /** Every subtitle file kept with download [id]: saved with it, then any found or picked later. */
+    private fun savedSubs(id: String): List<Pair<java.io.File, String?>> {
+        val meta = com.anees.novamobile.download.NovaDownloads.get(this, id)?.let { com.anees.novamobile.download.DownloadMeta.of(it) }
+        val paths = meta?.subtitles ?: listOfNotNull(meta?.subtitle)
+        val langs = meta?.subtitleLangs
+        return (paths.mapIndexed { i, path -> java.io.File(path) to langs?.getOrNull(i) } +
+            com.anees.novamobile.download.NovaDownloads.lateSubtitles(id).map { it.first to it.second })
+            .filter { it.first.exists() && it.first.length() > 20 }.distinctBy { it.first.absolutePath }
+    }
+
+    /** Subtitle files changed on disk (matched to the audio, or picked): re-open the saved copy in place with them. */
+    private fun reloadOfflineSubs(select: java.io.File? = null) {
+        val p = player ?: return
+        val item = offlineItem ?: return
+        val id = offlineDlId ?: return
+        val files = savedSubs(id)
+        val subs = offlineSubConfigs(files)
+        offlineSubFiles = subs.mapIndexedNotNull { _, c -> c.id?.let { sid -> Triple(sid, c.label, java.io.File(c.uri.path ?: return@mapIndexedNotNull null)) } }
+        val updated = item.buildUpon().setSubtitleConfigurations(subs).build()
+        offlineItem = updated
+        val pos = p.currentPosition
+        val playing = p.playWhenReady
+        subSync.attach(p)
+        offlineSubFiles.forEach { (sid, label, f) -> subSync.register(sid, label, { f }) }
+        p.setMediaItem(updated, pos)
+        p.prepare()
+        p.playWhenReady = playing
+        subSync.set(0)   // the file itself is timed now; a manual shift on top would undo it
+        val want = select?.let { f -> subs.firstOrNull { it.uri.path == f.absolutePath }?.id }
+        if (want == null) applyTrackPrefs(p) else selectTextWhenReady(p, want)
+    }
+
+    /** Selects the subtitle track whose id ends with [idSuffix] once the re-opened item lists it. */
+    private fun selectTextWhenReady(p: Player, idSuffix: String) {
+        val want = idSuffix
+        p.addListener(object : Player.Listener {
+            override fun onTracksChanged(tracks: Tracks) {
+                for (g in tracks.groups) if (g.type == C.TRACK_TYPE_TEXT) for (i in 0 until g.length) {
+                    if (g.getTrackFormat(i).id?.endsWith(want) == true) {
+                        p.removeListener(this)
+                        p.trackSelectionParameters = p.trackSelectionParameters.buildUpon()
+                            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                            .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
+                        return
+                    }
+                }
+            }
+        })
     }
 
     private fun offlineSubConfigs(files: List<Pair<java.io.File, String?>>): List<MediaItem.SubtitleConfiguration> =
@@ -577,11 +635,42 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 .setLabel(lang?.let { Locale(it).displayLanguage } ?: "Subtitles ${i + 1}").build()
         }
 
+    private fun embeddedText(tracks: Tracks) = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }.flatMap { g ->
+        (0 until g.length).filter { g.isTrackSupported(it) && g.getTrackFormat(it).id?.contains("nsub:") != true }.map { g to it }
+    }
+
+    /**
+     * A downloaded file (MKV) with its own subtitles: show those, not the separately saved file. Built-in
+     * ones are timed to this exact release; the saved file may come from another cut and drift out of sync.
+     */
+    private fun pickEmbeddedSubs(exo: ExoPlayer, tracks: Tracks, langOf: (Format) -> String?) {
+        val text = tracks.groups.filter { it.type == C.TRACK_TYPE_TEXT }
+        if (text.isEmpty()) return
+        textPicked = true
+        text.forEach { g -> (0 until g.length).forEach { i -> val f = g.getTrackFormat(i)
+            Log.i(TAG, "text track: id=${f.id} lang=${f.language} label=${f.label} mime=${f.sampleMimeType} forced=${f.selectionFlags and C.SELECTION_FLAG_FORCED != 0} ok=${g.isTrackSupported(i)}") } }
+        val sub = LocalStore.subtitleFor(key())
+        if (sub == "off" || (sub == null && !settings.subtitlesOn)) return
+        val want = sub ?: "en"
+        fun forced(f: Format) = f.selectionFlags and C.SELECTION_FLAG_FORCED != 0 || f.label?.contains("forced", true) == true
+        val embedded = embeddedText(tracks).filterNot { (g, i) -> forced(g.getTrackFormat(i)) }
+        // Your language; an untagged track counts as English when English is wanted. Plain before SDH.
+        val pick = (embedded.filter { (g, i) -> langOf(g.getTrackFormat(i)) == want }
+            .ifEmpty { if (want == "en") embedded.filter { (g, i) -> g.getTrackFormat(i).language.isNullOrBlank() } else emptyList() })
+            .sortedBy { (g, i) -> if (g.getTrackFormat(i).label?.contains("sdh", true) == true) 1 else 0 }
+            .firstOrNull() ?: return
+        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+            .setOverrideForType(TrackSelectionOverride(pick.first.mediaTrackGroup, pick.second)).build()
+        Log.i(TAG, "subtitles → built-in ${pick.first.getTrackFormat(pick.second).label ?: want}")
+    }
+
     /** OpenSubtitles for a saved copy that has none: saved beside the download, added to the playing item in place. */
     private suspend fun addLateSubs(dlId: String, t: StreamExtractor.Target) {
         val langs = listOfNotNull(LocalStore.subtitleFor(key())?.takeIf { it != "off" }, "en").distinct()
         val found = runCatching { OpenSubs.await(t, repo, langs, 20_000) }.getOrDefault(emptyList()).take(3)
         if (found.isEmpty()) { Log.i(TAG, "offline: no subtitles found online either"); return }
+        // The file brought its own (MKV): those match it, no need for others
+        if (player?.let { embeddedText(it.currentTracks).isNotEmpty() } == true) { Log.i(TAG, "offline: file has built-in subtitles"); return }
         val files = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             found.mapIndexedNotNull { i, sub ->
                 val out = com.anees.novamobile.download.NovaDownloads.lateSubtitleFile(dlId, i, sub.lang)
@@ -978,6 +1067,8 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                     .setAudioProcessors(arrayOf(delay))
                     .build()
         }.setEnableDecoderFallback(true)
+            // FFmpeg audio (AC3, E-AC3, DTS, TrueHD) when the phone has no decoder for it: MKV downloads often carry Dolby/DTS
+            .setExtensionRendererMode(androidx.media3.exoplayer.DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         val exo = ExoPlayer.Builder(this, renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))
             .setLoadControl(loadControl)
@@ -989,6 +1080,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
             .build()
         player = exo
         audioPicked = false
+        textPicked = false
         playerView.player = exo
         subSync.attach(exo)
         if (offlineItem != null) offlineSubFiles.forEach { (id, label, f) -> subSync.register(id, label, { f }) }
@@ -1055,19 +1147,22 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 val langs = audio.flatMap { g -> (0 until g.length).mapNotNull { langOf(g.getTrackFormat(it)) } }.distinct()
                 if (langs.isNotEmpty()) LocalStore.setAudioLangs(key(), langs)
 
+                if (!textPicked && offlineItem != null) pickEmbeddedSubs(exo, tracks, ::langOf)
+
                 // Sources like VidLux name tracks ("Hindi") without a language code, so match by name once
                 if (audioPicked || audio.isEmpty()) return
                 audioPicked = true
                 val want = wantedLang() ?: return   // nothing picked for this title: the stream's default track
                 val selected = audio.firstOrNull { it.isSelected }?.let { g -> (0 until g.length).firstOrNull { g.isTrackSelected(it) }?.let { langOf(g.getTrackFormat(it)) } }
                 if (selected == want) return
-                for (g in audio) for (i in 0 until g.length) {
-                    if (langOf(g.getTrackFormat(i)) == want) {
-                        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
-                            .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
-                        Log.i(TAG, "audio → ${g.getTrackFormat(i).label ?: want}")
-                        return
-                    }
+                // A track this phone can play first: forcing one it can't decode (AC3 on some phones) fails the whole file
+                val matches = audio.flatMap { g -> (0 until g.length).filter { langOf(g.getTrackFormat(it)) == want }.map { g to it } }
+                    .sortedByDescending { (g, i) -> g.isTrackSupported(i) }
+                matches.firstOrNull()?.let { (g, i) ->
+                    exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                        .setOverrideForType(TrackSelectionOverride(g.mediaTrackGroup, i)).build()
+                    Log.i(TAG, "audio → ${g.getTrackFormat(i).label ?: want} (supported=${g.isTrackSupported(i)})")
+                    return
                 }
                 // No automatic source switching for a missing dub: other sources stay one tap away (⋯ → Source)
                 Log.i(TAG, "${com.anees.novamobile.data.model.LangTags.name(want) ?: want} not in this stream; playing available audio")
@@ -1676,6 +1771,7 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 }
             }
         }
+        if (target != null) items += ActionSheet.Item("Find other subtitles…") { findSubsSheet() }
         items += ActionSheet.Item("Sync", header = true)
         items += ActionSheet.Item("Subtitle timing  ·  ${syncLabel(subSync.offsetMs)}") { syncSheet(subtitles = true) }
         items += ActionSheet.Item("Audio timing  ·  ${syncLabel(audioDelayMs)}") { syncSheet(subtitles = false) }
@@ -1686,6 +1782,85 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
                 LocalStore.saveSettings(LocalStore.settings().copy(subtitleBottom = 0.08f)); styleSubtitles()
             }
         ActionSheet.show(this, "Audio & Subtitles", items, subtitle = "Drag the subtitles up or down to move them.")
+    }
+
+    private fun say(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    /** Downloaded and complete: subtitles can be timed to its audio. */
+    private fun matchableDownload(): String? = offlineDlId?.takeIf { offlineItem != null && !offlinePartial }
+
+    /** Every OpenSubtitles version for this title; picking one swaps it in (timed to the audio for downloads). */
+    private fun findSubsSheet() {
+        val t = target ?: return
+        val dl = matchableDownload()
+        if (!online()) { if (dl != null) autoMatch(dl) else say("Needs an internet connection"); return }
+        val want = LocalStore.subtitleFor(key())?.takeIf { it != "off" } ?: "en"
+        say("Looking for subtitles…")
+        lifecycleScope.launch {
+            val list = runCatching { OpenSubs.versions(t, repo, listOf(want, "en").distinct()) }.getOrDefault(emptyList())
+            if (isDestroyed) return@launch
+            if (list.isEmpty() && dl == null) { say("No other subtitles found"); return@launch }
+            val items = mutableListOf<ActionSheet.Item>()
+            if (dl != null) items += ActionSheet.Item("Best match for this audio  ·  automatic") { autoMatch(dl) }
+            list.take(40).forEach { v ->
+                val name = com.anees.novamobile.data.model.LangTags.name(v.lang) ?: v.lang
+                items += ActionSheet.Item("$name  ·  ${v.release.ifBlank { "Unnamed" }.take(70)}${if (v.hearingImpaired) "  ·  SDH" else ""}  ·  ${v.downloads} downloads") { useVersion(v) }
+            }
+            ActionSheet.show(this@PlayerActivity, "Other subtitles", items,
+                subtitle = if (dl != null) "The one you pick is timed to this download's audio."
+                else "Pick the one named like your source; fine-tune with Subtitle timing.")
+        }
+    }
+
+    /** Scores every version against the download's audio and keeps the best, shifted into place. */
+    private fun autoMatch(dl: String) {
+        say("Matching subtitles to the audio… this can take a minute")
+        lifecycleScope.launch {
+            val changed = runCatching {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.anees.novamobile.download.SubAligner.ensure(this@PlayerActivity, dl, force = true) }
+            }.getOrDefault(false)
+            if (isDestroyed || offlineDlId != dl) return@launch
+            if (changed) { reloadOfflineSubs(); say("Subtitles matched to the audio") } else say("These subtitles already fit best")
+        }
+    }
+
+    private fun useVersion(v: OpenSubs.Version) {
+        say("Getting subtitles…")
+        lifecycleScope.launch {
+            val raw = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { SubtitleCleaner.cleaned(this@PlayerActivity, v.url, com.anees.novamobile.data.api.RetrofitClient.base, emptyMap()) }.getOrNull()
+            }
+            if (isDestroyed) return@launch
+            if (raw == null || raw.length() < 20) { say("Couldn't get those subtitles"); return@launch }
+            LocalStore.setSubtitleFor(key(), v.lang)
+            rememberSubsOn(true)
+            val dl = matchableDownload()
+            if (dl != null) {
+                val out = com.anees.novamobile.download.NovaDownloads.lateSubtitleFile(dl, 7, v.lang)
+                say("Timing them to the audio…")
+                val timed = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching { com.anees.novamobile.download.SubAligner.alignInto(this@PlayerActivity, dl, raw, out) }.getOrDefault(false)
+                        .also { if (!it) raw.copyTo(out, overwrite = true) }
+                }
+                if (isDestroyed || offlineDlId != dl) return@launch
+                reloadOfflineSubs(select = out)
+                if (!timed) say("Couldn't read the audio; use Subtitle timing if they're off")
+                return@launch
+            }
+            // Streaming: added to the playing item
+            val p = player ?: return@launch
+            val cur = p.currentMediaItem ?: return@launch
+            val id = "nsub:pick${System.currentTimeMillis() % 100000}"
+            val label = "${com.anees.novamobile.data.model.LangTags.name(v.lang) ?: v.lang} · picked"
+            val conf = MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(raw)).setMimeType(MimeTypes.TEXT_VTT)
+                .setId(id).setLanguage(v.lang).setLabel(label).build()
+            val configs = cur.localConfiguration?.subtitleConfigurations.orEmpty() + conf
+            val pos = p.currentPosition
+            p.setMediaItem(cur.buildUpon().setSubtitleConfigurations(configs).build(), pos)
+            p.prepare()
+            subSync.register(id, label) { raw }
+            selectTextWhenReady(p, id)
+        }
     }
 
     private fun subtitleSizeSheet() {

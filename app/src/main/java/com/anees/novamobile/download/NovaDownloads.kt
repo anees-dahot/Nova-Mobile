@@ -282,7 +282,7 @@ object NovaDownloads {
                     // A finished file that's clearly too small is broken, not a download
                     if (d.bytesDownloaded < 2L * 1024 * 1024) { Log.w(TAG, "$id too small, removed"); dm.removeDownload(id); return }
                     DownloadNotifier.done(ctx, d)
-                    PublicExport.enqueue(ctx, id)
+                    SubAligner.enqueue(ctx, id) { PublicExport.enqueue(ctx, id) }   // subtitles timed to this file's own audio first, then the phone copy carries them
                 }
                 Download.STATE_FAILED -> handleFailure(dm, d, finalException)
                 else -> {}
@@ -530,6 +530,7 @@ object NovaDownloads {
         val m = DownloadMeta.of(d) ?: return
         (m.subtitles.orEmpty() + listOfNotNull(m.subtitle)).distinct().forEach { runCatching { File(it).delete() } }
         lateSubtitles(d.request.id).forEach { runCatching { it.first.delete() } }
+        runCatching { File(File(dir, "subs"), "${d.request.id.hashCode()}.speech").delete() }
     }
 
     /**
@@ -549,7 +550,7 @@ object NovaDownloads {
 
     private fun cleanOrphans(ctx: Context) {
         val keep = all(ctx).flatMap { d -> DownloadMeta.of(d)?.let { it.subtitles.orEmpty() + listOfNotNull(it.subtitle) }.orEmpty() +
-            lateSubtitles(d.request.id).map { it.first.absolutePath } }.toSet()
+            lateSubtitles(d.request.id).map { it.first.absolutePath } + File(File(dir, "subs"), "${d.request.id.hashCode()}.speech").absolutePath }.toSet()
         val old = System.currentTimeMillis() - 3_600_000   // files from a download being set up right now are kept
         File(dir, "subs").listFiles()?.filter { it.absolutePath !in keep && it.lastModified() < old }?.forEach { it.delete() }
     }

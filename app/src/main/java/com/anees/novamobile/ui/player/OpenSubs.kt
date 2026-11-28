@@ -53,12 +53,33 @@ object OpenSubs {
     suspend fun await(t: StreamExtractor.Target, repo: MediaRepository, langs: List<String>, timeoutMs: Long): List<Sub> =
         withTimeoutOrNull(timeoutMs) { prefetch(t, repo, langs).await() } ?: ready(t)
 
-    private suspend fun imdbOf(t: StreamExtractor.Target, repo: MediaRepository): String? =
-        t.imdbId ?: if (t.isMovie) repo.getMovieDetail(t.tmdbId)?.imdbId
-        else repo.getSeriesDetail(t.tmdbId)?.second?.externalIds?.imdbId
+    /** One subtitle file on OpenSubtitles, with what it was made for. */
+    data class Version(val url: String, val lang: String, val release: String, val downloads: Long, val hearingImpaired: Boolean)
 
-    private suspend fun search(t: StreamExtractor.Target, repo: MediaRepository, langs: List<String>): List<Sub> {
-        val imdb = imdbOf(t, repo)?.removePrefix("tt")?.trimStart('0') ?: return emptyList()
+    private val versionCache = HashMap<String, List<Version>>()
+
+    /**
+     * Every version for [t] in [langs], most downloaded first (hearing-impaired after plain). Different
+     * releases are timed differently; [com.anees.novamobile.download.SubAligner] picks the one that fits.
+     */
+    suspend fun versions(t: StreamExtractor.Target, repo: MediaRepository, langs: List<String>): List<Version> {
+        val k = key(t) + langs.joinToString(",")
+        synchronized(versionCache) { versionCache[k] }?.let { return it }
+        val arr = query(t, repo, langs) ?: return emptyList()
+        val list = (0 until arr.length()).map { arr.getJSONObject(it) }
+            .filter { it.optString("SubFormat") == "srt" && it.optString("SubDownloadLink").isNotBlank() }
+            .map { Version(it.optString("SubDownloadLink"), it.optString("ISO639"),
+                it.optString("MovieReleaseName").ifBlank { it.optString("SubFileName") }.trim(),
+                it.optString("SubDownloadsCnt").toLongOrNull() ?: 0, it.optString("SubHearingImpaired") == "1") }
+            .distinctBy { it.url }
+            .sortedWith(compareBy<Version> { langs.indexOf(it.lang).let { i -> if (i < 0) 99 else i } }
+                .thenBy { it.hearingImpaired }.thenByDescending { it.downloads })
+        synchronized(versionCache) { versionCache[k] = list }
+        return list
+    }
+
+    private suspend fun query(t: StreamExtractor.Target, repo: MediaRepository, langs: List<String>): JSONArray? {
+        val imdb = imdbOf(t, repo)?.removePrefix("tt")?.trimStart('0') ?: return null
         val codes = langs.distinct().mapNotNull { ISO3[it] }.ifEmpty { listOf("eng") }
         val path = buildString {
             if (!t.isMovie) append("/episode-${t.episode}")
@@ -72,8 +93,16 @@ object OpenSubs {
                 if (!it.isSuccessful) throw java.io.IOException("HTTP ${it.code}")
                 it.body?.string()
             }
-        } ?: return emptyList()
-        val arr = JSONArray(body)
+        } ?: return null
+        return JSONArray(body)
+    }
+
+    private suspend fun imdbOf(t: StreamExtractor.Target, repo: MediaRepository): String? =
+        t.imdbId ?: if (t.isMovie) repo.getMovieDetail(t.tmdbId)?.imdbId
+        else repo.getSeriesDetail(t.tmdbId)?.second?.externalIds?.imdbId
+
+    private suspend fun search(t: StreamExtractor.Target, repo: MediaRepository, langs: List<String>): List<Sub> {
+        val arr = query(t, repo, langs) ?: return emptyList()
         val all = (0 until arr.length()).map { arr.getJSONObject(it) }
             .filter { it.optString("SubFormat") == "srt" && it.optString("SubDownloadLink").isNotBlank() }
         // Per language: the most downloaded file, hearing-impaired versions last

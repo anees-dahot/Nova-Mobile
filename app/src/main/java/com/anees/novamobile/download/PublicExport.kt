@@ -613,7 +613,7 @@ object PublicExport {
      * preferred audio language; an MP4 holds one audio track per Transformer export, so [audio] is
      * false when only the video is wanted and [video] is false for the extra audio-only passes.
      */
-    private fun assetLoader(ctx: Context, m: DownloadMeta, pick: String?, video: Boolean, audio: Boolean): androidx.media3.transformer.AssetLoader.Factory {
+    internal fun assetLoader(ctx: Context, m: DownloadMeta, pick: String?, video: Boolean, audio: Boolean): androidx.media3.transformer.AssetLoader.Factory {
         val lang = pick ?: DownloadStarter.audioFor(m.card)?.takeIf { it != "orig" }
         // Sources tag audio tracks inconsistently ("en" vs "eng"), and the selector only matches
         // the strings it is given. Offer both spellings so every language can actually be picked.

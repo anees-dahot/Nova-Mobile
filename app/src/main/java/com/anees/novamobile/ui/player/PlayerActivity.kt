@@ -652,6 +652,17 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
         val sub = LocalStore.subtitleFor(key())
         if (sub == "off" || (sub == null && !settings.subtitlesOn)) return
         val want = sub ?: "en"
+        // Matched to this file's audio already: that saved file beats the built-in track
+        if (offlineDlId?.let { com.anees.novamobile.download.SubAligner.done(this, it) } == true) {
+            val ext = text.flatMap { g -> (0 until g.length).filter { g.getTrackFormat(it).id?.contains("nsub:") == true }.map { g to it } }
+                .firstOrNull { (g, i) -> langOf(g.getTrackFormat(i)) == want }
+            if (ext != null) {
+                exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .setOverrideForType(TrackSelectionOverride(ext.first.mediaTrackGroup, ext.second)).build()
+                Log.i(TAG, "subtitles → matched file ${ext.first.getTrackFormat(ext.second).id}")
+                return
+            }
+        }
         fun forced(f: Format) = f.selectionFlags and C.SELECTION_FLAG_FORCED != 0 || f.label?.contains("forced", true) == true
         val embedded = embeddedText(tracks).filterNot { (g, i) -> forced(g.getTrackFormat(i)) }
         // Your language; an untagged track counts as English when English is wanted. Plain before SDH.
@@ -1816,11 +1827,17 @@ class PlayerActivity : AppCompatActivity(), PlayerGestures.Host {
     private fun autoMatch(dl: String) {
         say("Matching subtitles to the audio… this can take a minute")
         lifecycleScope.launch {
-            val changed = runCatching {
+            val r = runCatching {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.anees.novamobile.download.SubAligner.ensure(this@PlayerActivity, dl, force = true) }
-            }.getOrDefault(false)
+            }.onFailure { Log.w(TAG, "subtitle match failed", it) }.getOrNull()
             if (isDestroyed || offlineDlId != dl) return@launch
-            if (changed) { reloadOfflineSubs(); say("Subtitles matched to the audio") } else say("These subtitles already fit best")
+            when (r?.outcome) {
+                com.anees.novamobile.download.SubAligner.Outcome.CHANGED -> { reloadOfflineSubs(select = r.file); say("Subtitles matched to the audio") }
+                com.anees.novamobile.download.SubAligner.Outcome.ALREADY_GOOD -> { if (r.file != null) reloadOfflineSubs(select = r.file); say("These subtitles already fit the audio best") }
+                com.anees.novamobile.download.SubAligner.Outcome.NO_SUBTITLES -> say("No subtitles in this language to match")
+                com.anees.novamobile.download.SubAligner.Outcome.NO_AUDIO -> say("Couldn't read this file's audio")
+                else -> say("Couldn't match subtitles")
+            }
         }
     }
 

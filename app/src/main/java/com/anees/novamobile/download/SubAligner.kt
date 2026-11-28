@@ -7,8 +7,6 @@ import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.BaseAudioProcessor
-import androidx.media3.common.audio.ChannelMixingAudioProcessor
-import androidx.media3.common.audio.ChannelMixingMatrix
 import androidx.media3.common.audio.SonicAudioProcessor
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.transformer.Composition
@@ -57,16 +55,16 @@ object SubAligner {
     /** Shifts tried: up to 5 minutes either way. */
     private const val MAX_LAG = 5 * 60 * 1000 / FRAME_MS
     /** Bump when the method changes, so finished downloads are matched again. */
-    private const val VERSION = 1
+    private const val VERSION = 3
     private val SCALES = doubleArrayOf(1.0, 25 / 23.976, 23.976 / 25, 24 / 23.976, 23.976 / 24, 25.0 / 24, 24.0 / 25)
 
     private val lock = Mutex()
     private val repo by lazy { MediaRepository() }
 
     /** How well a subtitle lines up: [score] after moving it by [scale]·t + [offsetMs]; [base] as it was. */
-    class Fit(val score: Double, val scale: Double, val offsetMs: Long, val base: Double) {
+    class Fit(val score: Double, val scale: Double, val offsetMs: Long, val base: Double, val confident: Boolean = false, val peak: Double = 0.0) {
         val moved get() = scale != 1.0 || offsetMs != 0L
-        override fun toString() = "score %.3f (was %.3f), shift %+d ms, stretch %.4f".format(score, base, offsetMs, scale)
+        override fun toString() = "score %.3f (was %.3f), shift %+d ms, stretch %.4f, peak %.2f%s".format(score, base, offsetMs, scale, peak, if (confident) "" else " (unsure)")
     }
 
     private fun prefs(ctx: Context) = ctx.applicationContext.getSharedPreferences("sub_align", Context.MODE_PRIVATE)
@@ -77,21 +75,25 @@ object SubAligner {
     fun enqueue(ctx: Context, id: String, then: (changed: Boolean) -> Unit = {}) {
         val app = ctx.applicationContext
         GlobalScope.launch(Dispatchers.IO) {
-            val changed = runCatching { withTimeoutOrNull(20 * 60_000L) { ensure(app, id) } == true }.onFailure { Log.w(TAG, "subtitle match $id failed", it) }.getOrDefault(false)
+            val changed = runCatching { withTimeoutOrNull(20 * 60_000L) { ensure(app, id) }?.outcome == Outcome.CHANGED }.onFailure { Log.w(TAG, "subtitle match $id failed", it) }.getOrDefault(false)
             withContext(Dispatchers.Main) { then(changed) }
         }
     }
 
+    /** What a match run did. [file] is your language's subtitle afterwards, when there is one. */
+    enum class Outcome { CHANGED, ALREADY_GOOD, NO_AUDIO, NO_SUBTITLES, SKIPPED }
+    class Result(val outcome: Outcome, val file: File? = null)
+
     /**
-     * Picks and times the subtitles of download [id] once. Returns true when files changed (the player
-     * reloads them). [force] runs again even when it was done before.
+     * Picks and times the subtitles of download [id] once: saved files, the file's own (MKV) subtitles and
+     * OpenSubtitles versions all compete. [force] runs again even when it was done before.
      */
-    suspend fun ensure(ctx: Context, id: String, force: Boolean = false): Boolean = lock.withLock {
-        if (!force && done(ctx, id)) return false
-        val d = NovaDownloads.get(ctx, id)?.takeIf { it.state == Download.STATE_COMPLETED } ?: return false
-        val meta = DownloadMeta.of(d) ?: return false
+    suspend fun ensure(ctx: Context, id: String, force: Boolean = false): Result = lock.withLock {
+        if (!force && done(ctx, id)) return Result(Outcome.SKIPPED)
+        val d = NovaDownloads.get(ctx, id)?.takeIf { it.state == Download.STATE_COMPLETED } ?: return Result(Outcome.SKIPPED)
+        val meta = DownloadMeta.of(d) ?: return Result(Outcome.SKIPPED)
         val speech = speech(ctx, d)
-        if (speech == null) { prefs(ctx).edit().putInt(id, VERSION).apply(); return false }
+        if (speech == null) { prefs(ctx).edit().putInt(id, VERSION).apply(); return Result(Outcome.NO_AUDIO) }
 
         val saved = (meta.subtitles ?: listOfNotNull(meta.subtitle)).mapIndexed { i, p -> File(p) to (meta.subtitleLangs?.getOrNull(i) ?: "") } +
             NovaDownloads.lateSubtitles(id)
@@ -101,28 +103,45 @@ object SubAligner {
 
         // Your language: every version we have or can find competes, the best one is kept
         val mine = files.filter { it.second == want || (it.second.isBlank() && want == "en") }
-        val online = runCatching {
+        val builtIn = runCatching { EmbeddedSubs.extract(ctx, d, want) }
+            .onFailure { Log.w(TAG, "built-in subtitles of $id unreadable: ${it.message}") }.getOrDefault(emptyList())
+            .map { it to "built-in ${it.name}" }
+        // Subtitles that came with the video (the source's, or built into the file) are made for it: they are kept,
+        // and only moved when the audio says so clearly. OpenSubtitles is asked only when the video brought none.
+        val withVideo = mine.map { it.first to it.first.name } + builtIn
+        val online = if (withVideo.isNotEmpty()) emptyList() else runCatching {
             val t = StreamExtractor.resolveTarget(meta.card, meta.season, meta.episode, repo) ?: return@runCatching emptyList()
             withTimeoutOrNull(30_000) { OpenSubs.versions(t, repo, listOf(want)) }.orEmpty()
                 .filter { it.lang == want }.take(6)
                 .mapNotNull { v -> runCatching { SubtitleCleaner.cleaned(ctx, v.url, RetrofitClient.base, emptyMap()) }.getOrNull()?.let { it to v.release } }
         }.getOrDefault(emptyList())
-        val candidates = mine.map { it.first to it.first.name } + online
-        val best = bestOf(speech, candidates.map { it.first })
+        val candidates = withVideo + online
+        val scored = candidates.mapNotNull { (f, name) -> read(f)?.let { c -> Triple(f, c, fit(speech, c)).also { Log.i(TAG, "subtitles $id  $name: ${it.third}") } } }
+        // A sure match wins; with none, the video's own subtitle (or the most downloaded one) as it is
+        val best = scored.filter { it.third.confident }.maxByOrNull { it.third.score }
+            ?: scored.firstOrNull()?.let { (f, c, fit) -> Triple(f, c, Fit(fit.base, 1.0, 0, fit.base)) }
+        var out: File? = mine.firstOrNull()?.first
         if (best != null) {
             val (src, cues, fit) = best
-            Log.i(TAG, "subtitles $id: best of ${candidates.size} is ${candidates.firstOrNull { it.first == src }?.second}: $fit")
-            val out = mine.firstOrNull()?.first ?: NovaDownloads.lateSubtitleFile(id, 0, want)
-            if (src != out || fit.moved) { writeVtt(out, apply(cues, fit)); changed = true }
+            Log.i(TAG, "subtitles $id: using ${candidates.firstOrNull { it.first == src }?.second}: $fit")
+            val fromFile = builtIn.any { it.first == src }
+            if (fromFile && !fit.moved) {
+                out = null   // the file's own track is right as it is: the player keeps showing it
+            } else {
+                val target = out ?: NovaDownloads.lateSubtitleFile(id, 0, want)
+                if (src != target || fit.moved) { writeVtt(target, apply(cues, fit)); changed = true }
+                out = target
+            }
         }
+        builtIn.forEach { runCatching { it.first.delete() } }
         // Other languages: each one moved into place
         files.filter { it !in mine }.forEach { (f, _) ->
             val cues = read(f) ?: return@forEach
             val fit = fit(speech, cues)
-            if (fit.moved) { writeVtt(f, apply(cues, fit)); changed = true; Log.i(TAG, "subtitles $id ${f.name}: $fit") }
+            if (fit.moved && fit.confident) { writeVtt(f, apply(cues, fit)); changed = true; Log.i(TAG, "subtitles $id ${f.name}: $fit") }
         }
         prefs(ctx).edit().putInt(id, VERSION).apply()
-        changed
+        Result(when { changed -> Outcome.CHANGED; best == null -> Outcome.NO_SUBTITLES; else -> Outcome.ALREADY_GOOD }, out)
     }
 
     /** Times [src] to download [id]'s audio and saves it as [out]. False when the audio can't be read. */
@@ -132,7 +151,7 @@ object SubAligner {
         val speech = speech(ctx, d) ?: return false
         val fit = fit(speech, cues)
         Log.i(TAG, "subtitles $id picked ${src.name}: $fit")
-        writeVtt(out, apply(cues, fit))
+        writeVtt(out, if (fit.confident) apply(cues, fit) else cues)
         true
     }
 
@@ -192,13 +211,23 @@ object SubAligner {
             fft(re, im, true)
             val stretchPenalty = if (scale == 1.0) 0.0 else 0.004
             if (scale == 1.0) base = re[0] / n
-            for (lag in -MAX_LAG..MAX_LAG) {
-                val v = re[if (lag >= 0) lag else m + lag] / n - stretchPenalty
-                if (v > best.score) best = Fit(v, scale, lag.toLong() * FRAME_MS, 0.0)
+            val lags = DoubleArray(2 * MAX_LAG + 1) { re[(it - MAX_LAG).let { l -> if (l >= 0) l else m + l }] / n }
+            var bi = 0
+            for (i in lags.indices) if (lags[i] > lags[bi]) bi = i
+            val v = lags[bi] - stretchPenalty
+            if (v > best.score) {
+                // A real match is one sharp peak: well above every other shift (more than 3 s away) and not at the edge
+                var second = Double.NEGATIVE_INFINITY
+                for (i in lags.indices) if (kotlin.math.abs(i - bi) > 60 && lags[i] > second) second = lags[i]
+                val median = lags.sortedArray()[lags.size / 2]
+                val peak = (lags[bi] - second) / (lags[bi] - median).coerceAtLeast(1e-9)
+                val edge = kotlin.math.abs(bi - MAX_LAG) > MAX_LAG - 40
+                best = Fit(v, scale, (bi - MAX_LAG).toLong() * FRAME_MS, 0.0, confident = peak >= 0.25 && !edge, peak = peak)
             }
         }
-        // Small gains are noise: an already-right subtitle is left alone
-        return if (best.score - base < 0.01) Fit(base, 1.0, 0, base) else Fit(best.score, best.scale, best.offsetMs, base)
+        // Small gains, or no clear peak, are noise: the subtitle is left as it is
+        return if (!best.confident || best.score - base < 0.01) Fit(base, 1.0, 0, base, best.confident && best.score - base < 0.01, best.peak)
+        else Fit(best.score, best.scale, best.offsetMs, base, true, best.peak)
     }
 
     private fun fft(re: DoubleArray, im: DoubleArray, inverse: Boolean) {
@@ -267,7 +296,6 @@ object SubAligner {
         val out = File(ctx.cacheDir, "speech_${d.request.id.hashCode()}.m4a").apply { delete() }
         val started = System.currentTimeMillis()
         val ok = suspendCancellableCoroutine { cont ->
-            val mixer = ChannelMixingAudioProcessor().apply { for (c in 1..8) putChannelMixingMatrix(ChannelMixingMatrix.createForConstantGain(c, 1)) }
             val sonic = SonicAudioProcessor().apply { setOutputSampleRateHz(16_000) }
             lateinit var transformer: Transformer
             var finished = false
@@ -283,7 +311,7 @@ object SubAligner {
                 })
                 .build()
             val item = EditedMediaItem.Builder(d.request.toMediaItem()).setRemoveVideo(true)
-                .setEffects(Effects(listOf<AudioProcessor>(tap, mixer, sonic), emptyList())).build()
+                .setEffects(Effects(listOf<AudioProcessor>(tap, sonic), emptyList())).build()
             runCatching { transformer.start(item, out.absolutePath) }.onFailure { Log.w(TAG, "speech map: ${it.message}"); finish(false) }
             cont.invokeOnCancellation { Handler(Looper.getMainLooper()).post { runCatching { transformer.cancel() } } }
         }
@@ -311,30 +339,33 @@ object SubAligner {
             val dt = 1.0 / rate
             hpA = 1.0 / (2 * PI * 150 * dt + 1)
             val rc = 1.0 / (2 * PI * 3400); lpA = dt / (rc + dt)
-            return input
+            return AudioProcessor.AudioFormat(input.sampleRate, 1, C.ENCODING_PCM_16BIT)
         }
 
         override fun queueInput(inputBuffer: ByteBuffer) {
             val size = inputBuffer.remaining()
             if (size == 0) return
-            if (frames.size < MAX_FRAMES) {
-                val b = inputBuffer.duplicate().order(ByteOrder.nativeOrder())
-                val bytes = if (float) 4 else 2
-                val samples = size / (bytes * channels)
-                for (s in 0 until samples) {
-                    var v = 0.0
-                    for (c in 0 until channels) v += if (float) b.float.toDouble() else b.short / 32768.0
-                    v /= channels
-                    val hp = hpA * (hpPrevOut + v - hpPrevIn); hpPrevIn = v; hpPrevOut = hp
-                    lp += lpA * (hp - lp)
-                    sum += lp * lp
-                    if (++count >= perFrame) {
-                        frames += (sum / count).toFloat(); sum = 0.0; count = 0
-                        if (frames.size == MAX_FRAMES) { onFull?.invoke(); break }
-                    }
+            val b = inputBuffer.order(ByteOrder.nativeOrder())
+            val bytes = if (float) 4 else 2
+            val samples = size / (bytes * channels)
+            // Output is mono 16-bit: cheap to encode, and any channel layout (3.0, 5.1, 7.1) works
+            val out = replaceOutputBuffer(samples * 2).order(ByteOrder.nativeOrder())
+            for (s in 0 until samples) {
+                var v = 0.0
+                for (c in 0 until channels) v += if (float) b.float.toDouble() else b.short / 32768.0
+                v /= channels
+                out.putShort((v.coerceIn(-1.0, 1.0) * 32767).toInt().toShort())
+                if (frames.size >= MAX_FRAMES) continue
+                val hp = hpA * (hpPrevOut + v - hpPrevIn); hpPrevIn = v; hpPrevOut = hp
+                lp += lpA * (hp - lp)
+                sum += lp * lp
+                if (++count >= perFrame) {
+                    frames += (sum / count).toFloat(); sum = 0.0; count = 0
+                    if (frames.size == MAX_FRAMES) onFull?.invoke()
                 }
             }
-            replaceOutputBuffer(size).put(inputBuffer).flip()
+            inputBuffer.position(inputBuffer.limit())
+            out.flip()
         }
     }
 }

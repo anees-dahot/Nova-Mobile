@@ -58,4 +58,12 @@ class SubAlignerTest {
         val speech = speechFor(good, 1.0, 0)
         assertTrue(SubAligner.fit(speech, good).score > SubAligner.fit(speech, other).score + 0.1)
     }
+
+    @Test fun unrelatedAudioLeavesSubtitleAlone() {
+        val c = cues()
+        val noise = FloatArray(45 * 60_000 / 50) { if (rnd.nextDouble() < 0.5) 1f else -1f }
+        val fit = SubAligner.fit(noise, c)
+        assertFalse(fit.moved)
+        assertFalse(fit.confident)
+    }
 }
